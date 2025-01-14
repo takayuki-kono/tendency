@@ -1,0 +1,9 @@
+env/
+myenv/
+.env/
+
+*.jpg
+*.png
+*.jpeg
+*.keras
+*.tflite
