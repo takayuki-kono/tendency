@@ -19,10 +19,16 @@ PREPROCESSED_VALIDATION_DIR = 'preprocessed/validation'
 # 10 0.72 0.55
 #  0 0.72 0.47
 # 15 0.72 0.44
-ROTATION_RANGE = 10
+ROTATION_RANGE = 20
 # 要調整
-# 2 0.69 0.63
-BATCH_SIZE = 32
+# 2  0.72
+# 4  0.74
+# 6  0.72
+# 7  0.76
+# 8  0.79
+# 12 0.7
+# 16 0.73
+BATCH_SIZE = 8
 
 # 画像サイズ設定
 # 要調整
@@ -71,10 +77,10 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                     if face_image is not None and face_image.size > 0:
                         # **グレースケール変換**
                         gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
-                        # **エッジ検出**
+                        # # **エッジ検出**
                         edges = cv2.Canny(gray, 100, 200)
                         # **リサイズ**
-                        face_image_resized = cv2.resize(edges, (img_size, img_size))
+                        face_image_resized = cv2.resize(gray, (img_size, img_size))
 
                         output_path = os.path.join(category_output_dir, filename)
                         cv2.imwrite(output_path, face_image_resized)
@@ -102,7 +108,14 @@ def create_cnn_model():
         layers.Dense(2, activation='softmax')
     ])
 
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    # model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    from tensorflow.keras.optimizers import Adam
+    # 要調整
+    # 0.002 0.78
+    model.compile(optimizer=Adam(learning_rate=0.001),  # 学習率を0.001に設定
+                  loss='sparse_categorical_crossentropy',
+                  metrics=['accuracy'])
+
     return model
 
 cnn_model = create_cnn_model()
@@ -113,7 +126,7 @@ train_datagen = ImageDataGenerator(
     # # 0.95 1.05
     # # 0.7  1.3  0.77 0.65
     # # 0.95  1.05  0.77 0.65
-    # brightness_range=[1, 1],  # 明るさを 0.7～1.3 倍に変化
+    # brightness_range=[0.5, 2],  # 明るさを 0.7～1.3 倍に変化
     # # contrast_stretching=True,  # コントラストを変化させる
     # rotation_range=ROTATION_RANGE,  # 回転
     # width_shift_range=0.2,  # 横方向のずれ
@@ -134,7 +147,7 @@ validation_generator = validation_datagen.flow_from_directory(
 # **CNN の訓練**
 try:
     model_checkpoint = ModelCheckpoint('best_model.keras', monitor='val_accuracy', save_best_only=True)
-    early_stopping = EarlyStopping(monitor='val_loss', patience=10)
+    early_stopping = EarlyStopping(monitor='val_loss', patience=5)
 
     history = cnn_model.fit(
         train_generator,
