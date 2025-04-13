@@ -7,3 +7,5 @@ myenv/
 *.jpeg
 *.keras
 *.tflite
+*.webp
+*.avif
