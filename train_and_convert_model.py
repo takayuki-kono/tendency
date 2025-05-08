@@ -25,13 +25,13 @@ PREPROCESSED_TRAIN_DIR = 'preprocessed/train'
 PREPROCESSED_VALIDATION_DIR = 'preprocessed/validation'
 
 # 設定
-ROTATION_RANGE = 10
+ROTATION_RANGE = 5
 BATCH_SIZE = 16
 img_size = 112
 TARGET_NOSE_X = img_size / 2  # 鼻の目標x座標（56）
 TARGET_NOSE_Y = img_size / 2  # 鼻の目標y座標（56）
-X_DIFF_THRESHOLD = 0.2 * img_size / 2  # 5% of image width (6.16px)
-Y_DIFF_THRESHOLD = 0.2 * img_size / 2  # 5% of image height (6.16px)
+# X_DIFF_THRESHOLD = 0.2 * img_size / 2  # 5% of image width (11.2px)
+Y_DIFF_THRESHOLD = 0.25 * img_size / 2  # 5% of image height (11.2px)
 
 RIGHT_EYE_LANDMARKS = [7, 33, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
 LEFT_EYE_LANDMARKS = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
@@ -47,7 +47,7 @@ mp_face_mesh = mp.solutions.face_mesh
 face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# 顔画像の切り抜き + 輪郭チェック + 移動 + 回転 + y座標乖離チェック + グレースケール変換
+# 顔画像の切り抜き + 頬-鼻距離チェック + 移動 + 回転 + y座標乖離チェック + グレースケール変換
 def preprocess_and_cut_faces(input_dir, output_dir):
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
@@ -102,20 +102,28 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                         right_contour = (landmarks[RIGHT_CONTOUR_INDEX].x * width, landmarks[RIGHT_CONTOUR_INDEX].y * height)
                         left_contour = (landmarks[LEFT_CONTOUR_INDEX].x * width, landmarks[LEFT_CONTOUR_INDEX].y * height)
                         
-                        # 1. 輪郭チェック：鼻と輪郭のx座標差の差
+                        # 頬-鼻距離チェック：鼻と右ほほ、鼻と左ほほのユークリッド距離
                         nose_x = nose[0] * img_size / width
+                        nose_y = nose[1] * img_size / height
                         right_contour_x = right_contour[0] * img_size / width
+                        right_contour_y = right_contour[1] * img_size / height
                         left_contour_x = left_contour[0] * img_size / width
-                        diff_right = abs(nose_x - right_contour_x)
-                        diff_left = abs(nose_x - left_contour_x)
-                        diff_of_diffs = abs(diff_right - diff_left)
+                        left_contour_y = left_contour[1] * img_size / height
+                        dist_right = math.sqrt((nose_x - right_contour_x)**2 + (nose_y - right_contour_y)**2)
+                        dist_left = math.sqrt((nose_x - left_contour_x)**2 + (nose_y - left_contour_y)**2)
                         
-                        if diff_of_diffs >= X_DIFF_THRESHOLD:
-                            # print(f"Skipping {filename} due to large contour x-diff difference (Diff: {diff_of_diffs:.1f})")
-                            # logging.info(f"Skipping {filename} due to large contour x-diff difference (Diff: {diff_of_diffs:.1f})")
+                        if dist_right > 0:  # ゼロ除算防止
+                            ratio = dist_left / dist_right
+                            if not (0.75 <= ratio <= 1.25):
+                                print(f"Skipping {filename} due to cheek-nose distance imbalance (Right: {dist_right:.1f}, Left: {dist_left:.1f}, Ratio: {ratio:.3f})")
+                                logging.info(f"Skipping {filename} due to cheek-nose distance imbalance (Right: {dist_right:.1f}, Left: {dist_left:.1f}, Ratio: {ratio:.3f})")
+                                continue
+                        else:
+                            print(f"Skipping {filename} due to zero right cheek-nose distance")
+                            logging.info(f"Skipping {filename} due to zero right cheek-nose distance")
                             continue
                         
-                        # 2. 移動：鼻のx=56, y=56に
+                        # 移動：鼻のx=56, y=56に
                         shift_x = (TARGET_NOSE_X * width / img_size) - nose[0]
                         shift_y = (TARGET_NOSE_Y * height / img_size) - nose[1]
                         M_shift = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
@@ -129,7 +137,8 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                         nose = (nose_x, nose_y)
                         chin = (chin_x, chin_y)
                         
-                        # 3. 回転：鼻-あごのx座標を揃える
+                        # 回転：鼻-あごのx座標を揃える
+                        # rotated_image = shifted_image
                         x_diff = nose_x - chin_x
                         if abs(x_diff) < 1e-2:
                             rotated_image = shifted_image
@@ -143,7 +152,7 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                             M_rotate = cv2.getRotationMatrix2D(center, angle, 1.0)
                             rotated_image = cv2.warpAffine(shifted_image, M_rotate, (width, height))
 
-                        # 4. y座標乖離チェック：鼻とほほのy座標最大差
+                        # y座標乖離チェック：鼻とほほのy座標最大差
                         rotated_rgb = cv2.cvtColor(rotated_image, cv2.COLOR_BGR2RGB)
                         results_rotated = face_mesh.process(rotated_rgb)
                         if results_rotated.multi_face_landmarks:
@@ -156,15 +165,15 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                             y_diff_max = max(y_coords) - min(y_coords)
                             
                             if y_diff_max >= Y_DIFF_THRESHOLD:
-                                # print(f"Skipping {filename} due to large y-coordinate difference (Max Diff: {y_diff_max:.1f})")
-                                # logging.info(f"Skipping {filename} due to large y-coordinate difference (Max Diff: {y_diff_max:.1f})")
+                                print(f"Skipping {filename} due to large y-coordinate difference (Max Diff: {y_diff_max:.1f})")
+                                logging.info(f"Skipping {filename} due to large y-coordinate difference (Max Diff: {y_diff_max:.1f})")
                                 continue
                             
-                            # 5. グレースケール変換、リサイズ
+                            # グレースケール変換、リサイズ
                             gray = cv2.cvtColor(rotated_image, cv2.COLOR_BGR2GRAY)
                             face_image_resized = cv2.resize(gray, (img_size, img_size))
                             
-                            # 6. 座標表示：右ほほ、左ほほ、あご（1px赤い点、コメントアウト）
+                            # 座標表示：右ほほ、左ほほ、あご（1px赤い点、コメントアウト）
                             face_image_with_dots = cv2.cvtColor(face_image_resized, cv2.COLOR_GRAY2BGR)
                             landmarks_to_draw = [
                                 (RIGHT_CONTOUR_INDEX, (rotated_landmarks[RIGHT_CONTOUR_INDEX].x * img_size, rotated_landmarks[RIGHT_CONTOUR_INDEX].y * img_size)),
