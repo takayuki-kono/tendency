@@ -25,13 +25,14 @@ PREPROCESSED_TRAIN_DIR = 'preprocessed/train'
 PREPROCESSED_VALIDATION_DIR = 'preprocessed/validation'
 
 # 設定
-ROTATION_RANGE = 5
+VAN_RATIO = 0.25
+ROTATION_RANGE = 1
 BATCH_SIZE = 16
 img_size = 112
 TARGET_NOSE_X = img_size / 2  # 鼻の目標x座標（56）
 TARGET_NOSE_Y = img_size / 2  # 鼻の目標y座標（56）
 # X_DIFF_THRESHOLD = 0.2 * img_size / 2  # 5% of image width (11.2px)
-Y_DIFF_THRESHOLD = 0.25 * img_size / 2  # 5% of image height (11.2px)
+Y_DIFF_THRESHOLD = VAN_RATIO * img_size / 2  # 5% of image height (11.2px)
 
 RIGHT_EYE_LANDMARKS = [7, 33, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
 LEFT_EYE_LANDMARKS = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
@@ -54,6 +55,13 @@ def preprocess_and_cut_faces(input_dir, output_dir):
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # スキップカウンター
+    skip_counters = {
+        'no_face': 0, 'empty_face': 0, 'no_landmarks': 0, 'cheek_nose_distance': 0,
+        'y_coordinate_diff': 0, 'no_rotated_landmarks': 0, 'small_chin_y': 0
+    }
+    total_images = 0
+
     for category in ['category1', 'category2']:
         category_input_dir = os.path.join(input_dir, category)
         category_output_dir = os.path.join(output_dir, category)
@@ -61,10 +69,12 @@ def preprocess_and_cut_faces(input_dir, output_dir):
 
         for root, dirs, files in os.walk(category_input_dir):
             for filename in files:
+                total_images += 1
                 img_path = os.path.join(root, filename)
                 img = cv2.imread(img_path)
                 
                 if img is None:
+                    skip_counters['no_face'] += 1
                     print(f"Could not read image {img_path}")
                     logging.info(f"Could not read image {img_path}")
                     continue
@@ -87,6 +97,7 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                     face_image = img[y:y + height, x:x + width]
 
                     if face_image is None or face_image.size == 0:
+                        skip_counters['empty_face'] += 1
                         # print(f"Skipping {filename} due to empty face image.")
                         # logging.info(f"Skipping {filename} due to empty face image.")
                         continue
@@ -114,11 +125,13 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                         
                         if dist_right > 0:  # ゼロ除算防止
                             ratio = dist_left / dist_right
-                            if not (0.75 <= ratio <= 1.25):
+                            if not (1 - VAN_RATIO <= ratio <= 1 + VAN_RATIO):
+                                skip_counters['cheek_nose_distance'] += 1
                                 print(f"Skipping {filename} due to cheek-nose distance imbalance (Right: {dist_right:.1f}, Left: {dist_left:.1f}, Ratio: {ratio:.3f})")
                                 logging.info(f"Skipping {filename} due to cheek-nose distance imbalance (Right: {dist_right:.1f}, Left: {dist_left:.1f}, Ratio: {ratio:.3f})")
                                 continue
                         else:
+                            skip_counters['cheek_nose_distance'] += 1
                             print(f"Skipping {filename} due to zero right cheek-nose distance")
                             logging.info(f"Skipping {filename} due to zero right cheek-nose distance")
                             continue
@@ -138,7 +151,6 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                         chin = (chin_x, chin_y)
                         
                         # 回転：鼻-あごのx座標を揃える
-                        # rotated_image = shifted_image
                         x_diff = nose_x - chin_x
                         if abs(x_diff) < 1e-2:
                             rotated_image = shifted_image
@@ -165,8 +177,17 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                             y_diff_max = max(y_coords) - min(y_coords)
                             
                             if y_diff_max >= Y_DIFF_THRESHOLD:
+                                skip_counters['y_coordinate_diff'] += 1
                                 print(f"Skipping {filename} due to large y-coordinate difference (Max Diff: {y_diff_max:.1f})")
                                 logging.info(f"Skipping {filename} due to large y-coordinate difference (Max Diff: {y_diff_max:.1f})")
+                                continue
+                            
+                            # 顎のy座標チェック：y < 107の場合スキップ
+
+                            if not (1 - VAN_RATIO/2 < rotated_landmarks[CHIN_INDEX].y < 1 + VAN_RATIO/2):
+                                skip_counters['small_chin_y'] += 1
+                                print(f"Skipping {filename} due to small chin y-coordinate (Chin Y: {chin_y:.1f})")
+                                logging.info(f"Skipping {filename} due to small chin y-coordinate (Chin Y: {chin_y:.1f})")
                                 continue
                             
                             # グレースケール変換、リサイズ
@@ -190,15 +211,25 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                             # cv2.imwrite(output_path, face_image_with_dots)
                         
                         else:
+                            skip_counters['no_rotated_landmarks'] += 1
                             print(f"No landmarks detected in rotated {filename}, skipping.")
                             logging.info(f"No landmarks detected in rotated {filename}, skipping.")
                             continue
                     else:
+                        skip_counters['no_landmarks'] += 1
                         print(f"No landmarks detected in {filename}, skipping.")
                         logging.info(f"No landmarks detected in {filename}, skipping.")
                 else:
+                    skip_counters['no_face'] += 1
                     print(f"No face detected in {filename}, skipping.")
                     logging.info(f"No face detected in {filename}, skipping.")
+
+    # スキップ率のログ
+    for reason, count in skip_counters.items():
+        if total_images > 0:
+            rate = count / total_images * 100
+            print(f"{input_dir}: {reason} skipped {count}/{total_images} ({rate:.1f}%)")
+            logging.info(f"{input_dir}: {reason} skipped {count}/{total_images} ({rate:.1f}%)")
 
 # 前処理を実行
 preprocess_and_cut_faces(TRAIN_DIR, PREPROCESSED_TRAIN_DIR)
