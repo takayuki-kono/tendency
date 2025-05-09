@@ -25,7 +25,7 @@ PREPROCESSED_TRAIN_DIR = 'preprocessed/train'
 PREPROCESSED_VALIDATION_DIR = 'preprocessed/validation'
 
 # 設定
-VAN_RATIO = 0.25
+VAN_RATIO = 0.35
 ROTATION_RANGE = 1
 BATCH_SIZE = 16
 img_size = 112
@@ -183,7 +183,6 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                                 continue
                             
                             # 顎のy座標チェック：y < 107の場合スキップ
-
                             if not (1 - VAN_RATIO/2 < rotated_landmarks[CHIN_INDEX].y < 1 + VAN_RATIO/2):
                                 skip_counters['small_chin_y'] += 1
                                 print(f"Skipping {filename} due to small chin y-coordinate (Chin Y: {chin_y:.1f})")
@@ -235,6 +234,48 @@ def preprocess_and_cut_faces(input_dir, output_dir):
 preprocess_and_cut_faces(TRAIN_DIR, PREPROCESSED_TRAIN_DIR)
 preprocess_and_cut_faces(VALIDATION_DIR, PREPROCESSED_VALIDATION_DIR)
 
+# クラス重みの計算
+def compute_class_weights(train_dir):
+    class_counts = {}
+    for category in ['category1', 'category2']:
+        category_dir = os.path.join(train_dir, category)
+        if os.path.exists(category_dir):
+            class_counts[category] = len([f for f in os.listdir(category_dir) if os.path.isfile(os.path.join(category_dir, f))])
+        else:
+            class_counts[category] = 0
+    
+    total_images = sum(class_counts.values())
+    n_classes = len(class_counts)
+    
+    if total_images == 0 or n_classes == 0:
+        print("No training data found, using equal weights.")
+        logging.info("No training data found, using equal weights.")
+        return {0: 1.0, 1: 1.0}
+    
+    class_weights = {}
+    for idx, category in enumerate(['category1', 'category2']):
+        if class_counts[category] > 0:
+            class_weights[idx] = total_images / (n_classes * class_counts[category])
+        else:
+            class_weights[idx] = 1.0  # ゼロ除算回避
+    
+    print(f"Class counts: {class_counts}")
+    print(f"Class weights: {class_weights}")
+    logging.info(f"Class counts: {class_counts}")
+    logging.info(f"Class weights: {class_weights}")
+    
+    return class_weights
+
+# カスタム損失関数
+def weighted_sparse_categorical_crossentropy(class_weights):
+    def loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.int32)
+        weights = tf.gather([class_weights[0], class_weights[1]], y_true)
+        unweighted_loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+        weighted_loss = unweighted_loss * weights
+        return tf.reduce_mean(weighted_loss)
+    return loss
+
 # CNNモデル
 def create_cnn_model():
     model = models.Sequential([
@@ -248,12 +289,19 @@ def create_cnn_model():
         layers.Dense(128, activation='relu'),
         layers.Dense(2, activation='softmax')
     ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                  loss='sparse_categorical_crossentropy',
-                  metrics=['accuracy'])
     return model
 
+# クラス重みの適用
+train_class_weights = compute_class_weights(PREPROCESSED_TRAIN_DIR)
+validation_class_weights = compute_class_weights(PREPROCESSED_VALIDATION_DIR)
+
+# モデルコンパイル
 cnn_model = create_cnn_model()
+cnn_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss=weighted_sparse_categorical_crossentropy(train_class_weights),
+    metrics=['accuracy']
+)
 
 # データジェネレーターと訓練
 train_datagen = ImageDataGenerator(rescale=1./255, rotation_range=ROTATION_RANGE)
