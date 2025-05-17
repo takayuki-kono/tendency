@@ -27,11 +27,11 @@ PREPROCESSED_TRAIN_DIR = 'preprocessed/train'
 PREPROCESSED_VALIDATION_DIR = 'preprocessed/validation'
 
 # 設定
-VAN_RATIO = 1
-IMG_SIZE = 112
-TARGET_NOSE_X = IMG_SIZE / 2
-TARGET_NOSE_Y = IMG_SIZE / 2
-Y_DIFF_THRESHOLD = VAN_RATIO * IMG_SIZE / 2
+VAN_RATIO = 0.14
+img_size = 112
+TARGET_NOSE_X = img_size / 2
+TARGET_NOSE_Y = img_size / 2
+Y_DIFF_THRESHOLD = VAN_RATIO * img_size / 2
 BLACK_MAX = 85
 GRAY_MIN = 86
 GRAY_MAX = 170
@@ -45,8 +45,6 @@ NOSE_INDEX = 4
 CHIN_INDEX = 152
 RIGHT_CONTOUR_INDEX = 137
 LEFT_CONTOUR_INDEX = 366
-MIN_IMAGE_SIZE = 100  # 新規：最小画像サイズ（ピクセル）
-MIN_FACE_SIZE = IMG_SIZE * 0.3  # 新規：最小顔バウンディングボックスサイズ
 
 # MediaPipe
 mp_face_detection = mp.solutions.face_detection
@@ -84,12 +82,12 @@ def filter_cheek_nose_distance(img, img_path, filename, skip_counters):
     right_contour = (landmarks[RIGHT_CONTOUR_INDEX].x * w, landmarks[RIGHT_CONTOUR_INDEX].y * h)
     left_contour = (landmarks[LEFT_CONTOUR_INDEX].x * w, landmarks[LEFT_CONTOUR_INDEX].y * h)
 
-    nose_x = nose[0] * IMG_SIZE / w
-    nose_y = nose[1] * IMG_SIZE / h
-    right_contour_x = right_contour[0] * IMG_SIZE / w
-    right_contour_y = right_contour[1] * IMG_SIZE / h
-    left_contour_x = left_contour[0] * IMG_SIZE / w
-    left_contour_y = left_contour[1] * IMG_SIZE / h
+    nose_x = nose[0] * img_size / w
+    nose_y = nose[1] * img_size / h
+    right_contour_x = right_contour[0] * img_size / w
+    right_contour_y = right_contour[1] * img_size / h
+    left_contour_x = left_contour[0] * img_size / w
+    left_contour_y = left_contour[1] * img_size / h
     dist_right = math.sqrt((nose_x - right_contour_x)**2 + (nose_y - right_contour_y)**2)
     dist_left = math.sqrt((nose_x - left_contour_x)**2 + (nose_y - left_contour_y)**2)
 
@@ -128,9 +126,9 @@ def filter_other_conditions(img, img_path, filename, skip_counters, is_preproces
         return False, 'no_landmarks'
 
     landmarks = results_mesh.multi_face_landmarks[0].landmark
-    nose_y_scaled = landmarks[NOSE_INDEX].y * IMG_SIZE
-    right_contour_y_scaled = landmarks[RIGHT_CONTOUR_INDEX].y * IMG_SIZE
-    left_contour_y_scaled = landmarks[LEFT_CONTOUR_INDEX].y * IMG_SIZE
+    nose_y_scaled = landmarks[NOSE_INDEX].y * img_size
+    right_contour_y_scaled = landmarks[RIGHT_CONTOUR_INDEX].y * img_size
+    left_contour_y_scaled = landmarks[LEFT_CONTOUR_INDEX].y * img_size
     y_coords = [nose_y_scaled, right_contour_y_scaled, left_contour_y_scaled]
     y_diff_max = max(y_coords) - min(y_coords)
     if y_diff_max >= Y_DIFF_THRESHOLD:
@@ -147,7 +145,7 @@ def filter_other_conditions(img, img_path, filename, skip_counters, is_preproces
     return True, None
 
 def preprocess_and_cut_faces(input_dir, output_dir):
-    """顔画像の前処理：解像度チェック → 照明正規化 → 複数顔＆頬-鼻チェック（回転前）→ 回転 → 切り抜き → 移動（鼻を中央に） → ランドマーク再検出 → その他チェック → ランドマーク描画 → 保存"""
+    """顔画像の前処理：複数顔＆頬-鼻チェック（回転前）→ 回転 → 切り抜き → 移動（鼻を中央に） → ランドマーク再検出 → その他チェック → ランドマーク描画 → 保存"""
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -155,11 +153,11 @@ def preprocess_and_cut_faces(input_dir, output_dir):
     skip_counters = {
         'no_face': 0, 'empty_face': 0, 'no_landmarks': 0, 'cheek_nose_distance': 0,
         'y_coordinate_diff': 0, 'no_post_crop_landmarks': 0, 'small_chin_y': 0,
-        'multiple_faces': 0, 'low_resolution': 0, 'invalid_pixels': 0, 'small_face': 0,  # 新規カウンター
+        'multiple_faces': 0,
         'deleted_no_face': 0, 'deleted_empty_face': 0, 'deleted_no_landmarks': 0,
         'deleted_cheek_nose_distance': 0, 'deleted_y_coordinate_diff': 0,
         'deleted_no_post_crop_landmarks': 0, 'deleted_small_chin_y': 0,
-        'deleted_multiple_faces': 0, 'deleted_low_resolution': 0, 'deleted_invalid_pixels': 0, 'deleted_small_face': 0
+        'deleted_multiple_faces': 0
     }
     total_images = 0
 
@@ -173,42 +171,6 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                 total_images += 1
                 img_path = os.path.join(root, filename)
                 img = cv2.imread(img_path)
-
-                # 新規：解像度チェック（全体画像）
-                if img is None or img.shape[0] < MIN_IMAGE_SIZE or img.shape[1] < MIN_IMAGE_SIZE:
-                    skip_counters['low_resolution'] += 1
-                    logger.info(f"低解像度: {img_path}")
-                    try:
-                        if os.path.exists(img_path):
-                            os.remove(img_path)
-                            skip_counters['deleted_low_resolution'] += 1
-                            logger.info(f"削除：{img_path} (low_resolution)")
-                        else:
-                            logger.info(f"ファイル {img_path} が見つかりません (low_resolution)")
-                    except Exception as e:
-                        logger.error(f"削除エラー {img_path} (low_resolution): {e}")
-                    continue
-                if np.all(img == 0) or np.all(img == 255):
-                    skip_counters['invalid_pixels'] += 1
-                    logger.info(f"無効ピクセル: {img_path}")
-                    try:
-                        if os.path.exists(img_path):
-                            os.remove(img_path)
-                            skip_counters['deleted_invalid_pixels'] += 1
-                            logger.info(f"削除：{img_path} (invalid_pixels)")
-                        else:
-                            logger.info(f"ファイル {img_path} が見つかりません (invalid_pixels)")
-                    except Exception as e:
-                        logger.error(f"削除エラー {img_path} (invalid_pixels): {e}")
-                    continue
-
-                # 新規：照明正規化（CLAHE）
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-                l, a, b = cv2.split(img_lab)
-                l_clahe = clahe.apply(l)
-                img_lab = cv2.merge((l_clahe, a, b))
-                img = cv2.cvtColor(img_lab, cv2.COLOR_LAB2BGR)
 
                 # 回転前：複数顔＆頬-鼻距離チェック
                 is_valid, reason = filter_cheek_nose_distance(img, img_path, filename, skip_counters)
@@ -279,21 +241,6 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                 bboxC = detection.location_data.relative_bounding_box
                 x, y, width, height = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
 
-                # 新規：顔領域の解像度チェック
-                if width < MIN_FACE_SIZE or height < MIN_FACE_SIZE:
-                    skip_counters['small_face'] += 1
-                    logger.info(f"顔領域小さすぎ: {filename} (幅: {width}, 高さ: {height})")
-                    try:
-                        if os.path.exists(img_path):
-                            os.remove(img_path)
-                            skip_counters['deleted_small_face'] += 1
-                            logger.info(f"削除：{img_path} (small_face)")
-                        else:
-                            logger.info(f"ファイル {img_path} が見つかりません (small_face)")
-                    except Exception as e:
-                        logger.error(f"削除エラー {img_path} (small_face): {e}")
-                    continue
-
                 # 顔領域切り取り
                 face_image = rotated_image[y:y + height, x:x + width]
                 if face_image is None or face_image.size == 0:
@@ -330,8 +277,8 @@ def preprocess_and_cut_faces(input_dir, output_dir):
                 landmarks = results_post_crop.multi_face_landmarks[0].landmark
                 face_h, face_w = face_image.shape[:2]
                 nose = (landmarks[NOSE_INDEX].x * face_w, landmarks[NOSE_INDEX].y * face_h)
-                shift_x = (TARGET_NOSE_X * face_w / IMG_SIZE) - nose[0]
-                shift_y = (TARGET_NOSE_Y * face_h / IMG_SIZE) - nose[1]
+                shift_x = (TARGET_NOSE_X * face_w / img_size) - nose[0]
+                shift_y = (TARGET_NOSE_Y * face_h / img_size) - nose[1]
                 M_shift = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
                 shifted_image = cv2.warpAffine(face_image, M_shift, (face_w, face_h))
 
@@ -368,15 +315,15 @@ def preprocess_and_cut_faces(input_dir, output_dir):
 
                 # グレースケール変換とリサイズ
                 gray = cv2.cvtColor(shifted_image, cv2.COLOR_BGR2GRAY)
-                face_image_resized = cv2.resize(gray, (IMG_SIZE, IMG_SIZE))
+                face_image_resized = cv2.resize(gray, (img_size, img_size))
 
                 # ランドマーク描画（頬と顎）
                 landmarks = results_shifted.multi_face_landmarks[0].landmark
                 face_image_with_landmarks = cv2.cvtColor(face_image_resized, cv2.COLOR_GRAY2BGR)
                 landmark_points = [
-                    (RIGHT_CONTOUR_INDEX, (landmarks[RIGHT_CONTOUR_INDEX].x * IMG_SIZE, landmarks[RIGHT_CONTOUR_INDEX].y * IMG_SIZE)),
-                    (LEFT_CONTOUR_INDEX, (landmarks[LEFT_CONTOUR_INDEX].x * IMG_SIZE, landmarks[LEFT_CONTOUR_INDEX].y * IMG_SIZE)),
-                    (CHIN_INDEX, (landmarks[CHIN_INDEX].x * IMG_SIZE, landmarks[CHIN_INDEX].y * IMG_SIZE))
+                    (RIGHT_CONTOUR_INDEX, (landmarks[RIGHT_CONTOUR_INDEX].x * img_size, landmarks[RIGHT_CONTOUR_INDEX].y * img_size)),
+                    (LEFT_CONTOUR_INDEX, (landmarks[LEFT_CONTOUR_INDEX].x * img_size, landmarks[LEFT_CONTOUR_INDEX].y * img_size)),
+                    (CHIN_INDEX, (landmarks[CHIN_INDEX].x * img_size, landmarks[CHIN_INDEX].y * img_size))
                 ]
                 for _, (x, y) in landmark_points:
                     cv2.circle(face_image_with_landmarks, (int(x), int(y)), 1, (255, 0, 0), -1)
@@ -395,11 +342,9 @@ def delete_invalid_preprocessed_images(input_dir):
     skip_counters = {
         'no_face': 0, 'no_landmarks': 0, 'cheek_nose_distance': 0,
         'y_coordinate_diff': 0, 'small_chin_y': 0, 'multiple_faces': 0,
-        'low_resolution': 0, 'invalid_pixels': 0, 'small_face': 0,  # 新規カウンター
         'deleted_no_face': 0, 'deleted_no_landmarks': 0,
         'deleted_cheek_nose_distance': 0, 'deleted_y_coordinate_diff': 0,
-        'deleted_small_chin_y': 0, 'deleted_multiple_faces': 0,
-        'deleted_low_resolution': 0, 'deleted_invalid_pixels': 0, 'deleted_small_face': 0
+        'deleted_small_chin_y': 0, 'deleted_multiple_faces': 0
     }
     total_images = 0
 
@@ -413,34 +358,6 @@ def delete_invalid_preprocessed_images(input_dir):
                 total_images += 1
                 img_path = os.path.join(root, filename)
                 img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-
-                # 新規：解像度チェック（前処理済み画像）
-                if img is None or img.shape[0] < MIN_IMAGE_SIZE or img.shape[1] < MIN_IMAGE_SIZE:
-                    skip_counters['low_resolution'] += 1
-                    logger.info(f"低解像度: {img_path}")
-                    try:
-                        if os.path.exists(img_path):
-                            os.remove(img_path)
-                            skip_counters['deleted_low_resolution'] += 1
-                            logger.info(f"削除：{img_path} (low_resolution)")
-                        else:
-                            logger.info(f"ファイル {img_path} が見つかりません (low_resolution)")
-                    except Exception as e:
-                        logger.error(f"削除エラー {img_path} (low_resolution): {e}")
-                    continue
-                if np.all(img == 0) or np.all(img == 255):
-                    skip_counters['invalid_pixels'] += 1
-                    logger.info(f"無効ピクセル: {img_path}")
-                    try:
-                        if os.path.exists(img_path):
-                            os.remove(img_path)
-                            skip_counters['deleted_invalid_pixels'] += 1
-                            logger.info(f"削除：{img_path} (invalid_pixels)")
-                        else:
-                            logger.info(f"ファイル {img_path} が見つかりません (invalid_pixels)")
-                    except Exception as e:
-                        logger.error(f"削除エラー {img_path} (invalid_pixels): {e}")
-                    continue
 
                 # 頬-鼻距離＆複数顔チェック（グレースケール画像をカラーに変換）
                 img_color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -491,8 +408,8 @@ def extract_landmarks(img_path):
             return None
         
         landmarks = results.multi_face_landmarks[0].landmark
-        coords = [(l.x * IMG_SIZE, l.y * IMG_SIZE) for l in landmarks]
-        nose_center = coords[NOSE_INDEX]  # 修正：NOSE_INDEX=4を使用
+        coords = [(l.x * img_size, l.y * img_size) for l in landmarks]
+        nose_center = coords[1]
         coords = [(x - nose_center[0], y - nose_center[1]) for x, y in coords]
         return np.array(coords)
     except Exception as e:
@@ -521,10 +438,10 @@ def compute_color_ratios(img_path):
         if img is None or img.size == 0:
             logger.error(f"画像読み込み失敗: {img_path}")
             return None, None, None, None, None, None, None, None, None, None, None, None
-        left_upper = img[:IMG_SIZE//2, :IMG_SIZE//2]
-        right_upper = img[:IMG_SIZE//2, IMG_SIZE//2:]
-        left_lower = img[IMG_SIZE//2:, :IMG_SIZE//2]
-        right_lower = img[IMG_SIZE//2:, IMG_SIZE//2:]
+        left_upper = img[:img_size//2, :img_size//2]
+        right_upper = img[:img_size//2, img_size//2:]
+        left_lower = img[img_size//2:, :img_size//2]
+        right_lower = img[img_size//2:, img_size//2:]
         total_pixels = left_upper.size
         lu_black_pixels = np.sum(left_upper <= BLACK_MAX)
         lu_gray_pixels = np.sum((left_upper >= GRAY_MIN) & (left_upper <= GRAY_MAX))
@@ -558,20 +475,33 @@ def compute_color_ratios(img_path):
         logger.error(f"処理エラー {img_path}: {e}")
         return None, None, None, None, None, None, None, None, None, None, None, None
 
-def find_similar_images(input_dir):
-    """類似画像を検出して削除、ランドマーク非検出画像も削除"""
-    input_dir_processed = os.path.join(input_dir, "processed")
-    logger.info(f"{input_dir_processed} の類似画像検索開始")
+def get_filename_prefix(filename, prefix_length=3):
+    """ファイル名の先頭3文字を取得"""
+    try:
+        prefix = os.path.basename(filename)[:prefix_length]
+        return prefix
+    except Exception as e:
+        logger.error(f"プレフィックス取得エラー {filename}: {e}")
+        return ""
+
+def find_similar_images(train_dir, color_ratio_threshold=COLOR_RATIO_THRESHOLD, tilt_threshold=TILT_THRESHOLD, top_n=TOP_N):
+    """先頭3文字一致かつ色割合・傾き差が小さい画像グループを特定し、ランドマーク非検出および類似画像を前処理済み画像から削除"""
+    logger.info(f"{train_dir} の類似画像検索開始")
     image_files = []
-    for root, dirs, files in os.walk(input_dir_processed):
-        for filename in files:
-            img_path = os.path.join(root, filename)
-            image_files.append((img_path, os.path.basename(os.path.dirname(img_path))))
+    for category in ['category1', 'category2']:
+        cat_dir = os.path.join(train_dir, category)
+        if not os.path.exists(cat_dir):
+            logger.info(f"ディレクトリ {cat_dir} が見つかりません")
+            continue
+        for filename in os.listdir(cat_dir):
+            img_path = os.path.join(cat_dir, filename)
+            image_files.append((img_path, category))
     
-    logger.info(f"{input_dir_processed} で {len(image_files)} 画像を検出")
+    logger.info(f"{train_dir} で {len(image_files)} 画像を検出")
+    
     prefix_groups = defaultdict(list)
     for img_path, category in image_files:
-        prefix = os.path.basename(img_path)[:3]
+        prefix = get_filename_prefix(img_path)
         prefix_groups[prefix].append((img_path, category))
     
     for prefix, images in prefix_groups.items():
@@ -580,21 +510,17 @@ def find_similar_images(input_dir):
     image_data = {}
     skip_counters = {'deleted_no_landmarks': 0}
     for img_path, category in image_files:
-        if not os.path.exists(img_path):
-            logger.error(f"画像が見つかりません: {img_path}")
-            continue
         ratios = compute_color_ratios(img_path)
         landmarks = extract_landmarks(img_path)
         if landmarks is None:
             skip_counters['deleted_no_landmarks'] += 1
             logger.info(f"ランドマーク検出失敗により削除 {img_path}")
             try:
-                base_img_path = os.path.join(input_dir, os.path.basename(img_path))
-                if os.path.exists(base_img_path):
-                    os.remove(base_img_path)
-                    logger.info(f"成功的に削除（ランドマーク検出失敗）: {base_img_path}")
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    logger.info(f"成功的に削除（ランドマーク検出失敗）: {img_path}")
                 else:
-                    logger.info(f"ファイルが見つかりません（ランドマーク検出失敗）: {base_img_path}")
+                    logger.info(f"ファイルが見つかりません（ランドマーク検出失敗）: {img_path}")
             except Exception as e:
                 logger.error(f"削除エラー（ランドマーク検出失敗） {img_path}: {e}")
             continue
@@ -609,8 +535,7 @@ def find_similar_images(input_dir):
     
     logger.info(f"有効な特徴を持つ画像: {len(image_data)}")
     for reason, count in skip_counters.items():
-        rate = count / len(image_files) * 100 if len(image_files) > 0 else 0
-        logger.info(f"{input_dir_processed}: {reason} {count}/{len(image_files)} ({rate:.1f}%)")
+        logger.info(f"{train_dir}: {reason} {count}/{len(image_files)} ({count/len(image_files)*100:.1f}%)")
     
     groups = []
     used_images = set()
@@ -655,18 +580,18 @@ def find_similar_images(input_dir):
                 rl_gray_diff = abs(ratios1[10] - ratios2[10])
                 rl_white_diff = abs(ratios1[11] - ratios2[11])
                 
-                if not (lu_black_diff <= COLOR_RATIO_THRESHOLD and
-                        lu_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        lu_white_diff <= COLOR_RATIO_THRESHOLD and
-                        ru_black_diff <= COLOR_RATIO_THRESHOLD and
-                        ru_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        ru_white_diff <= COLOR_RATIO_THRESHOLD and
-                        ll_black_diff <= COLOR_RATIO_THRESHOLD and
-                        ll_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        ll_white_diff <= COLOR_RATIO_THRESHOLD and
-                        rl_black_diff <= COLOR_RATIO_THRESHOLD and
-                        rl_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        rl_white_diff <= COLOR_RATIO_THRESHOLD):
+                if not (lu_black_diff <= color_ratio_threshold and
+                        lu_gray_diff <= color_ratio_threshold and
+                        lu_white_diff <= color_ratio_threshold and
+                        ru_black_diff <= color_ratio_threshold and
+                        ru_gray_diff <= color_ratio_threshold and
+                        ru_white_diff <= color_ratio_threshold and
+                        ll_black_diff <= color_ratio_threshold and
+                        ll_gray_diff <= color_ratio_threshold and
+                        ll_white_diff <= color_ratio_threshold and
+                        rl_black_diff <= color_ratio_threshold and
+                        rl_gray_diff <= color_ratio_threshold and
+                        rl_white_diff <= color_ratio_threshold):
                     continue
                 
                 tilt_diffs = []
@@ -679,7 +604,7 @@ def find_similar_images(input_dir):
                         diff = abs(t1 - t2)
                     tilt_diffs.append(diff)
                 
-                if any(diff > TILT_THRESHOLD for diff in tilt_diffs):
+                if any(diff > tilt_threshold for diff in tilt_diffs):
                     continue
                 
                 current_group.append((img2_path, cat2))
@@ -748,6 +673,7 @@ def find_similar_images(input_dir):
                     used_images.add(img_path)
     
     logger.info(f"{len(groups)} グループを検出")
+    
     def safe_sort_key(x):
         diffs = x['avg_diffs']
         return (
@@ -772,17 +698,17 @@ def find_similar_images(input_dir):
         groups = sorted(groups, key=safe_sort_key)
     except Exception as e:
         logger.error(f"グループソートエラー: {e}")
-        return image_data
+        return
     
-    logger.info(f"上位 {min(TOP_N, len(groups))} 類似画像グループ:")
+    logger.info(f"上位 {min(top_n, len(groups))} 類似画像グループ:")
     displayed_groups = 0
-    for group in groups[:TOP_N]:
+    for group in groups[:top_n]:
         images = group['images']
         logger.info(f"グループ {displayed_groups+1}")
         for img_path, _ in images:
             logger.info(f"  {img_path}")
         displayed_groups += 1
-        if displayed_groups >= TOP_N:
+        if displayed_groups >= top_n:
             break
     
     if displayed_groups == 0:
@@ -790,7 +716,7 @@ def find_similar_images(input_dir):
     
     csv_data = []
     deleted_images = set()
-    logger.info("類似画像削除処理開始")
+    logger.info("画像削除処理開始（前処理済みのみ）")
     for group_id, group in enumerate(groups):
         images = group['images']
         if len(images) < 1:
@@ -807,17 +733,16 @@ def find_similar_images(input_dir):
         })
         
         for img_path, category in images[1:]:
-            logger.info(f"  削除: {img_path}")
+            logger.info(f"  前処理済み削除: {img_path}")
             try:
-                base_img_path = os.path.join(input_dir, os.path.basename(img_path))
-                if os.path.exists(base_img_path):
-                    os.remove(base_img_path)
-                    deleted_images.add(base_img_path)
-                    logger.info(f"  成功的に削除: {base_img_path}")
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    deleted_images.add(img_path)
+                    logger.info(f"  成功的に削除（前処理済み）: {img_path}")
                 else:
-                    logger.info(f"  ファイルが見つかりません: {base_img_path}")
+                    logger.info(f"  ファイルが見つかりません（前処理済み）: {img_path}")
             except Exception as e:
-                logger.error(f"  削除エラー {base_img_path}: {e}")
+                logger.error(f"  削除失敗（前処理済み） {img_path}: {e}")
     
     if csv_data:
         df = pd.DataFrame(csv_data)
@@ -825,24 +750,17 @@ def find_similar_images(input_dir):
         logger.info(f"結果を {OUTPUT_CSV} に保存")
     else:
         logger.info("CSVに保存する画像なし")
-    
-    return image_data
 
 def main():
     try:
-        logger.info("前処理開始：トレーニングデータ")
+        logger.info("前処理と重複除去開始")
         preprocess_and_cut_faces(TRAIN_DIR, PREPROCESSED_TRAIN_DIR)
-        logger.info("前処理開始：バリデーションデータ")
         preprocess_and_cut_faces(VALIDATION_DIR, PREPROCESSED_VALIDATION_DIR)
-        logger.info("類似画像検出開始：トレーニングデータ")
+        # delete_invalid_preprocessed_images(PREPROCESSED_TRAIN_DIR)
+        # delete_invalid_preprocessed_images(PREPROCESSED_VALIDATION_DIR)
         find_similar_images(PREPROCESSED_TRAIN_DIR)
-        logger.info("類似画像検出開始：バリデーションデータ")
         find_similar_images(PREPROCESSED_VALIDATION_DIR)
-        logger.info("無効な前処理済み画像の削除開始：トレーニングデータ")
-        delete_invalid_preprocessed_images(PREPROCESSED_TRAIN_DIR)
-        logger.info("無効な前処理済み画像の削除開始：バリデーションデータ")
-        delete_invalid_preprocessed_images(PREPROCESSED_VALIDATION_DIR)
-        logger.info("全処理完了")
+        logger.info("前処理と重複除去完了")
     except Exception as e:
         logger.error(f"メインエラー: {e}")
     finally:
