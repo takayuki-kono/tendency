@@ -25,13 +25,17 @@ logger = logging.getLogger(__name__)
 
 # 設定
 VAN_RATIO = 0.35
-IMG_SIZE = 224  # リサイズを224x224に変更
-COLOR_RATIO_THRESHOLD = 0.11
-ANGLE_THRESHOLD = 0.03  # 内角差の閾値（度）
+IMG_SIZE = 224
+COLOR_RATIO_THRESHOLD = 0.02
+EYE_SLOPE_THRESHOLD = 0.05  # 傾き差の閾値
 TOP_N = 100
 OUTPUT_CSV = f'similar_images_{KEYWORD}.csv'
-QUAD_LANDMARK_INDICES = [33, 263, 291, 61]  # 四角形のランドマーク
+QUAD_LANDMARK_INDICES = [33, 263, 291, 61]
 NOSE_INDEX = 4
+EYE_LEFT_INDEX = 159  # 左目
+EYE_RIGHT_INDEX = 386  # 右目
+MOUTH_LEFT_INDEX = 61  # 口の左端
+MOUTH_RIGHT_INDEX = 291  # 口の右端
 
 # MediaPipe
 mp_face_detection = mp.solutions.face_detection
@@ -177,7 +181,7 @@ def consolidate_files(keyword):
             print(f"Error renaming {old_path} to {new_path}: {e}")
 
 def detect_and_crop_faces(input_dir):
-    """顔検出、最大面積の顔を切り取り、リサイズ、背景透過、グレースケール変換"""
+    """すべての検出顔を切り取り、リサイズ、背景透過、グレースケール変換"""
     resized_dir = os.path.join(input_dir, "resized")
     processed_dir = os.path.join(input_dir, "processed")
     if os.path.exists(resized_dir):
@@ -230,60 +234,49 @@ def detect_and_crop_faces(input_dir):
                 print(f"削除エラー {img_path} (no_face): {e}")
             continue
         
-        max_area = 0
-        max_bbox = None
-        for detection in results.detections:
+        h, w = img.shape[:2]
+        for face_idx, detection in enumerate(results.detections):
             bboxC = detection.location_data.relative_bounding_box
             area = bboxC.width * bboxC.height
-            if area > max_area:
-                max_area = area
-                max_bbox = bboxC
-        logger.info(f"{filename}: 最大面積顔を選択 (面積: {max_area:.6f})")
-        
-        h, w = img.shape[:2]
-        x, y, width, height = int(max_bbox.xmin * w), int(max_bbox.ymin * h), int(max_bbox.width * w), int(max_bbox.height * h)
-        
-        x = max(0, min(x, w-1))
-        y = max(0, min(y, h-1))
-        width = min(width, w-x)
-        height = min(height, h-y)
-        
-        face_image = img[y:y + height, x:x + width]
-        if face_image is None or face_image.size == 0:
-            skip_counters['no_face'] += 1
-            logger.info(f"顔領域切り取り失敗 {filename} (bbox: x={x}, y={y}, w={width}, h={height})")
-            print(f"顔領域切り取り失敗 {filename}")
-            try:
-                os.remove(img_path)
-                skip_counters['deleted_no_face'] += 1
-                logger.info(f"削除：{img_path} (no_face)")
-                print(f"削除：{img_path} (no_face)")
-            except Exception as e:
-                logger.error(f"削除エラー {img_path} (no_face): {e}")
-                print(f"削除エラー {img_path} (no_face): {e}")
-            continue
-        
-        face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
-        resized_path = os.path.join(resized_dir, filename)
-        cv2.imwrite(resized_path, face_image_resized)
-        logger.info(f"リサイズ画像保存：{resized_path}")
-        print(f"リサイズ画像保存：{resized_path}")
-        
-        face_image_transparent = remove_background(face_image_resized)
-        
-        mask = face_image_transparent[:, :, 3] > 0
-        gray = cv2.cvtColor(face_image_transparent, cv2.COLOR_BGRA2GRAY)
-        gray[~mask] = 0
-        
-        if gray.shape != (IMG_SIZE, IMG_SIZE):
-            logger.error(f"無効な画像サイズ: {filename}")
-            print(f"無効な画像サイズ: {filename}")
-            continue
-        
-        processed_path = os.path.join(processed_dir, os.path.splitext(filename)[0] + '.png')
-        cv2.imwrite(processed_path, face_image_transparent)
-        logger.info(f"透過グレースケール画像保存：{processed_path}")
-        print(f"透過グレースケール画像保存：{processed_path}")
+            logger.info(f"{filename}: 顔{face_idx+1} (面積: {area:.6f})")
+            
+            x, y, width, height = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
+            
+            x = max(0, min(x, w-1))
+            y = max(0, min(y, h-1))
+            width = min(width, w-x)
+            height = min(height, h-y)
+            
+            face_image = img[y:y + height, x:x + width]
+            if face_image is None or face_image.size == 0:
+                skip_counters['no_face'] += 1
+                logger.info(f"顔領域切り取り失敗 {filename} (face{face_idx+1}, bbox: x={x}, y={y}, w={width}, h={height})")
+                print(f"顔領域切り取り失敗 {filename} (face{face_idx+1})")
+                continue
+            
+            face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
+            base_name, ext = os.path.splitext(filename)
+            resized_filename = f"{base_name}_face{face_idx+1}{ext}"
+            resized_path = os.path.join(resized_dir, resized_filename)
+            face_image_transparent = remove_background(face_image_resized)
+            cv2.imwrite(resized_path, face_image_transparent)
+            logger.info(f"透過画像保存：{resized_path}")
+            print(f"透過画像保存：{resized_path}")
+            
+            mask = face_image_transparent[:, :, 3] > 0
+            gray = cv2.cvtColor(face_image_transparent, cv2.COLOR_BGRA2GRAY)
+            gray[~mask] = 0
+            
+            if gray.shape != (IMG_SIZE, IMG_SIZE):
+                logger.error(f"無効な画像サイズ: {resized_filename}")
+                print(f"無効な画像サイズ: {resized_filename}")
+                continue
+            
+            processed_filename = f"{base_name}_face{face_idx+1}.png"
+            processed_path = os.path.join(processed_dir, processed_filename)
+            cv2.imwrite(processed_path, gray)
+            logger.info(f"グレースケール画像保存：{processed_path}")
+            print(f"グレースケール画像保存：{processed_path}")
     
     for reason, count in skip_counters.items():
         rate = count / total_images * 100 if total_images > 0 else 0
@@ -316,90 +309,110 @@ def extract_landmarks(img_path):
         print(f"処理エラー {img_path}: {e}")
         return None
 
-def compute_inner_angles(landmarks, indices):
-    """四角形の内角を計算（度）"""
+def compute_landmark_slopes(landmarks):
+    """左目-右目、左目-鼻、右目-鼻、口右-鼻、口左-鼻の傾きを計算"""
     try:
-        points = [landmarks[idx] for idx in indices]
-        angles = []
+        left_eye = landmarks[EYE_LEFT_INDEX]
+        right_eye = landmarks[EYE_RIGHT_INDEX]
+        nose = landmarks[NOSE_INDEX]
+        mouth_left = landmarks[MOUTH_LEFT_INDEX]
+        mouth_right = landmarks[MOUTH_RIGHT_INDEX]
         
-        for i in range(4):
-            p1 = points[i]
-            p2 = points[(i + 1) % 4]
-            p3 = points[(i + 2) % 4]
-            
-            v1 = np.array(p1) - np.array(p2)
-            v2 = np.array(p3) - np.array(p2)
-            
-            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
-            cos_angle = np.clip(cos_angle, -1.0, 1.0)
-            angle = np.degrees(np.arccos(cos_angle))
-            angles.append(angle)
+        slopes = {}
+        # 左目-右目
+        dy = right_eye[1] - left_eye[1]
+        dx = right_eye[0] - left_eye[0]
+        slopes['eye_left_to_right'] = dy / (dx + 1e-10)
         
-        return angles
+        # 左目-鼻
+        dy = nose[1] - left_eye[1]
+        dx = nose[0] - left_eye[0]
+        slopes['eye_left_to_nose'] = dy / (dx + 1e-10)
+        
+        # 右目-鼻
+        dy = nose[1] - right_eye[1]
+        dx = nose[0] - right_eye[0]
+        slopes['eye_right_to_nose'] = dy / (dx + 1e-10)
+        
+        # 口右-鼻
+        dy = nose[1] - mouth_right[1]
+        dx = nose[0] - mouth_right[0]
+        slopes['mouth_right_to_nose'] = dy / (dx + 1e-10)
+        
+        # 口左-鼻
+        dy = nose[1] - mouth_left[1]
+        dx = nose[0] - mouth_left[0]
+        slopes['mouth_left_to_nose'] = dy / (dx + 1e-10)
+        
+        return slopes
     except Exception as e:
-        logger.error(f"内角計算エラー: {e}")
-        print(f"内角計算エラー: {e}")
-        return [float('inf')] * 4
+        logger.error(f"ランドマーク傾き計算エラー: {e}")
+        print(f"ランドマーク傾き計算エラー: {e}")
+        return {key: float('inf') for key in [
+            'eye_left_to_right', 'eye_left_to_nose', 'eye_right_to_nose',
+            'mouth_right_to_nose', 'mouth_left_to_nose'
+        ]}
 
 def compute_color_ratios(img_path):
-    """画像を4分割し、各領域の黒・灰・白の割合を計算（透過背景除外）"""
+    """画像を4分割、上下左右2分割、全体で黒・灰・白の割合を計算"""
     try:
         img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
         if img is None:
             logger.error(f"画像読み込み失敗: {img_path}")
             print(f"画像読み込み失敗: {img_path}")
-            return None, None, None, None, None, None, None, None, None, None, None, None
+            return [None] * 27
         
-        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-        mask = img[:, :, 3] > 0
+        if len(img.shape) == 2 or img.shape[2] == 1:
+            gray = img if len(img.shape) == 2 else img[:, :, 0]
+            mask = np.ones_like(gray, dtype=np.uint8) * 255
+            logger.info(f"グレースケール画像を処理: {img_path}")
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+            mask = img[:, :, 3] > 0
+            logger.info(f"BGRA画像を処理: {img_path}")
         
         left_upper = gray[:IMG_SIZE//2, :IMG_SIZE//2]
         right_upper = gray[:IMG_SIZE//2, IMG_SIZE//2:]
         left_lower = gray[IMG_SIZE//2:, :IMG_SIZE//2]
         right_lower = gray[IMG_SIZE//2:, IMG_SIZE//2:]
+        upper_half = gray[:IMG_SIZE//2, :]
+        lower_half = gray[IMG_SIZE//2:, :]
+        left_half = gray[:, :IMG_SIZE//2]
+        right_half = gray[:, IMG_SIZE//2:]
+        whole = gray
+        
         lu_mask = mask[:IMG_SIZE//2, :IMG_SIZE//2]
         ru_mask = mask[:IMG_SIZE//2, IMG_SIZE//2:]
         ll_mask = mask[IMG_SIZE//2:, :IMG_SIZE//2]
         rl_mask = mask[IMG_SIZE//2:, IMG_SIZE//2:]
+        upper_mask = mask[:IMG_SIZE//2, :]
+        lower_mask = mask[IMG_SIZE//2:, :]
+        left_mask = mask[:, :IMG_SIZE//2]
+        right_mask = mask[:, IMG_SIZE//2:]
+        whole_mask = mask
         
-        total_pixels = np.sum(lu_mask) or 1
+        total_pixels = np.sum(whole_mask) or 1
         
-        lu_black_pixels = np.sum((left_upper <= 85) & lu_mask)
-        lu_gray_pixels = np.sum((left_upper >= 86) & (left_upper <= 170) & lu_mask)
-        lu_white_pixels = np.sum((left_upper >= 171) & lu_mask)
-        lu_black_ratio = lu_black_pixels / total_pixels
-        lu_gray_ratio = lu_gray_pixels / total_pixels
-        lu_white_ratio = lu_white_pixels / total_pixels
+        ratios = []
+        for region, region_mask in [
+            (left_upper, lu_mask), (right_upper, ru_mask), (left_lower, ll_mask), (right_lower, rl_mask),
+            (upper_half, upper_mask), (lower_half, lower_mask), (left_half, left_mask), (right_half, right_mask),
+            (whole, whole_mask)
+        ]:
+            black_pixels = np.sum((region <= 85) & region_mask)
+            gray_pixels = np.sum((region >= 86) & (region <= 170) & region_mask)
+            white_pixels = np.sum((region >= 171) & region_mask)
+            ratios.extend([
+                black_pixels / total_pixels,
+                gray_pixels / total_pixels,
+                white_pixels / total_pixels
+            ])
         
-        ru_black_pixels = np.sum((right_upper <= 85) & ru_mask)
-        ru_gray_pixels = np.sum((right_upper >= 86) & (right_upper <= 170) & ru_mask)
-        ru_white_pixels = np.sum((right_upper >= 171) & ru_mask)
-        ru_black_ratio = ru_black_pixels / total_pixels
-        ru_gray_ratio = ru_gray_pixels / total_pixels
-        ru_white_ratio = ru_white_pixels / total_pixels
-        
-        ll_black_pixels = np.sum((left_lower <= 85) & ll_mask)
-        ll_gray_pixels = np.sum((left_lower >= 86) & (left_lower <= 170) & ll_mask)
-        ll_white_pixels = np.sum((left_lower >= 171) & ll_mask)
-        ll_black_ratio = ll_black_pixels / total_pixels
-        ll_gray_ratio = ll_gray_pixels / total_pixels
-        ll_white_ratio = ll_white_pixels / total_pixels
-        
-        rl_black_pixels = np.sum((right_lower <= 85) & rl_mask)
-        rl_gray_pixels = np.sum((right_lower >= 86) & (right_lower <= 170) & rl_mask)
-        rl_white_pixels = np.sum((right_lower >= 171) & rl_mask)
-        rl_black_ratio = rl_black_pixels / total_pixels
-        rl_gray_ratio = rl_gray_pixels / total_pixels
-        rl_white_ratio = rl_white_pixels / total_pixels
-        
-        return (lu_black_ratio, lu_gray_ratio, lu_white_ratio,
-                ru_black_ratio, ru_gray_ratio, ru_white_ratio,
-                ll_black_ratio, ll_gray_ratio, ll_white_ratio,
-                rl_black_ratio, rl_gray_ratio, rl_white_ratio)
+        return ratios
     except Exception as e:
         logger.error(f"処理エラー {img_path}: {e}")
         print(f"処理エラー {img_path}: {e}")
-        return None, None, None, None, None, None, None, None, None, None, None, None
+        return [None] * 27
 
 def get_filename_prefix(filename, prefix_length=3):
     """ファイル名の先頭3文字を取得"""
@@ -412,7 +425,7 @@ def get_filename_prefix(filename, prefix_length=3):
         return ""
 
 def find_similar_images(input_dir):
-    """類似画像を検出して削除、ランドマーク非検出画像も削除"""
+    """類似画像を検出して削除（9領域フィルタ、5つの傾きフィルタ、ログ出力）"""
     input_dir = os.path.join(input_dir, "processed")
     logger.info(f"{input_dir} の類似画像検索開始")
     print(f"{input_dir} の類似画像検索開始")
@@ -444,7 +457,7 @@ def find_similar_images(input_dir):
             continue
         ratios = compute_color_ratios(img_path)
         landmarks = extract_landmarks(img_path)
-        if landmarks is None or len(landmarks) <= max(QUAD_LANDMARK_INDICES):
+        if landmarks is None or len(landmarks) <= max([EYE_LEFT_INDEX, EYE_RIGHT_INDEX, MOUTH_LEFT_INDEX, MOUTH_RIGHT_INDEX]):
             skip_counters['deleted_no_landmarks'] += 1
             logger.info(f"ランドマーク検出失敗または不足により削除 {img_path}")
             print(f"ランドマーク検出失敗または不足により削除 {img_path}")
@@ -461,10 +474,12 @@ def find_similar_images(input_dir):
                 print(f"削除エラー（ランドマーク検出失敗） {img_path}: {e}")
             continue
         if all(r is not None for r in ratios):
+            slopes = compute_landmark_slopes(landmarks)
             image_data[img_path] = {
                 'category': category,
                 'ratios': ratios,
-                'landmarks': landmarks
+                'landmarks': landmarks,
+                'slopes': slopes
             }
         else:
             logger.info(f"無効な比率のため {img_path} をスキップ")
@@ -505,101 +520,89 @@ def find_similar_images(input_dir):
                 data2 = image_data[img2_path]
                 ratios1 = data1['ratios']
                 ratios2 = data2['ratios']
-                lm1 = data1['landmarks']
-                lm2 = data2['landmarks']
+                slopes1 = data1['slopes']
+                slopes2 = data2['slopes']
                 
-                lu_black_diff = abs(ratios1[0] - ratios2[0])
-                lu_gray_diff = abs(ratios1[1] - ratios2[1])
-                lu_white_diff = abs(ratios1[2] - ratios2[2])
-                ru_black_diff = abs(ratios1[3] - ratios2[3])
-                ru_gray_diff = abs(ratios1[4] - ratios2[4])
-                ru_white_diff = abs(ratios1[5] - ratios2[5])
-                ll_black_diff = abs(ratios1[6] - ratios2[6])
-                ll_gray_diff = abs(ratios1[7] - ratios2[7])
-                ll_white_diff = abs(ratios1[8] - ratios2[8])
-                rl_black_diff = abs(ratios1[9] - ratios2[9])
-                rl_gray_diff = abs(ratios1[10] - ratios2[10])
-                rl_white_diff = abs(ratios1[11] - ratios2[11])
-                
-                if not (lu_black_diff <= COLOR_RATIO_THRESHOLD and
-                        lu_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        lu_white_diff <= COLOR_RATIO_THRESHOLD and
-                        ru_black_diff <= COLOR_RATIO_THRESHOLD and
-                        ru_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        ru_white_diff <= COLOR_RATIO_THRESHOLD and
-                        ll_black_diff <= COLOR_RATIO_THRESHOLD and
-                        ll_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        ll_white_diff <= COLOR_RATIO_THRESHOLD and
-                        rl_black_diff <= COLOR_RATIO_THRESHOLD and
-                        rl_gray_diff <= COLOR_RATIO_THRESHOLD and
-                        rl_white_diff <= COLOR_RATIO_THRESHOLD):
+                # 9領域の差分
+                diffs = [abs(r1 - r2) for r1, r2 in zip(ratios1, ratios2)]
+                if not all(diff <= COLOR_RATIO_THRESHOLD for diff in diffs):
                     continue
                 
-                angles1 = compute_inner_angles(lm1, QUAD_LANDMARK_INDICES)
-                angles2 = compute_inner_angles(lm2, QUAD_LANDMARK_INDICES)
-                angle_diffs = [a1/a2 for a1, a2 in zip(angles1, angles2)]
+                # 5つの傾きフィルタリング
+                slope_ratios = {}
+                all_slopes_valid = True
+                for key in slopes1:
+                    if slopes1[key] == float('inf') or slopes2[key] == float('inf'):
+                        all_slopes_valid = False
+                        break
+                    slope_ratio = slopes1[key] / (slopes2[key] + 1e-10)
+                    slope_ratios[key] = slope_ratio
+                    if slope_ratio <= 1 - EYE_SLOPE_THRESHOLD or slope_ratio >= 1 + EYE_SLOPE_THRESHOLD:
+                        all_slopes_valid = False
+                        break
                 
-                if any(diff <= 1 - ANGLE_THRESHOLD or diff >= 1 + ANGLE_THRESHOLD or np.isinf(diff) for diff in angle_diffs):
-                    continue                
+                if not all_slopes_valid:
+                    continue
+                
+                # 類似画像のログ出力
+                logger.info(f"類似画像検出: {img1_path} と {img2_path}")
+                logger.info(f"  {img1_path} 画素割合: {', '.join([f'{r:.4f}' for r in ratios1])}")
+                logger.info(f"  {img2_path} 画素割合: {', '.join([f'{r:.4f}' for r in ratios2])}")
+                logger.info(f"  {img1_path} 傾き: {', '.join([f'{k}={v:.4f}' for k, v in slopes1.items()])}")
+                logger.info(f"  {img2_path} 傾き: {', '.join([f'{k}={v:.4f}' for k, v in slopes2.items()])}")
                 
                 current_group.append((img2_path, cat2))
                 current_diffs.append({
-                    'left_upper_black_ratio_difference': lu_black_diff,
-                    'left_upper_gray_ratio_difference': lu_gray_diff,
-                    'left_upper_white_ratio_difference': lu_white_diff,
-                    'right_upper_black_ratio_difference': ru_black_diff,
-                    'right_upper_gray_ratio_difference': ru_gray_diff,
-                    'right_upper_white_ratio_difference': ru_white_diff,
-                    'left_lower_black_ratio_difference': ll_black_diff,
-                    'left_lower_gray_ratio_difference': ll_gray_diff,
-                    'left_lower_white_ratio_difference': ll_white_diff,
-                    'right_lower_black_ratio_difference': rl_black_diff,
-                    'right_lower_gray_ratio_difference': rl_gray_diff,
-                    'right_lower_white_ratio_difference': rl_white_diff,
-                    'angle_diff_0': angle_diffs[0],
-                    'angle_diff_1': angle_diffs[1],
-                    'angle_diff_2': angle_diffs[2],
-                    'angle_diff_3': angle_diffs[3]
+                    'left_upper_black_diff': diffs[0],
+                    'left_upper_gray_diff': diffs[1],
+                    'left_upper_white_diff': diffs[2],
+                    'right_upper_black_diff': diffs[3],
+                    'right_upper_gray_diff': diffs[4],
+                    'right_upper_white_diff': diffs[5],
+                    'left_lower_black_diff': diffs[6],
+                    'left_lower_gray_diff': diffs[7],
+                    'left_lower_white_diff': diffs[8],
+                    'right_lower_black_diff': diffs[9],
+                    'right_lower_gray_diff': diffs[10],
+                    'right_lower_white_diff': diffs[11],
+                    'upper_half_black_diff': diffs[12],
+                    'upper_half_gray_diff': diffs[13],
+                    'upper_half_white_diff': diffs[14],
+                    'lower_half_black_diff': diffs[15],
+                    'lower_half_gray_diff': diffs[16],
+                    'lower_half_white_diff': diffs[17],
+                    'left_half_black_diff': diffs[18],
+                    'left_half_gray_diff': diffs[19],
+                    'left_half_white_diff': diffs[20],
+                    'right_half_black_diff': diffs[21],
+                    'right_half_gray_diff': diffs[22],
+                    'right_half_white_diff': diffs[23],
+                    'whole_black_diff': diffs[24],
+                    'whole_gray_diff': diffs[25],
+                    'whole_white_diff': diffs[26],
+                    **{f'{k}_ratio': v for k, v in slope_ratios.items()}
                 })
             
             if len(current_group) >= 3:
                 if current_diffs:
                     avg_diffs = {
-                        'left_upper_black_ratio_difference': np.mean([d['left_upper_black_ratio_difference'] for d in current_diffs]),
-                        'left_upper_gray_ratio_difference': np.mean([d['left_upper_gray_ratio_difference'] for d in current_diffs]),
-                        'left_upper_white_ratio_difference': np.mean([d['left_upper_white_ratio_difference'] for d in current_diffs]),
-                        'right_upper_black_ratio_difference': np.mean([d['right_upper_black_ratio_difference'] for d in current_diffs]),
-                        'right_upper_gray_ratio_difference': np.mean([d['right_upper_gray_ratio_difference'] for d in current_diffs]),
-                        'right_upper_white_ratio_difference': np.mean([d['right_upper_white_ratio_difference'] for d in current_diffs]),
-                        'left_lower_black_ratio_difference': np.mean([d['left_lower_black_ratio_difference'] for d in current_diffs]),
-                        'left_lower_gray_ratio_difference': np.mean([d['left_lower_gray_ratio_difference'] for d in current_diffs]),
-                        'left_lower_white_ratio_difference': np.mean([d['left_lower_white_ratio_difference'] for d in current_diffs]),
-                        'right_lower_black_ratio_difference': np.mean([d['right_lower_black_ratio_difference'] for d in current_diffs]),
-                        'right_lower_gray_ratio_difference': np.mean([d['right_lower_gray_ratio_difference'] for d in current_diffs]),
-                        'right_lower_white_ratio_difference': np.mean([d['right_lower_white_ratio_difference'] for d in current_diffs]),
-                        'angle_diff_0': np.mean([d['angle_diff_0'] for d in current_diffs if not np.isinf(d['angle_diff_0'])] or [0.0]),
-                        'angle_diff_1': np.mean([d['angle_diff_1'] for d in current_diffs if not np.isinf(d['angle_diff_1'])] or [0.0]),
-                        'angle_diff_2': np.mean([d['angle_diff_2'] for d in current_diffs if not np.isinf(d['angle_diff_2'])] or [0.0]),
-                        'angle_diff_3': np.mean([d['angle_diff_3'] for d in current_diffs if not np.isinf(d['angle_diff_3'])] or [0.0])
+                        key: np.mean([d[key] for d in current_diffs]) for key in current_diffs[0]
                     }
                 else:
                     avg_diffs = {
-                        'left_upper_black_ratio_difference': 0.0,
-                        'left_upper_gray_ratio_difference': 0.0,
-                        'left_upper_white_ratio_difference': 0.0,
-                        'right_upper_black_ratio_difference': 0.0,
-                        'right_upper_gray_ratio_difference': 0.0,
-                        'right_upper_white_ratio_difference': 0.0,
-                        'left_lower_black_ratio_difference': 0.0,
-                        'left_lower_gray_ratio_difference': 0.0,
-                        'left_lower_white_ratio_difference': 0.0,
-                        'right_lower_black_ratio_difference': 0.0,
-                        'right_lower_gray_ratio_difference': 0.0,
-                        'right_lower_white_ratio_difference': 0.0,
-                        'angle_diff_0': 0.0,
-                        'angle_diff_1': 0.0,
-                        'angle_diff_2': 0.0,
-                        'angle_diff_3': 0.0
+                        key: 0.0 for key in [
+                            'left_upper_black_diff', 'left_upper_gray_diff', 'left_upper_white_diff',
+                            'right_upper_black_diff', 'right_upper_gray_diff', 'right_upper_white_diff',
+                            'left_lower_black_diff', 'left_lower_gray_diff', 'left_lower_white_diff',
+                            'right_lower_black_diff', 'right_lower_gray_diff', 'right_lower_white_diff',
+                            'upper_half_black_diff', 'upper_half_gray_diff', 'upper_half_white_diff',
+                            'lower_half_black_diff', 'lower_half_gray_diff', 'lower_half_white_diff',
+                            'left_half_black_diff', 'left_half_gray_diff', 'left_half_white_diff',
+                            'right_half_black_diff', 'right_half_gray_diff', 'right_half_white_diff',
+                            'whole_black_diff', 'whole_gray_diff', 'whole_white_diff',
+                            'eye_left_to_right_ratio', 'eye_left_to_nose_ratio', 'eye_right_to_nose_ratio',
+                            'mouth_right_to_nose_ratio', 'mouth_left_to_nose_ratio'
+                        ]
                     }
                     logger.info(f"{img1_path} で空の current_diffs")
                     print(f"{img1_path} で空の current_diffs")
@@ -616,24 +619,19 @@ def find_similar_images(input_dir):
     
     def safe_sort_key(x):
         diffs = x['avg_diffs']
-        return (
-            diffs.get('left_upper_black_ratio_difference', 0.0),
-            diffs.get('left_upper_gray_ratio_difference', 0.0),
-            diffs.get('left_upper_white_ratio_difference', 0.0),
-            diffs.get('right_upper_black_ratio_difference', 0.0),
-            diffs.get('right_upper_gray_ratio_difference', 0.0),
-            diffs.get('right_upper_white_ratio_difference', 0.0),
-            diffs.get('left_lower_black_ratio_difference', 0.0),
-            diffs.get('left_lower_gray_ratio_difference', 0.0),
-            diffs.get('left_lower_white_ratio_difference', 0.0),
-            diffs.get('right_lower_black_ratio_difference', 0.0),
-            diffs.get('right_lower_gray_ratio_difference', 0.0),
-            diffs.get('right_lower_white_ratio_difference', 0.0),
-            diffs.get('angle_diff_0', float('inf')) or float('inf'),
-            diffs.get('angle_diff_1', float('inf')) or float('inf'),
-            diffs.get('angle_diff_2', float('inf')) or float('inf'),
-            diffs.get('angle_diff_3', float('inf')) or float('inf')
-        )
+        return tuple(diffs.get(key, 0.0) for key in [
+            'left_upper_black_diff', 'left_upper_gray_diff', 'left_upper_white_diff',
+            'right_upper_black_diff', 'right_upper_gray_diff', 'right_upper_white_diff',
+            'left_lower_black_diff', 'left_lower_gray_diff', 'left_lower_white_diff',
+            'right_lower_black_diff', 'right_lower_gray_diff', 'right_lower_white_diff',
+            'upper_half_black_diff', 'upper_half_gray_diff', 'upper_half_white_diff',
+            'lower_half_black_diff', 'lower_half_gray_diff', 'lower_half_white_diff',
+            'left_half_black_diff', 'left_half_gray_diff', 'left_half_white_diff',
+            'right_half_black_diff', 'right_half_gray_diff', 'right_half_white_diff',
+            'whole_black_diff', 'whole_gray_diff', 'whole_white_diff',
+            'eye_left_to_right_ratio', 'eye_left_to_nose_ratio', 'eye_right_to_nose_ratio',
+            'mouth_right_to_nose_ratio', 'mouth_left_to_nose_ratio'
+        ])
     
     try:
         groups = sorted(groups, key=safe_sort_key)
@@ -664,6 +662,10 @@ def find_similar_images(input_dir):
     deleted_images = set()
     logger.info("類似画像削除処理開始")
     print("類似画像削除処理開始")
+    
+    original_dir = os.path.dirname(input_dir)
+    resized_dir = os.path.join(original_dir, "resized")
+    
     for group_id, group in enumerate(groups):
         images = group['images']
         if len(images) < 1:
@@ -682,20 +684,32 @@ def find_similar_images(input_dir):
         })
         
         for img_path, category in images[1:]:
-            logger.info(f"  削除: {img_path}")
-            print(f"  削除: {img_path}")
+            logger.info(f"  削除: {img_path} (processed)")
+            print(f"  削除: {img_path} (processed)")
             try:
                 if os.path.exists(img_path):
                     os.remove(img_path)
                     deleted_images.add(img_path)
-                    logger.info(f"  成功的に削除: {img_path}")
-                    print(f"  成功的に削除: {img_path}")
-                else:
-                    logger.info(f"  ファイルが見つかりません: {img_path}")
-                    print(f"  ファイルが見つかりません: {img_path}")
+                    logger.info(f"  成功的に削除: {img_path} (processed)")
+                    print(f"  成功的に削除: {img_path} (processed)")
+                
+                base_name = os.path.splitext(os.path.basename(img_path))[0]
+                for ext in ['.jpg', '.jpeg', '.png']:
+                    original_path = os.path.join(original_dir, f"{base_name}{ext}")
+                    if os.path.exists(original_path):
+                        os.remove(original_path)
+                        logger.info(f"  成功的に削除: {original_path} (original)")
+                        print(f"  成功的に削除: {original_path} (original)")
+                
+                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
+                    if os.path.exists(resized_path):
+                        os.remove(resized_path)
+                        logger.info(f"  成功的に削除: {resized_path} (resized)")
+                        print(f"  成功的に削除: {resized_path} (resized)")
+            
             except Exception as e:
-                logger.error(f"  削除エラー {img_path}: {e}")
-                print(f"  削除エラー {img_path}: {e}")
+                logger.error(f"  削除エラー {img_path} (processed): {e}")
+                print(f"  削除エラー {img_path} (processed): {e}")
     
     if csv_data:
         df = pd.DataFrame(csv_data)
@@ -709,7 +723,7 @@ def find_similar_images(input_dir):
     return image_data
 
 def cleanup_directories():
-    """元画像とresizedディレクトリを削除、processedのみ残す"""
+    """元画像のみ削除、resizedとprocessedを保持"""
     try:
         for file in os.listdir(OUTPUT_DIR):
             file_path = os.path.join(OUTPUT_DIR, file)
@@ -718,14 +732,8 @@ def cleanup_directories():
                 logger.info(f"元画像削除: {file_path}")
                 print(f"元画像削除: {file_path}")
         
-        resized_dir = os.path.join(OUTPUT_DIR, "resized")
-        if os.path.exists(resized_dir):
-            shutil.rmtree(resized_dir)
-            logger.info(f"resizedディレクトリ削除: {resized_dir}")
-            print(f"resizedディレクトリ削除: {resized_dir}")
-        
-        logger.info("クリーンアップ完了：processedディレクトリのみ保持")
-        print("クリーンアップ完了：processedディレクトリのみ保持")
+        logger.info("クリーンアップ完了：resizedとprocessedディレクトリを保持")
+        print("クリーンアップ完了：resizedとprocessedディレクトリを保持")
     except Exception as e:
         logger.error(f"クリーンアップエラー: {e}")
         print(f"クリーンアップエラー: {e}")
