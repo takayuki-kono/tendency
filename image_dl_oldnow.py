@@ -11,7 +11,7 @@ import shutil
 
 # 検索キーワードと最大ダウンロード数
 KEYWORD = "稲森いずみ"
-MAX_NUM = 50  # CPU環境向けに削減
+MAX_NUM = 100  # CPU環境向けに削減
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
 
 # ログ設定
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 VAN_RATIO = 0.35
 IMG_SIZE = 112
 COLOR_RATIO_THRESHOLD = 0.125
-TILT_THRESHOLD = 0.125
+TILT_THRESHOLD = 0.03
 TOP_N = 100
 OUTPUT_CSV = f'similar_images_{KEYWORD}.csv'
 TRIANGLE_LANDMARK_INDICES = [(33, 263), (263, 1), (1, 33)]
@@ -35,13 +35,51 @@ NOSE_INDEX = 4
 RIGHT_EYE_INDEX = 33
 LEFT_EYE_INDEX = 263
 JAW_INDEX = 152
+# 解像度・品質閾値
+MIN_FACE_PIXELS = 10000  # 顔領域の最小ピクセル数（100x100程度）
+MIN_LAPLACIAN_VARIANCE = 100  # ラプラシアン分散の閾値（ぼやけ判定）
 
-# MediaPipe（顔検出のみ）
+# MediaPipe
 mp_face_detection = mp.solutions.face_detection
 mp_face_mesh = mp.solutions.face_mesh
+mp_selfie_segmentation = mp.solutions.selfie_segmentation
 face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
+selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
 
+def remove_background(img):
+    """MediaPipe Selfie Segmentationで背景を透過"""
+    try:
+        logger.info(f"背景除去開始: img_shape={img.shape}")
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = selfie_segmentation.process(img_rgb)
+        
+        # マスクの存在と形状を確認
+        if results.segmentation_mask is None or results.segmentation_mask.size == 0:
+            logger.warning("セグメンテーションマスクが空または無効")
+            # フォールバック：アルファチャンネルを全不透明で追加
+            output = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+            output[:, :, 3] = 255  # 全ピクセル不透明
+            logger.info(f"フォールバック画像生成: shape={output.shape}")
+            return output
+
+        # マスクをバイナリ化
+        mask = (results.segmentation_mask > 0.5).astype(np.uint8) * 255
+        logger.info(f"マスク生成: shape={mask.shape}, dtype={mask.dtype}")
+
+        # 透過画像（BGRA）
+        output = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+        output[:, :, 3] = mask  # アルファチャンネル
+        logger.info(f"透過画像生成: shape={output.shape}")
+        return output
+    except Exception as e:
+        logger.error(f"背景除去エラー: {e}")
+        # フォールバック：アルファチャンネルを追加して返す
+        output = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+        output[:, :, 3] = 255
+        logger.info(f"エラー時フォールバック: shape={output.shape}")
+        return output
+        
 def setup_crawler(storage_dir, parser_threads=4, downloader_threads=4):
     """GoogleImageCrawlerのインスタンスを生成"""
     return GoogleImageCrawler(
@@ -51,10 +89,12 @@ def setup_crawler(storage_dir, parser_threads=4, downloader_threads=4):
     )
 
 def download_images(keyword, max_num):
-    """3つのキーワードで画像をダウンロード"""
+    """複数のキーワードで画像をダウンロード"""
     search_terms = [
         (keyword, keyword),
-        (f"{keyword} 過去", f"{keyword}_過去"),
+        (f"{keyword} 正面", f"{keyword}_正面"),
+        (f"{keyword} 顔", f"{keyword}_顔"),
+        (f"{keyword} 昔", f"{keyword}_昔"),
         (f"{keyword} 現在", f"{keyword}_現在")
     ]
     
@@ -75,7 +115,7 @@ def download_images(keyword, max_num):
 
 def rename_files(keyword):
     """各フォルダ内のファイル名を親フォルダ名に基づいてリネーム"""
-    folders = [keyword, f"{keyword}_過去", f"{keyword}_現在"]
+    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在"]
     
     for folder in folders:
         if not os.path.exists(folder):
@@ -105,7 +145,7 @@ def consolidate_files(keyword):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
-    folders = [keyword, f"{keyword}_過去", f"{keyword}_現在"]
+    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在"]
     
     for folder in folders:
         if not os.path.exists(folder):
@@ -148,7 +188,7 @@ def consolidate_files(keyword):
             print(f"Error renaming {old_path} to {new_path}: {e}")
 
 def detect_and_crop_faces(input_dir):
-    """顔検出、切り取り、リサイズ、グレースケール変換を<OUTPUT_DIR>/resizedと<OUTPUT_DIR>/processedに保存"""
+    """顔検出、最大面積の顔を切り取り、リサイズ、背景透過、グレースケール変換"""
     resized_dir = os.path.join(input_dir, "resized")
     processed_dir = os.path.join(input_dir, "processed")
     if os.path.exists(resized_dir):
@@ -158,7 +198,14 @@ def detect_and_crop_faces(input_dir):
     os.makedirs(resized_dir, exist_ok=True)
     os.makedirs(processed_dir, exist_ok=True)
     
-    skip_counters = {'no_face': 0, 'multiple_faces': 0, 'deleted_no_face': 0, 'deleted_multiple_faces': 0}
+    skip_counters = {
+        'no_face': 0,
+        'low_resolution': 0,
+        'low_quality': 0,
+        'deleted_no_face': 0,
+        'deleted_low_resolution': 0,
+        'deleted_low_quality': 0
+    }
     total_images = 0
     
     files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
@@ -198,29 +245,30 @@ def detect_and_crop_faces(input_dir):
                 print(f"削除エラー {img_path} (no_face): {e}")
             continue
         
-        if len(results.detections) > 1:
-            skip_counters['multiple_faces'] += 1
-            logger.info(f"複数顔検出 {filename}")
-            print(f"複数顔検出 {filename}")
-            try:
-                os.remove(img_path)
-                skip_counters['deleted_multiple_faces'] += 1
-                logger.info(f"削除：{img_path} (multiple_faces)")
-                print(f"削除：{img_path} (multiple_faces)")
-            except Exception as e:
-                logger.error(f"削除エラー {img_path} (multiple_faces): {e}")
-                print(f"削除エラー {img_path} (multiple_faces): {e}")
-            continue
+        # 最大面積の顔を選択
+        max_area = 0
+        max_bbox = None
+        for detection in results.detections:
+            bboxC = detection.location_data.relative_bounding_box
+            area = bboxC.width * bboxC.height
+            if area > max_area:
+                max_area = area
+                max_bbox = bboxC
+        logger.info(f"{filename}: 最大面積顔を選択 (面積: {max_area:.6f})")
         
-        detection = results.detections[0]
-        bboxC = detection.location_data.relative_bounding_box
         h, w = img.shape[:2]
-        x, y, width, height = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
+        x, y, width, height = int(max_bbox.xmin * w), int(max_bbox.ymin * h), int(max_bbox.width * w), int(max_bbox.height * h)
+        
+        # バウンディングボックスをクリッピング
+        x = max(0, min(x, w-1))
+        y = max(0, min(y, h-1))
+        width = min(width, w-x)
+        height = min(height, h-y)
         
         face_image = img[y:y + height, x:x + width]
         if face_image is None or face_image.size == 0:
             skip_counters['no_face'] += 1
-            logger.info(f"顔領域切り取り失敗 {filename}")
+            logger.info(f"顔領域切り取り失敗 {filename} (bbox: x={x}, y={y}, w={width}, h={height})")
             print(f"顔領域切り取り失敗 {filename}")
             try:
                 os.remove(img_path)
@@ -232,25 +280,64 @@ def detect_and_crop_faces(input_dir):
                 print(f"削除エラー {img_path} (no_face): {e}")
             continue
         
-        # 先にリサイズ
+        # 解像度チェック
+        face_pixels = width * height
+        if face_pixels < MIN_FACE_PIXELS:
+            skip_counters['low_resolution'] += 1
+            logger.info(f"低解像度検出 {filename} ({face_pixels} pixels)")
+            print(f"低解像度検出 {filename} ({face_pixels} pixels)")
+            try:
+                os.remove(img_path)
+                skip_counters['deleted_low_resolution'] += 1
+                logger.info(f"削除：{img_path} (low_resolution)")
+                print(f"削除：{img_path} (low_resolution)")
+            except Exception as e:
+                logger.error(f"削除エラー {img_path} (low_resolution): {e}")
+                print(f"削除エラー {img_path} (low_resolution): {e}")
+            continue
+        
+        # 品質チェック（ラプラシアン分散）
+        gray_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+        laplacian_var = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+        if laplacian_var < MIN_LAPLACIAN_VARIANCE:
+            skip_counters['low_quality'] += 1
+            logger.info(f"低品質検出 {filename} (laplacian variance: {laplacian_var})")
+            print(f"低品質検出 {filename} (laplacian variance: {laplacian_var})")
+            try:
+                os.remove(img_path)
+                skip_counters['deleted_low_quality'] += 1
+                logger.info(f"削除：{img_path} (low_quality)")
+                print(f"削除：{img_path} (low_quality)")
+            except Exception as e:
+                logger.error(f"削除エラー {img_path} (low_quality): {e}")
+                print(f"削除エラー {img_path} (low_quality): {e}")
+            continue
+        
+        # リサイズ
         face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
         resized_path = os.path.join(resized_dir, filename)
         cv2.imwrite(resized_path, face_image_resized)
         logger.info(f"リサイズ画像保存：{resized_path}")
         print(f"リサイズ画像保存：{resized_path}")
         
-        # 次にグレースケール変換
-        gray = cv2.cvtColor(face_image_resized, cv2.COLOR_BGR2GRAY)
+        # 背景透過
+        face_image_transparent = remove_background(face_image_resized)
+        
+        # グレースケール変換（前景のみ）
+        mask = face_image_transparent[:, :, 3] > 0
+        gray = cv2.cvtColor(face_image_transparent, cv2.COLOR_BGRA2GRAY)
+        gray[~mask] = 0  # 背景を黒に
         
         if gray.shape != (IMG_SIZE, IMG_SIZE):
             logger.error(f"無効な画像サイズ: {filename}")
             print(f"無効な画像サイズ: {filename}")
             continue
         
-        processed_path = os.path.join(processed_dir, filename)
-        cv2.imwrite(processed_path, gray)
-        logger.info(f"グレースケール画像保存：{processed_path}")
-        print(f"グレースケール画像保存：{processed_path}")
+        # 透過PNGとして保存
+        processed_path = os.path.join(processed_dir, os.path.splitext(filename)[0] + '.png')
+        cv2.imwrite(processed_path, face_image_transparent)
+        logger.info(f"透過グレースケール画像保存：{processed_path}")
+        print(f"透過グレースケール画像保存：{processed_path}")
     
     for reason, count in skip_counters.items():
         rate = count / total_images * 100 if total_images > 0 else 0
@@ -260,12 +347,12 @@ def detect_and_crop_faces(input_dir):
 def extract_landmarks(img_path):
     """画像から顔ランドマークを抽出（2D座標のみ）"""
     try:
-        img = cv2.imread(img_path)
+        img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
         if img is None:
             logger.error(f"画像読み込み失敗: {img_path}")
             print(f"画像読み込み失敗: {img_path}")
             return None
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
         results = face_mesh.process(img_rgb)
         
         if results.multi_face_landmarks:
@@ -300,44 +387,52 @@ def compute_tilt(landmarks, indices):
         return float('inf')
 
 def compute_color_ratios(img_path):
-    """画像を4分割し、各領域の黒・灰・白の割合を計算"""
+    """画像を4分割し、各領域の黒・灰・白の割合を計算（透過背景除外）"""
     try:
-        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
         if img is None:
             logger.error(f"画像読み込み失敗: {img_path}")
             print(f"画像読み込み失敗: {img_path}")
             return None, None, None, None, None, None, None, None, None, None, None, None
         
-        left_upper = img[:IMG_SIZE//2, :IMG_SIZE//2]
-        right_upper = img[:IMG_SIZE//2, IMG_SIZE//2:]
-        left_lower = img[IMG_SIZE//2:, :IMG_SIZE//2]
-        right_lower = img[IMG_SIZE//2:, IMG_SIZE//2:]
-        total_pixels = left_upper.size
+        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        mask = img[:, :, 3] > 0  # 前景マスク
         
-        lu_black_pixels = np.sum(left_upper <= 85)
-        lu_gray_pixels = np.sum((left_upper >= 86) & (left_upper <= 170))
-        lu_white_pixels = np.sum(left_upper >= 171)
+        left_upper = gray[:IMG_SIZE//2, :IMG_SIZE//2]
+        right_upper = gray[:IMG_SIZE//2, IMG_SIZE//2:]
+        left_lower = gray[IMG_SIZE//2:, :IMG_SIZE//2]
+        right_lower = gray[IMG_SIZE//2:, IMG_SIZE//2:]
+        lu_mask = mask[:IMG_SIZE//2, :IMG_SIZE//2]
+        ru_mask = mask[:IMG_SIZE//2, IMG_SIZE//2:]
+        ll_mask = mask[IMG_SIZE//2:, :IMG_SIZE//2]
+        rl_mask = mask[IMG_SIZE//2:, IMG_SIZE//2:]
+        
+        total_pixels = np.sum(lu_mask) or 1  # ゼロ除算回避
+        
+        lu_black_pixels = np.sum((left_upper <= 85) & lu_mask)
+        lu_gray_pixels = np.sum((left_upper >= 86) & (left_upper <= 170) & lu_mask)
+        lu_white_pixels = np.sum((left_upper >= 171) & lu_mask)
         lu_black_ratio = lu_black_pixels / total_pixels
         lu_gray_ratio = lu_gray_pixels / total_pixels
         lu_white_ratio = lu_white_pixels / total_pixels
         
-        ru_black_pixels = np.sum(right_upper <= 85)
-        ru_gray_pixels = np.sum((right_upper >= 86) & (right_upper <= 170))
-        ru_white_pixels = np.sum(right_upper >= 171)
+        ru_black_pixels = np.sum((right_upper <= 85) & ru_mask)
+        ru_gray_pixels = np.sum((right_upper >= 86) & (right_upper <= 170) & ru_mask)
+        ru_white_pixels = np.sum((right_upper >= 171) & ru_mask)
         ru_black_ratio = ru_black_pixels / total_pixels
         ru_gray_ratio = ru_gray_pixels / total_pixels
         ru_white_ratio = ru_white_pixels / total_pixels
         
-        ll_black_pixels = np.sum(left_lower <= 85)
-        ll_gray_pixels = np.sum((left_lower >= 86) & (left_lower <= 170))
-        ll_white_pixels = np.sum(left_lower >= 171)
+        ll_black_pixels = np.sum((left_lower <= 85) & ll_mask)
+        ll_gray_pixels = np.sum((left_lower >= 86) & (left_lower <= 170) & ll_mask)
+        ll_white_pixels = np.sum((left_lower >= 171) & ll_mask)
         ll_black_ratio = ll_black_pixels / total_pixels
         ll_gray_ratio = ll_gray_pixels / total_pixels
         ll_white_ratio = ll_white_pixels / total_pixels
         
-        rl_black_pixels = np.sum(right_lower <= 85)
-        rl_gray_pixels = np.sum((right_lower >= 86) & (right_lower <= 170))
-        rl_white_pixels = np.sum(right_lower >= 171)
+        rl_black_pixels = np.sum((right_lower <= 85) & rl_mask)
+        rl_gray_pixels = np.sum((right_lower >= 86) & (right_lower <= 170) & rl_mask)
+        rl_white_pixels = np.sum((right_lower >= 171) & rl_mask)
         rl_black_ratio = rl_black_pixels / total_pixels
         rl_gray_ratio = rl_gray_pixels / total_pixels
         rl_white_ratio = rl_white_pixels / total_pixels
@@ -399,14 +494,13 @@ def find_similar_images(input_dir):
             logger.info(f"ランドマーク検出失敗により削除 {img_path}")
             print(f"ランドマーク検出失敗により削除 {img_path}")
             try:
-                base_img_path = os.path.join(OUTPUT_DIR, os.path.basename(img_path))
-                if os.path.exists(base_img_path):
-                    os.remove(base_img_path)
-                    logger.info(f"成功的に削除（ランドマーク検出失敗）: {base_img_path}")
-                    print(f"成功的に削除（ランドマーク検出失敗）: {base_img_path}")
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    logger.info(f"成功的に削除（ランドマーク検出失敗）: {img_path}")
+                    print(f"成功的に削除（ランドマーク検出失敗）: {img_path}")
                 else:
-                    logger.info(f"ファイルが見つかりません（ランドマーク検出失敗）: {base_img_path}")
-                    print(f"ファイルが見つかりません（ランドマーク検出失敗）: {base_img_path}")
+                    logger.info(f"ファイルが見つかりません（ランドマーク検出失敗）: {img_path}")
+                    print(f"ファイルが見つかりません（ランドマーク検出失敗）: {img_path}")
             except Exception as e:
                 logger.error(f"削除エラー（ランドマーク検出失敗） {img_path}: {e}")
                 print(f"削除エラー（ランドマーク検出失敗） {img_path}: {e}")
@@ -638,18 +732,17 @@ def find_similar_images(input_dir):
             logger.info(f"  削除: {img_path}")
             print(f"  削除: {img_path}")
             try:
-                base_img_path = os.path.join(OUTPUT_DIR, os.path.basename(img_path))
-                if os.path.exists(base_img_path):
-                    os.remove(base_img_path)
-                    deleted_images.add(base_img_path)
-                    logger.info(f"  成功的に削除: {base_img_path}")
-                    print(f"  成功的に削除: {base_img_path}")
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    deleted_images.add(img_path)
+                    logger.info(f"  成功的に削除: {img_path}")
+                    print(f"  成功的に削除: {img_path}")
                 else:
-                    logger.info(f"  ファイルが見つかりません: {base_img_path}")
-                    print(f"  ファイルが見つかりません: {base_img_path}")
+                    logger.info(f"  ファイルが見つかりません: {img_path}")
+                    print(f"  ファイルが見つかりません: {img_path}")
             except Exception as e:
-                logger.error(f"  削除エラー {base_img_path}: {e}")
-                print(f"  削除エラー {base_img_path}: {e}")
+                logger.error(f"  削除エラー {img_path}: {e}")
+                print(f"  削除エラー {img_path}: {e}")
     
     if csv_data:
         df = pd.DataFrame(csv_data)
@@ -661,6 +754,30 @@ def find_similar_images(input_dir):
         print("CSVに保存する画像なし")
     
     return image_data
+
+def cleanup_directories():
+    """元画像とresizedディレクトリを削除、processedのみ残す"""
+    try:
+        # 元画像（<OUTPUT_DIR>直下のファイル）を削除
+        for file in os.listdir(OUTPUT_DIR):
+            file_path = os.path.join(OUTPUT_DIR, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                logger.info(f"元画像削除: {file_path}")
+                print(f"元画像削除: {file_path}")
+        
+        # resizedディレクトリを削除
+        resized_dir = os.path.join(OUTPUT_DIR, "resized")
+        if os.path.exists(resized_dir):
+            shutil.rmtree(resized_dir)
+            logger.info(f"resizedディレクトリ削除: {resized_dir}")
+            print(f"resizedディレクトリ削除: {resized_dir}")
+        
+        logger.info("クリーンアップ完了：processedディレクトリのみ保持")
+        print("クリーンアップ完了：processedディレクトリのみ保持")
+    except Exception as e:
+        logger.error(f"クリーンアップエラー: {e}")
+        print(f"クリーンアップエラー: {e}")
 
 def process_images(keyword):
     """ランダム番号フォルダの画像を処理"""
@@ -684,6 +801,7 @@ def main():
         rename_files(KEYWORD)
         consolidate_files(KEYWORD)
         process_images(KEYWORD)
+        cleanup_directories()  # 最終クリーンアップ
         
         logger.info(f"全処理完了 for keyword: {KEYWORD}")
         print(f"全処理完了 for keyword: {KEYWORD}")
@@ -693,6 +811,7 @@ def main():
     finally:
         face_detection.close()
         face_mesh.close()
+        selfie_segmentation.close()
 
 if __name__ == "__main__":
     main()
