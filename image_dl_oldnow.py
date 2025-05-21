@@ -539,8 +539,8 @@ def find_similar_images(input_dir):
                 angles2 = compute_inner_angles(lm2, QUAD_LANDMARK_INDICES)
                 angle_diffs = [a1/a2 for a1, a2 in zip(angles1, angles2)]
                 
-                if any(1 + ANGLE_THRESHOLD > diff > 1 - ANGLE_THRESHOLD  for diff in angle_diffs):
-                    continue
+                if any(diff <= 1 - ANGLE_THRESHOLD or diff >= 1 + ANGLE_THRESHOLD or np.isinf(diff) for diff in angle_diffs):
+                    continue                
                 
                 current_group.append((img2_path, cat2))
                 current_diffs.append({
