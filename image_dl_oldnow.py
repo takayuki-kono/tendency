@@ -11,7 +11,7 @@ import shutil
 
 # 検索キーワードと最大ダウンロード数
 KEYWORD = "稲森いずみ"
-MAX_NUM = 100  # CPU環境向けに削減
+MAX_NUM = 100
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
 
 # ログ設定
@@ -25,19 +25,13 @@ logger = logging.getLogger(__name__)
 
 # 設定
 VAN_RATIO = 0.35
-IMG_SIZE = 112
-COLOR_RATIO_THRESHOLD = 0.125
-TILT_THRESHOLD = 0.03
+IMG_SIZE = 224  # リサイズを224x224に変更
+COLOR_RATIO_THRESHOLD = 0.11
+ANGLE_THRESHOLD = 0.03  # 内角差の閾値（度）
 TOP_N = 100
 OUTPUT_CSV = f'similar_images_{KEYWORD}.csv'
-TRIANGLE_LANDMARK_INDICES = [(33, 263), (263, 1), (1, 33)]
+QUAD_LANDMARK_INDICES = [33, 263, 291, 61]  # 四角形のランドマーク
 NOSE_INDEX = 4
-RIGHT_EYE_INDEX = 33
-LEFT_EYE_INDEX = 263
-JAW_INDEX = 152
-# 解像度・品質閾値
-MIN_FACE_PIXELS = 10000  # 顔領域の最小ピクセル数（100x100程度）
-MIN_LAPLACIAN_VARIANCE = 100  # ラプラシアン分散の閾値（ぼやけ判定）
 
 # MediaPipe
 mp_face_detection = mp.solutions.face_detection
@@ -54,32 +48,27 @@ def remove_background(img):
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = selfie_segmentation.process(img_rgb)
         
-        # マスクの存在と形状を確認
         if results.segmentation_mask is None or results.segmentation_mask.size == 0:
             logger.warning("セグメンテーションマスクが空または無効")
-            # フォールバック：アルファチャンネルを全不透明で追加
             output = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            output[:, :, 3] = 255  # 全ピクセル不透明
+            output[:, :, 3] = 255
             logger.info(f"フォールバック画像生成: shape={output.shape}")
             return output
 
-        # マスクをバイナリ化
         mask = (results.segmentation_mask > 0.5).astype(np.uint8) * 255
         logger.info(f"マスク生成: shape={mask.shape}, dtype={mask.dtype}")
 
-        # 透過画像（BGRA）
         output = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-        output[:, :, 3] = mask  # アルファチャンネル
+        output[:, :, 3] = mask
         logger.info(f"透過画像生成: shape={output.shape}")
         return output
     except Exception as e:
         logger.error(f"背景除去エラー: {e}")
-        # フォールバック：アルファチャンネルを追加して返す
         output = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
         output[:, :, 3] = 255
         logger.info(f"エラー時フォールバック: shape={output.shape}")
         return output
-        
+
 def setup_crawler(storage_dir, parser_threads=4, downloader_threads=4):
     """GoogleImageCrawlerのインスタンスを生成"""
     return GoogleImageCrawler(
@@ -115,7 +104,7 @@ def download_images(keyword, max_num):
 
 def rename_files(keyword):
     """各フォルダ内のファイル名を親フォルダ名に基づいてリネーム"""
-    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在"]
+    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在", f"{keyword}_正面", f"{keyword}_顔"]
     
     for folder in folders:
         if not os.path.exists(folder):
@@ -145,7 +134,7 @@ def consolidate_files(keyword):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
-    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在"]
+    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在", f"{keyword}_正面", f"{keyword}_顔"]
     
     for folder in folders:
         if not os.path.exists(folder):
@@ -200,11 +189,7 @@ def detect_and_crop_faces(input_dir):
     
     skip_counters = {
         'no_face': 0,
-        'low_resolution': 0,
-        'low_quality': 0,
-        'deleted_no_face': 0,
-        'deleted_low_resolution': 0,
-        'deleted_low_quality': 0
+        'deleted_no_face': 0
     }
     total_images = 0
     
@@ -245,7 +230,6 @@ def detect_and_crop_faces(input_dir):
                 print(f"削除エラー {img_path} (no_face): {e}")
             continue
         
-        # 最大面積の顔を選択
         max_area = 0
         max_bbox = None
         for detection in results.detections:
@@ -259,7 +243,6 @@ def detect_and_crop_faces(input_dir):
         h, w = img.shape[:2]
         x, y, width, height = int(max_bbox.xmin * w), int(max_bbox.ymin * h), int(max_bbox.width * w), int(max_bbox.height * h)
         
-        # バウンディングボックスをクリッピング
         x = max(0, min(x, w-1))
         y = max(0, min(y, h-1))
         width = min(width, w-x)
@@ -280,60 +263,23 @@ def detect_and_crop_faces(input_dir):
                 print(f"削除エラー {img_path} (no_face): {e}")
             continue
         
-        # 解像度チェック
-        face_pixels = width * height
-        if face_pixels < MIN_FACE_PIXELS:
-            skip_counters['low_resolution'] += 1
-            logger.info(f"低解像度検出 {filename} ({face_pixels} pixels)")
-            print(f"低解像度検出 {filename} ({face_pixels} pixels)")
-            try:
-                os.remove(img_path)
-                skip_counters['deleted_low_resolution'] += 1
-                logger.info(f"削除：{img_path} (low_resolution)")
-                print(f"削除：{img_path} (low_resolution)")
-            except Exception as e:
-                logger.error(f"削除エラー {img_path} (low_resolution): {e}")
-                print(f"削除エラー {img_path} (low_resolution): {e}")
-            continue
-        
-        # 品質チェック（ラプラシアン分散）
-        gray_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
-        laplacian_var = cv2.Laplacian(gray_face, cv2.CV_64F).var()
-        if laplacian_var < MIN_LAPLACIAN_VARIANCE:
-            skip_counters['low_quality'] += 1
-            logger.info(f"低品質検出 {filename} (laplacian variance: {laplacian_var})")
-            print(f"低品質検出 {filename} (laplacian variance: {laplacian_var})")
-            try:
-                os.remove(img_path)
-                skip_counters['deleted_low_quality'] += 1
-                logger.info(f"削除：{img_path} (low_quality)")
-                print(f"削除：{img_path} (low_quality)")
-            except Exception as e:
-                logger.error(f"削除エラー {img_path} (low_quality): {e}")
-                print(f"削除エラー {img_path} (low_quality): {e}")
-            continue
-        
-        # リサイズ
         face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
         resized_path = os.path.join(resized_dir, filename)
         cv2.imwrite(resized_path, face_image_resized)
         logger.info(f"リサイズ画像保存：{resized_path}")
         print(f"リサイズ画像保存：{resized_path}")
         
-        # 背景透過
         face_image_transparent = remove_background(face_image_resized)
         
-        # グレースケール変換（前景のみ）
         mask = face_image_transparent[:, :, 3] > 0
         gray = cv2.cvtColor(face_image_transparent, cv2.COLOR_BGRA2GRAY)
-        gray[~mask] = 0  # 背景を黒に
+        gray[~mask] = 0
         
         if gray.shape != (IMG_SIZE, IMG_SIZE):
             logger.error(f"無効な画像サイズ: {filename}")
             print(f"無効な画像サイズ: {filename}")
             continue
         
-        # 透過PNGとして保存
         processed_path = os.path.join(processed_dir, os.path.splitext(filename)[0] + '.png')
         cv2.imwrite(processed_path, face_image_transparent)
         logger.info(f"透過グレースケール画像保存：{processed_path}")
@@ -370,21 +316,30 @@ def extract_landmarks(img_path):
         print(f"処理エラー {img_path}: {e}")
         return None
 
-def compute_tilt(landmarks, indices):
-    """2点間の勾配を計算（dy/dx）"""
+def compute_inner_angles(landmarks, indices):
+    """四角形の内角を計算（度）"""
     try:
-        p1 = landmarks[indices[0]]
-        p2 = landmarks[indices[1]]
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
-        if abs(dx) < 1e-10:
-            return float('inf')
-        tilt = dy / dx
-        return tilt
+        points = [landmarks[idx] for idx in indices]
+        angles = []
+        
+        for i in range(4):
+            p1 = points[i]
+            p2 = points[(i + 1) % 4]
+            p3 = points[(i + 2) % 4]
+            
+            v1 = np.array(p1) - np.array(p2)
+            v2 = np.array(p3) - np.array(p2)
+            
+            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+            cos_angle = np.clip(cos_angle, -1.0, 1.0)
+            angle = np.degrees(np.arccos(cos_angle))
+            angles.append(angle)
+        
+        return angles
     except Exception as e:
-        logger.error(f"傾き計算エラー: {e}")
-        print(f"傾き計算エラー: {e}")
-        return float('inf')
+        logger.error(f"内角計算エラー: {e}")
+        print(f"内角計算エラー: {e}")
+        return [float('inf')] * 4
 
 def compute_color_ratios(img_path):
     """画像を4分割し、各領域の黒・灰・白の割合を計算（透過背景除外）"""
@@ -396,7 +351,7 @@ def compute_color_ratios(img_path):
             return None, None, None, None, None, None, None, None, None, None, None, None
         
         gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-        mask = img[:, :, 3] > 0  # 前景マスク
+        mask = img[:, :, 3] > 0
         
         left_upper = gray[:IMG_SIZE//2, :IMG_SIZE//2]
         right_upper = gray[:IMG_SIZE//2, IMG_SIZE//2:]
@@ -407,7 +362,7 @@ def compute_color_ratios(img_path):
         ll_mask = mask[IMG_SIZE//2:, :IMG_SIZE//2]
         rl_mask = mask[IMG_SIZE//2:, IMG_SIZE//2:]
         
-        total_pixels = np.sum(lu_mask) or 1  # ゼロ除算回避
+        total_pixels = np.sum(lu_mask) or 1
         
         lu_black_pixels = np.sum((left_upper <= 85) & lu_mask)
         lu_gray_pixels = np.sum((left_upper >= 86) & (left_upper <= 170) & lu_mask)
@@ -489,10 +444,10 @@ def find_similar_images(input_dir):
             continue
         ratios = compute_color_ratios(img_path)
         landmarks = extract_landmarks(img_path)
-        if landmarks is None:
+        if landmarks is None or len(landmarks) <= max(QUAD_LANDMARK_INDICES):
             skip_counters['deleted_no_landmarks'] += 1
-            logger.info(f"ランドマーク検出失敗により削除 {img_path}")
-            print(f"ランドマーク検出失敗により削除 {img_path}")
+            logger.info(f"ランドマーク検出失敗または不足により削除 {img_path}")
+            print(f"ランドマーク検出失敗または不足により削除 {img_path}")
             try:
                 if os.path.exists(img_path):
                     os.remove(img_path)
@@ -580,17 +535,11 @@ def find_similar_images(input_dir):
                         rl_white_diff <= COLOR_RATIO_THRESHOLD):
                     continue
                 
-                tilt_diffs = []
-                for idx1, idx2 in TRIANGLE_LANDMARK_INDICES:
-                    t1 = compute_tilt(lm1, [idx1, idx2])
-                    t2 = compute_tilt(lm2, [idx1, idx2])
-                    if t1 == float('inf') or t2 == float('inf'):
-                        diff = float('inf') if t1 != t2 else 0.0
-                    else:
-                        diff = abs(t1 - t2)
-                    tilt_diffs.append(diff)
+                angles1 = compute_inner_angles(lm1, QUAD_LANDMARK_INDICES)
+                angles2 = compute_inner_angles(lm2, QUAD_LANDMARK_INDICES)
+                angle_diffs = [a1/a2 for a1, a2 in zip(angles1, angles2)]
                 
-                if any(diff > TILT_THRESHOLD for diff in tilt_diffs):
+                if any(1 + ANGLE_THRESHOLD > diff > 1 - ANGLE_THRESHOLD  for diff in angle_diffs):
                     continue
                 
                 current_group.append((img2_path, cat2))
@@ -607,9 +556,10 @@ def find_similar_images(input_dir):
                     'right_lower_black_ratio_difference': rl_black_diff,
                     'right_lower_gray_ratio_difference': rl_gray_diff,
                     'right_lower_white_ratio_difference': rl_white_diff,
-                    'tilt_difference_eye_eye': tilt_diffs[0],
-                    'tilt_difference_eye_nose': tilt_diffs[1],
-                    'tilt_difference_nose_eye': tilt_diffs[2]
+                    'angle_diff_0': angle_diffs[0],
+                    'angle_diff_1': angle_diffs[1],
+                    'angle_diff_2': angle_diffs[2],
+                    'angle_diff_3': angle_diffs[3]
                 })
             
             if len(current_group) >= 3:
@@ -627,9 +577,10 @@ def find_similar_images(input_dir):
                         'right_lower_black_ratio_difference': np.mean([d['right_lower_black_ratio_difference'] for d in current_diffs]),
                         'right_lower_gray_ratio_difference': np.mean([d['right_lower_gray_ratio_difference'] for d in current_diffs]),
                         'right_lower_white_ratio_difference': np.mean([d['right_lower_white_ratio_difference'] for d in current_diffs]),
-                        'tilt_difference_eye_eye': np.mean([d['tilt_difference_eye_eye'] for d in current_diffs if d['tilt_difference_eye_eye'] != float('inf')]) or 0.0,
-                        'tilt_difference_eye_nose': np.mean([d['tilt_difference_eye_nose'] for d in current_diffs if d['tilt_difference_eye_nose'] != float('inf')]) or 0.0,
-                        'tilt_difference_nose_eye': np.mean([d['tilt_difference_nose_eye'] for d in current_diffs if d['tilt_difference_nose_eye'] != float('inf')]) or 0.0
+                        'angle_diff_0': np.mean([d['angle_diff_0'] for d in current_diffs if not np.isinf(d['angle_diff_0'])] or [0.0]),
+                        'angle_diff_1': np.mean([d['angle_diff_1'] for d in current_diffs if not np.isinf(d['angle_diff_1'])] or [0.0]),
+                        'angle_diff_2': np.mean([d['angle_diff_2'] for d in current_diffs if not np.isinf(d['angle_diff_2'])] or [0.0]),
+                        'angle_diff_3': np.mean([d['angle_diff_3'] for d in current_diffs if not np.isinf(d['angle_diff_3'])] or [0.0])
                     }
                 else:
                     avg_diffs = {
@@ -645,9 +596,10 @@ def find_similar_images(input_dir):
                         'right_lower_black_ratio_difference': 0.0,
                         'right_lower_gray_ratio_difference': 0.0,
                         'right_lower_white_ratio_difference': 0.0,
-                        'tilt_difference_eye_eye': 0.0,
-                        'tilt_difference_eye_nose': 0.0,
-                        'tilt_difference_nose_eye': 0.0
+                        'angle_diff_0': 0.0,
+                        'angle_diff_1': 0.0,
+                        'angle_diff_2': 0.0,
+                        'angle_diff_3': 0.0
                     }
                     logger.info(f"{img1_path} で空の current_diffs")
                     print(f"{img1_path} で空の current_diffs")
@@ -677,9 +629,10 @@ def find_similar_images(input_dir):
             diffs.get('right_lower_black_ratio_difference', 0.0),
             diffs.get('right_lower_gray_ratio_difference', 0.0),
             diffs.get('right_lower_white_ratio_difference', 0.0),
-            diffs.get('tilt_difference_eye_eye', float('inf')) or float('inf'),
-            diffs.get('tilt_difference_eye_nose', float('inf')) or float('inf'),
-            diffs.get('tilt_difference_nose_eye', float('inf')) or float('inf')
+            diffs.get('angle_diff_0', float('inf')) or float('inf'),
+            diffs.get('angle_diff_1', float('inf')) or float('inf'),
+            diffs.get('angle_diff_2', float('inf')) or float('inf'),
+            diffs.get('angle_diff_3', float('inf')) or float('inf')
         )
     
     try:
@@ -758,7 +711,6 @@ def find_similar_images(input_dir):
 def cleanup_directories():
     """元画像とresizedディレクトリを削除、processedのみ残す"""
     try:
-        # 元画像（<OUTPUT_DIR>直下のファイル）を削除
         for file in os.listdir(OUTPUT_DIR):
             file_path = os.path.join(OUTPUT_DIR, file)
             if os.path.isfile(file_path):
@@ -766,7 +718,6 @@ def cleanup_directories():
                 logger.info(f"元画像削除: {file_path}")
                 print(f"元画像削除: {file_path}")
         
-        # resizedディレクトリを削除
         resized_dir = os.path.join(OUTPUT_DIR, "resized")
         if os.path.exists(resized_dir):
             shutil.rmtree(resized_dir)
@@ -801,7 +752,7 @@ def main():
         rename_files(KEYWORD)
         consolidate_files(KEYWORD)
         process_images(KEYWORD)
-        cleanup_directories()  # 最終クリーンアップ
+        cleanup_directories()
         
         logger.info(f"全処理完了 for keyword: {KEYWORD}")
         print(f"全処理完了 for keyword: {KEYWORD}")
