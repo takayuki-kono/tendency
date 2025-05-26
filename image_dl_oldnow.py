@@ -10,7 +10,7 @@ import logging
 import shutil
 
 # 検索キーワードと最大ダウンロード数
-KEYWORD = "稲森いずみ"
+KEYWORD = "安藤サクラ"
 MAX_NUM = 100
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
 
@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # 設定
 VAN_RATIO = 0.35
 IMG_SIZE = 224
-COLOR_RATIO_THRESHOLD = 0.02
-EYE_SLOPE_THRESHOLD = 0.05  # 傾き差の閾値
+COLOR_RATIO_THRESHOLD = 0.05
+EYaE_SLOPE_THRESHOLD = 0.05  # 傾き差の閾値
 TOP_N = 100
 OUTPUT_CSV = f'similar_images_{KEYWORD}.csv'
 QUAD_LANDMARK_INDICES = [33, 263, 291, 61]
@@ -399,9 +399,9 @@ def compute_color_ratios(img_path):
             (upper_half, upper_mask), (lower_half, lower_mask), (left_half, left_mask), (right_half, right_mask),
             (whole, whole_mask)
         ]:
-            black_pixels = np.sum((region <= 85) & region_mask)
-            gray_pixels = np.sum((region >= 86) & (region <= 170) & region_mask)
-            white_pixels = np.sum((region >= 171) & region_mask)
+            black_pixels = np.sum((region <= 85))
+            gray_pixels = np.sum((region >= 86) & (region <= 170))
+            white_pixels = np.sum((region >= 171))
             ratios.extend([
                 black_pixels / total_pixels,
                 gray_pixels / total_pixels,
@@ -425,19 +425,20 @@ def get_filename_prefix(filename, prefix_length=3):
         return ""
 
 def find_similar_images(input_dir):
-    """類似画像を検出して削除（9領域フィルタ、5つの傾きフィルタ、ログ出力）"""
-    input_dir = os.path.join(input_dir, "processed")
-    logger.info(f"{input_dir} の類似画像検索開始")
-    print(f"{input_dir} の類似画像検索開始")
+    """類似画像を検出して削除（2以上のグループ、9領域フィルタ、5つの傾きフィルタ、ログ出力）"""
+    input_dir_processed = os.path.join(input_dir, "processed")
+    resized_dir = os.path.join(input_dir, "resized")
+    logger.info(f"{input_dir_processed} の類似画像検索開始")
+    print(f"{input_dir_processed} の類似画像検索開始")
     
     image_files = []
-    for root, dirs, files in os.walk(input_dir):
+    for root, dirs, files in os.walk(input_dir_processed):
         for filename in files:
             img_path = os.path.join(root, filename)
             image_files.append((img_path, os.path.basename(os.path.dirname(img_path))))
     
-    logger.info(f"{input_dir} で {len(image_files)} 画像を検出")
-    print(f"{input_dir} で {len(image_files)} 画像を検出")
+    logger.info(f"{input_dir_processed} で {len(image_files)} 画像を検出")
+    print(f"{input_dir_processed} で {len(image_files)} 画像を検出")
     
     prefix_groups = defaultdict(list)
     for img_path, category in image_files:
@@ -489,14 +490,14 @@ def find_similar_images(input_dir):
     print(f"有効な特徴を持つ画像: {len(image_data)}")
     for reason, count in skip_counters.items():
         rate = count / len(image_files) * 100 if len(image_files) > 0 else 0
-        logger.info(f"{input_dir}: {reason} {count}/{len(image_files)} ({rate:.1f}%)")
-        print(f"{input_dir}: {reason} {count}/{len(image_files)} ({rate:.1f}%)")
+        logger.info(f"{input_dir_processed}: {reason} {count}/{len(image_files)} ({rate:.1f}%)")
+        print(f"{input_dir_processed}: {reason} {count}/{len(image_files)} ({rate:.1f}%)")
     
     groups = []
     used_images = set()
     
     for prefix, images in prefix_groups.items():
-        if len(images) < 3:
+        if len(images) < 2:
             logger.info(f"プレフィックス {prefix} をスキップ: 画像 {len(images)} のみ")
             print(f"プレフィックス {prefix} をスキップ: 画像 {len(images)} のみ")
             continue
@@ -535,7 +536,7 @@ def find_similar_images(input_dir):
                     if slopes1[key] == float('inf') or slopes2[key] == float('inf'):
                         all_slopes_valid = False
                         break
-                    slope_ratio = slopes1[key] / (slopes2[key] + 1e-10)
+                    slope_ratio = slopes1[key] / (slopes2[key])
                     slope_ratios[key] = slope_ratio
                     if slope_ratio <= 1 - EYE_SLOPE_THRESHOLD or slope_ratio >= 1 + EYE_SLOPE_THRESHOLD:
                         all_slopes_valid = False
@@ -583,7 +584,7 @@ def find_similar_images(input_dir):
                     **{f'{k}_ratio': v for k, v in slope_ratios.items()}
                 })
             
-            if len(current_group) >= 3:
+            if len(current_group) >= 2:
                 if current_diffs:
                     avg_diffs = {
                         key: np.mean([d[key] for d in current_diffs]) for key in current_diffs[0]
@@ -640,6 +641,82 @@ def find_similar_images(input_dir):
         print(f"グループソートエラー: {e}")
         return image_data
     
+    # グループ画像の画面表示
+    logger.info(f"類似画像グループの画面表示開始（上位 {min(TOP_N, len(groups))} グループ）")
+    print(f"類似画像グループの画面表示開始（上位 {min(TOP_N, len(groups))} グループ）")
+    displayed_groups = 0
+    for group in groups[:TOP_N]:
+        images = group['images']
+        displayed_groups += 1
+        logger.info(f"グループ {displayed_groups} 表示開始")
+        print(f"グループ {displayed_groups} 表示開始")
+        
+        # 対応するresizedディレクトリの画像パスを取得
+        group_images = []
+        for img_path, _ in images:
+            base_name = os.path.splitext(os.path.basename(img_path))[0]
+            for ext in ['.jpg', '.jpeg', '.png']:
+                resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
+                if os.path.exists(resized_path):
+                    img = cv2.imread(resized_path, cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        if img.shape[2] == 4:  # BGRA画像
+                            # BGRに変換（表示用）
+                            img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                            group_images.append(img_bgr)
+                        else:
+                            group_images.append(img)
+                        logger.info(f"表示用画像読み込み: {resized_path}")
+                        print(f"表示用画像読み込み: {resized_path}")
+                    else:
+                        logger.error(f"画像読み込み失敗: {resized_path}")
+                        print(f"画像読み込み失敗: {resized_path}")
+                    break
+            else:
+                logger.warning(f"resized画像が見つかりません: {base_name}")
+                print(f"resized画像が見つかりません: {base_name}")
+        
+        if not group_images:
+            logger.warning(f"グループ {displayed_groups} に表示可能な画像がありません")
+            print(f"グループ {displayed_groups} に表示可能な画像がありません")
+            continue
+        
+        # 画像を横に連結
+        max_height = max(img.shape[0] for img in group_images)
+        resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
+        display_image = np.hstack(resized_images)
+        
+        # ウィンドウ表示
+        window_name = f"Group {displayed_groups}"
+        try:
+            cv2.imshow(window_name, display_image)
+            logger.info(f"グループ {displayed_groups} を表示: {window_name}")
+            print(f"グループ {displayed_groups} を表示: {window_name}")
+            print("次のグループを表示するには任意のキーを押してください（終了：Esc）")
+            
+            # キー入力待ち
+            key = cv2.waitKey(0) & 0xFF
+            cv2.destroyWindow(window_name)
+            
+            if key == 27:  # Escキーで終了
+                logger.info("ユーザーにより表示中断（Escキー）")
+                print("ユーザーにより表示中断（Escキー）")
+                cv2.destroyAllWindows()
+                break
+            
+            logger.info(f"グループ {displayed_groups} 表示終了")
+            print(f"グループ {displayed_groups} 表示終了")
+        except Exception as e:
+            logger.error(f"グループ {displayed_groups} 表示エラー: {e}")
+            print(f"グループ {displayed_groups} 表示エラー: {e}")
+            cv2.destroyAllWindows()
+            continue
+    
+    cv2.destroyAllWindows()
+    logger.info("類似画像グループの画面表示完了")
+    print("類似画像グループの画面表示完了")
+    
+    # ログ出力
     logger.info(f"上位 {min(TOP_N, len(groups))} 類似画像グループ:")
     print(f"上位 {min(TOP_N, len(groups))} 類似画像グループ:")
     displayed_groups = 0
@@ -663,8 +740,7 @@ def find_similar_images(input_dir):
     logger.info("類似画像削除処理開始")
     print("類似画像削除処理開始")
     
-    original_dir = os.path.dirname(input_dir)
-    resized_dir = os.path.join(original_dir, "resized")
+    original_dir = os.path.dirname(input_dir_processed)
     
     for group_id, group in enumerate(groups):
         images = group['images']
@@ -723,8 +799,9 @@ def find_similar_images(input_dir):
     return image_data
 
 def cleanup_directories():
-    """元画像のみ削除、resizedとprocessedを保持"""
+    """元画像を削除、resized内の画像に背景透過を適用（上書き）、processedディレクトリを削除"""
     try:
+        # 元画像の削除
         for file in os.listdir(OUTPUT_DIR):
             file_path = os.path.join(OUTPUT_DIR, file)
             if os.path.isfile(file_path):
@@ -732,8 +809,39 @@ def cleanup_directories():
                 logger.info(f"元画像削除: {file_path}")
                 print(f"元画像削除: {file_path}")
         
-        logger.info("クリーンアップ完了：resizedとprocessedディレクトリを保持")
-        print("クリーンアップ完了：resizedとprocessedディレクトリを保持")
+        # processedディレクトリの削除
+        processed_dir = os.path.join(OUTPUT_DIR, "processed")
+        if os.path.exists(processed_dir):
+            shutil.rmtree(processed_dir)
+            logger.info(f"processedディレクトリ削除: {processed_dir}")
+            print(f"processedディレクトリ削除: {processed_dir}")
+        
+        # resizedディレクトリ内の画像に背景透過を適用（上書き）
+        resized_dir = os.path.join(OUTPUT_DIR, "resized")
+        if not os.path.exists(resized_dir):
+            logger.warning(f"resizedディレクトリが存在しません: {resized_dir}")
+            print(f"resizedディレクトリが存在しません: {resized_dir}")
+            return
+        
+        for filename in os.listdir(resized_dir):
+            img_path = os.path.join(resized_dir, filename)
+            img = cv2.imread(img_path)
+            
+            if img is None:
+                logger.error(f"画像読み込み失敗: {img_path}")
+                print(f"画像読み込み失敗: {img_path}")
+                continue
+            
+            # 背景透過
+            face_image_transparent = remove_background(img)
+            
+            # 元のファイルに上書き保存（拡張子を維持）
+            cv2.imwrite(img_path, face_image_transparent)
+            logger.info(f"透過画像上書き保存：{img_path}")
+            print(f"透過画像上書き保存：{img_path}")
+        
+        logger.info("クリーンアップ完了：resizedディレクトリを保持")
+        print("クリーンアップ完了：resizedディレクトリを保持")
     except Exception as e:
         logger.error(f"クリーンアップエラー: {e}")
         print(f"クリーンアップエラー: {e}")
@@ -747,10 +855,11 @@ def process_images(keyword):
     
     detect_and_crop_faces(input_dir)
     image_data = find_similar_images(input_dir)
+    # cleanup_directories()
     
-    logger.info(f"画像処理完了：{os.path.join(input_dir, 'resized')} と {os.path.join(input_dir, 'processed')}")
-    print(f"画像処理完了：{os.path.join(input_dir, 'resized')} と {os.path.join(input_dir, 'processed')}")
-
+    logger.info(f"画像処理完了：{os.path.join(input_dir, 'resized')}")
+    print(f"画像処理完了：{os.path.join(input_dir, 'resized')}")
+    
 def main():
     try:
         logger.info(f"処理開始 for keyword: {KEYWORD}")
@@ -760,7 +869,6 @@ def main():
         rename_files(KEYWORD)
         consolidate_files(KEYWORD)
         process_images(KEYWORD)
-        cleanup_directories()
         
         logger.info(f"全処理完了 for keyword: {KEYWORD}")
         print(f"全処理完了 for keyword: {KEYWORD}")
@@ -771,6 +879,7 @@ def main():
         face_detection.close()
         face_mesh.close()
         selfie_segmentation.close()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
