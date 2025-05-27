@@ -9,6 +9,8 @@ from icrawler.builtin import GoogleImageCrawler
 KEYWORD = "安藤サクラ"
 MAX_NUM = 100
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
+SIMILARITY_THRESHOLD = 1000000
+IMG_SIZE = 224
 
 logging.basicConfig(
     filename='log.txt',
@@ -17,8 +19,6 @@ logging.basicConfig(
     filemode='w'
 )
 logger = logging.getLogger(__name__)
-
-IMG_SIZE = 224
 
 mp_face_detection = mp.solutions.face_detection
 mp_selfie_segmentation = mp.solutions.selfie_segmentation
@@ -165,10 +165,97 @@ def detect_and_crop_faces(input_dir):
         rate = count / total_images * 100 if total_images > 0 else 0
         logger.info(f"{input_dir}: {reason} {count}/{total_images} ({rate:.1f}%)")
 
+def find_similar_images(input_dir):
+    processed_dir = os.path.join(input_dir, "processed")
+    resized_dir = os.path.join(input_dir, "resized")
+    logger.info(f"{processed_dir} の類似画像検索開始")
+    image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
+    logger.info(f"{processed_dir} で {len(image_files)} 画像を検出")
+    
+    def compare_images(img_path1, img_path2):
+        img1 = cv2.imread(img_path1, cv2.IMREAD_GRAYSCALE)
+        img2 = cv2.imread(img_path2, cv2.IMREAD_GRAYSCALE)
+        if img1 is None or img2 is None or img1.shape != img2.shape:
+            logger.error(f"比較失敗: {img_path1} vs {img_path2}")
+            return float('inf')
+        diff = cv2.absdiff(img1, img2).sum()
+        logger.info(f"差分計算: {img_path1} vs {img_path2}, diff={diff}")
+        return diff
+
+    groups = []
+    used_images = set()
+    for i, img1_path in enumerate(image_files):
+        if img1_path in used_images:
+            continue
+        current_group = [img1_path]
+        for j, img2_path in enumerate(image_files[i+1:], i+1):
+            if img2_path in used_images:
+                continue
+            diff = compare_images(img1_path, img2_path)
+            if diff <= SIMILARITY_THRESHOLD:
+                current_group.append(img2_path)
+                logger.info(f"類似画像検出: {img1_path} と {img2_path}")
+        if len(current_group) > 1:
+            groups.append(current_group)
+            used_images.update(current_group)
+    
+    logger.info(f"{len(groups)} グループを検出")
+    for group_idx, group in enumerate(groups, 1):
+        logger.info(f"グループ {group_idx} 表示開始")
+        group_images = []
+        for img_path in group:
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                group_images.append(img)
+                logger.info(f"表示用画像読み込み: {img_path}")
+            else:
+                logger.error(f"画像読み込み失敗: {img_path}")
+        if not group_images:
+            logger.warning(f"グループ {group_idx} に表示可能な画像がありません")
+            continue
+        max_height = max(img.shape[0] for img in group_images)
+        resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
+        display_image = cv2.hconcat(resized_images)
+        window_name = f"Group {group_idx}"
+        try:
+            cv2.imshow(window_name, display_image)
+            logger.info(f"グループ {group_idx} を表示: {window_name}")
+            key = cv2.waitKey(0) & 0xFF
+            cv2.destroyWindow(window_name)
+            if key == 27:
+                logger.info("ユーザーにより表示中断（Escキー）")
+                break
+        except Exception as e:
+            logger.error(f"グループ {group_idx} 表示エラー: {e}")
+    cv2.destroyAllWindows()
+    logger.info("類似画像グループの画面表示完了")
+
+    logger.info("類似画像削除処理開始")
+    for group_idx, group in enumerate(groups, 1):
+        if len(group) < 2:
+            continue
+        keep_img_path = group[0]
+        logger.info(f"グループ {group_idx}: 保持: {keep_img_path}")
+        for img_path in group[1:]:
+            logger.info(f"削除: {img_path} (processed)")
+            try:
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    logger.info(f"成功的に削除: {img_path} (processed)")
+                base_name = os.path.splitext(os.path.basename(img_path))[0]
+                for ext in ['.jpg', '.jpeg', '.png']:
+                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
+                    if os.path.exists(resized_path):
+                        os.remove(resized_path)
+                        logger.info(f"成功的に削除: {resized_path} (resized)")
+            except Exception as e:
+                logger.error(f"削除エラー {img_path}: {e}")
+
 def process_images(keyword):
     input_dir = OUTPUT_DIR
     logger.info(f"画像処理開始：{input_dir}")
     detect_and_crop_faces(input_dir)
+    find_similar_images(input_dir)
     logger.info(f"画像処理完了：{os.path.join(input_dir, 'resized')}")
 
 def main():
