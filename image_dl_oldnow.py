@@ -9,7 +9,7 @@ from icrawler.builtin import GoogleImageCrawler
 KEYWORD = "安藤サクラ"
 MAX_NUM = 100
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
-SIMILARITY_THRESHOLD = 1000000
+SIMILARITY_THRESHOLD = 2000000
 IMG_SIZE = 224
 
 logging.basicConfig(
@@ -251,12 +251,30 @@ def find_similar_images(input_dir):
             except Exception as e:
                 logger.error(f"削除エラー {img_path}: {e}")
 
+def cleanup_directories(input_dir):
+    logger.info("クリーンアップ開始")
+    resized_dir = os.path.join(input_dir, "resized")
+    try:
+        if os.path.exists(resized_dir):
+            shutil.rmtree(resized_dir)
+            logger.info(f"成功的に削除: {resized_dir} (resizedディレクトリ)")
+        else:
+            logger.warning(f"ディレクトリが存在しません: {resized_dir}")
+        for file in os.listdir(input_dir):
+            file_path = os.path.join(input_dir, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                logger.info(f"成功的に削除: {file_path} (元画像)")
+    except Exception as e:
+        logger.error(f"クリーンアップエラー: {e}")
+
 def process_images(keyword):
     input_dir = OUTPUT_DIR
     logger.info(f"画像処理開始：{input_dir}")
     detect_and_crop_faces(input_dir)
     find_similar_images(input_dir)
-    logger.info(f"画像処理完了：{os.path.join(input_dir, 'resized')}")
+    cleanup_directories(input_dir)
+    logger.info(f"画像処理完了：{input_dir}")
 
 def main():
     try:
