@@ -10,12 +10,12 @@ import face_alignment
 import torch
 
 KEYWORD = "安藤サクラ"
-MAX_NUM = 100
+MAX_NUM = 10
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
-SIMILARITY_THRESHOLD = 1120000
+SIMILARITY_THRESHOLD = 1250000
 IMG_SIZE = 224
-DISTANCE_THRESHOLD = 0.16
-FA_DISTANCE_THRESHOLD = 0.16
+DISTANCE_THRESHOLD = 0.05  # グループ数を減らすため閾値を緩和
+FA_DISTANCE_THRESHOLD = 0.04  # グループ数を減らすため閾値を緩和
 
 logging.basicConfig(
     filename='log.txt',
@@ -189,7 +189,7 @@ def find_similar_images(input_dir):
         img1 = cv2.imread(img_path1, cv2.IMREAD_GRAYSCALE)
         img2 = cv2.imread(img_path2, cv2.IMREAD_GRAYSCALE)
         if img1 is None or img2 is None or img1.shape != img2.shape:
-            logger.error(f"比較失敗: {img_path1} vs {img_path2}")
+            logger.error(f"比較失敗: {img_path1} vs {img2_path}")
             return float('inf')
         diff = cv2.absdiff(img1, img2).sum()
         logger.info(f"差分計算: {img_path1} vs {img_path2}, diff={diff}")
@@ -321,6 +321,7 @@ def compute_face_features(landmarks):
 
 def group_by_person(input_dir):
     processed_dir = os.path.join(input_dir, "processed")
+    resized_dir = os.path.join(input_dir, "resized")
     logger.info(f"{processed_dir} の人物グループ分け開始")
     image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
     logger.info(f"{processed_dir} で {len(image_files)} 画像を検出")
@@ -357,12 +358,8 @@ def group_by_person(input_dir):
         logger.warning("人物グループが検出されませんでした")
         return
 
-    max_group = max(groups, key=len)
-    logger.info(f"最多画像グループ: {len(max_group)} 画像")
-    other_groups = [g for g in groups if g != max_group]
-
-    logger.info(f"{len(other_groups)} グループを表示開始")
-    for group_idx, group in enumerate(other_groups, 1):
+    logger.info(f"{len(groups)} グループを検出")
+    for group_idx, group in enumerate(groups, 1):
         logger.info(f"グループ {group_idx} 表示開始")
         group_images = []
         for img_path in group:
@@ -378,7 +375,7 @@ def group_by_person(input_dir):
         max_height = max(img.shape[0] for img in group_images)
         resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
         display_image = cv2.hconcat(resized_images)
-        window_name = f"Other Person Group {group_idx}"
+        window_name = f"Person Group {group_idx}"
         try:
             cv2.imshow(window_name, display_image)
             logger.info(f"グループ {group_idx} を表示: {window_name}")
@@ -389,19 +386,29 @@ def group_by_person(input_dir):
                 break
         except Exception as e:
             logger.error(f"グループ {group_idx} 表示エラー: {e}")
-    cv2.destroyAllWindows()
-    logger.info("人物グループの画面表示完了")
-
-    logger.info("表示画像削除開始")
-    for group_idx, group in enumerate(other_groups, 1):
-        for img_path in group:
+    
+    logger.info("人物グループの削除処理開始")
+    for group_idx, group in enumerate(groups, 1):
+        if len(group) < 2:
+            continue
+        keep_img_path = group[0]
+        logger.info(f"グループ {group_idx}: 保持: {keep_img_path}")
+        for img_path in group[1:]:
             logger.info(f"削除: {img_path} (processed)")
             try:
                 if os.path.exists(img_path):
                     os.remove(img_path)
                     logger.info(f"成功的に削除: {img_path} (processed)")
+                base_name = os.path.splitext(os.path.basename(img_path))[0]
+                for ext in ['.jpg', '.jpeg', '.png']:
+                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
+                    if os.path.exists(resized_path):
+                        os.remove(resized_path)
+                        logger.info(f"成功的に削除: {resized_path} (resized)")
             except Exception as e:
                 logger.error(f"削除エラー {img_path}: {e}")
+    cv2.destroyAllWindows()
+    logger.info("人物グループの画面表示および削除完了")
 
 def extract_landmarks_fa(img_path):
     try:
@@ -453,6 +460,7 @@ def compute_face_features_fa(landmarks):
 
 def group_by_person_face_alignment(input_dir):
     processed_dir = os.path.join(input_dir, "processed")
+    resized_dir = os.path.join(input_dir, "resized")
     logger.info(f"FA: {processed_dir} の人物グループ分け開始")
     image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
     logger.info(f"FA: {processed_dir} で {len(image_files)} 画像を検出")
@@ -489,7 +497,7 @@ def group_by_person_face_alignment(input_dir):
         logger.warning("FA: 人物グループが検出されませんでした")
         return
 
-    logger.info(f"FA: {len(groups)} グループを表示開始")
+    logger.info(f"FA: {len(groups)} グループを検出")
     for group_idx, group in enumerate(groups, 1):
         logger.info(f"FA: グループ {group_idx} 表示開始")
         group_images = []
@@ -517,8 +525,29 @@ def group_by_person_face_alignment(input_dir):
                 break
         except Exception as e:
             logger.error(f"FA: グループ {group_idx} 表示エラー: {e}")
+    
+    logger.info("FA: 人物グループの削除処理開始")
+    for group_idx, group in enumerate(groups, 1):
+        if len(group) < 2:
+            continue
+        keep_img_path = group[0]
+        logger.info(f"FA: グループ {group_idx}: 保持: {keep_img_path}")
+        for img_path in group[1:]:
+            logger.info(f"FA: 削除: {img_path} (processed)")
+            try:
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    logger.info(f"FA: 成功的に削除: {img_path} (processed)")
+                base_name = os.path.splitext(os.path.basename(img_path))[0]
+                for ext in ['.jpg', '.jpeg', '.png']:
+                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
+                    if os.path.exists(resized_path):
+                        os.remove(resized_path)
+                        logger.info(f"FA: 成功的に削除: {resized_path} (resized)")
+            except Exception as e:
+                logger.error(f"FA: 削除エラー {img_path}: {e}")
     cv2.destroyAllWindows()
-    logger.info("FA: 人物グループの画面表示完了")
+    logger.info("FA: 人物グループの画面表示および削除完了")
 
 def cleanup_directories(input_dir):
     logger.info("クリーンアップ開始")
@@ -542,7 +571,6 @@ def process_images(keyword):
     logger.info(f"画像処理開始：{input_dir}")
     detect_and_crop_faces(input_dir)
     find_similar_images(input_dir)
-    cleanup_directories(input_dir)
     group_by_person(input_dir)
     group_by_person_face_alignment(input_dir)
     logger.info(f"画像処理完了：{input_dir}")
