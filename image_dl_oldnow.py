@@ -1,16 +1,21 @@
 import os
 import cv2
 import mediapipe as mp
+import numpy as np
 import random
 import logging
 import shutil
 from icrawler.builtin import GoogleImageCrawler
+import face_alignment
+import torch
 
 KEYWORD = "安藤サクラ"
 MAX_NUM = 100
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
-SIMILARITY_THRESHOLD = 2000000
+SIMILARITY_THRESHOLD = 1120000
 IMG_SIZE = 224
+DISTANCE_THRESHOLD = 0.16
+FA_DISTANCE_THRESHOLD = 0.16
 
 logging.basicConfig(
     filename='log.txt',
@@ -21,9 +26,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 mp_face_detection = mp.solutions.face_detection
+mp_face_mesh = mp.solutions.face_mesh
 mp_selfie_segmentation = mp.solutions.selfie_segmentation
 face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=True,
+    max_num_faces=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
 selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation()
+fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, flip_input=False, device='cuda' if torch.cuda.is_available() else 'cpu')
 
 def setup_crawler(storage_dir):
     return GoogleImageCrawler(storage={'root_dir': storage_dir})
@@ -251,6 +264,262 @@ def find_similar_images(input_dir):
             except Exception as e:
                 logger.error(f"削除エラー {img_path}: {e}")
 
+def extract_landmarks(img_path):
+    try:
+        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            logger.error(f"画像読み込み失敗: {img_path}")
+            return None
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        results = face_mesh.process(img_rgb)
+        if results.multi_face_landmarks:
+            landmarks = results.multi_face_landmarks[0].landmark
+            coords = [(l.x * IMG_SIZE, l.y * IMG_SIZE) for l in landmarks]
+            if len(coords) < 468:
+                logger.error(f"ランドマーク数不足: {img_path}")
+                return None
+            logger.info(f"ランドマーク検出成功: {img_path}")
+            return np.array(coords)
+        logger.info(f"ランドマーク検出失敗: {img_path}")
+        return None
+    except Exception as e:
+        logger.error(f"ランドマーク抽出エラー: {img_path}: {e}")
+        return None
+
+def compute_face_features(landmarks):
+    if landmarks is None:
+        return None
+    try:
+        left_eye = landmarks[159]
+        right_eye = landmarks[386]
+        nose = landmarks[4]
+        mouth_left = landmarks[61]
+        mouth_right = landmarks[291]
+        chin = landmarks[152]
+        forehead = landmarks[10]
+        left_brow = landmarks[70]
+        right_brow = landmarks[300]
+        eye_dist = np.linalg.norm(left_eye - right_eye) + 1e-10
+        features = [
+            np.linalg.norm(nose - left_eye) / eye_dist,
+            np.linalg.norm(nose - right_eye) / eye_dist,
+            np.linalg.norm(mouth_left - nose) / eye_dist,
+            np.linalg.norm(mouth_right - nose) / eye_dist,
+            np.linalg.norm(chin - nose) / eye_dist,
+            np.linalg.norm(forehead - nose) / eye_dist,
+            np.linalg.norm(left_brow - right_brow) / eye_dist,
+            np.linalg.norm(left_eye - left_brow) / eye_dist,
+            np.linalg.norm(right_eye - right_brow) / eye_dist
+        ]
+        features = np.array(features)
+        features = (features - np.mean(features)) / (np.std(features) + 1e-10)
+        logger.info(f"特徴量計算成功: {features.tolist()}")
+        return features
+    except Exception as e:
+        logger.error(f"特徴量計算エラー: {e}")
+        return None
+
+def group_by_person(input_dir):
+    processed_dir = os.path.join(input_dir, "processed")
+    logger.info(f"{processed_dir} の人物グループ分け開始")
+    image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
+    logger.info(f"{processed_dir} で {len(image_files)} 画像を検出")
+
+    features_dict = {}
+    for img_path in image_files:
+        landmarks = extract_landmarks(img_path)
+        features = compute_face_features(landmarks)
+        if features is not None:
+            features_dict[img_path] = features
+        else:
+            logger.info(f"特徴量抽出失敗、スキップ: {img_path}")
+
+    groups = []
+    used_images = set()
+    for i, img1_path in enumerate(features_dict):
+        if img1_path in used_images:
+            continue
+        current_group = [img1_path]
+        features1 = features_dict[img1_path]
+        for j, img2_path in enumerate(list(features_dict)[i+1:], i+1):
+            if img2_path in used_images:
+                continue
+            features2 = features_dict[img2_path]
+            dist = np.linalg.norm(features1 - features2)
+            logger.info(f"距離計算: {img1_path} vs {img2_path}, dist={dist}")
+            if dist < DISTANCE_THRESHOLD:
+                current_group.append(img2_path)
+        if len(current_group) >= 1:
+            groups.append(current_group)
+            used_images.update(current_group)
+
+    if not groups:
+        logger.warning("人物グループが検出されませんでした")
+        return
+
+    max_group = max(groups, key=len)
+    logger.info(f"最多画像グループ: {len(max_group)} 画像")
+    other_groups = [g for g in groups if g != max_group]
+
+    logger.info(f"{len(other_groups)} グループを表示開始")
+    for group_idx, group in enumerate(other_groups, 1):
+        logger.info(f"グループ {group_idx} 表示開始")
+        group_images = []
+        for img_path in group:
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                group_images.append(img)
+                logger.info(f"表示用画像読み込み: {img_path}")
+            else:
+                logger.error(f"画像読み込み失敗: {img_path}")
+        if not group_images:
+            logger.warning(f"グループ {group_idx} に表示可能な画像がありません")
+            continue
+        max_height = max(img.shape[0] for img in group_images)
+        resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
+        display_image = cv2.hconcat(resized_images)
+        window_name = f"Other Person Group {group_idx}"
+        try:
+            cv2.imshow(window_name, display_image)
+            logger.info(f"グループ {group_idx} を表示: {window_name}")
+            key = cv2.waitKey(0) & 0xFF
+            cv2.destroyWindow(window_name)
+            if key == 27:
+                logger.info("ユーザーにより表示中断（Escキー）")
+                break
+        except Exception as e:
+            logger.error(f"グループ {group_idx} 表示エラー: {e}")
+    cv2.destroyAllWindows()
+    logger.info("人物グループの画面表示完了")
+
+    logger.info("表示画像削除開始")
+    for group_idx, group in enumerate(other_groups, 1):
+        for img_path in group:
+            logger.info(f"削除: {img_path} (processed)")
+            try:
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    logger.info(f"成功的に削除: {img_path} (processed)")
+            except Exception as e:
+                logger.error(f"削除エラー {img_path}: {e}")
+
+def extract_landmarks_fa(img_path):
+    try:
+        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            logger.error(f"FA: 画像読み込み失敗: {img_path}")
+            return None
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        preds = fa.get_landmarks(img_rgb)
+        if preds and len(preds) > 0:
+            landmarks = preds[0]
+            if len(landmarks) != 68:
+                logger.error(f"FA: ランドマーク数不正: {img_path}, 取得数={len(landmarks)}")
+                return None
+            logger.info(f"FA: ランドマーク検出成功: {img_path}")
+            return np.array(landmarks)
+        logger.info(f"FA: ランドマーク検出失敗: {img_path}")
+        return None
+    except Exception as e:
+        logger.error(f"FA: ランドマーク抽出エラー: {img_path}: {e}")
+        return None
+
+def compute_face_features_fa(landmarks):
+    if landmarks is None:
+        return None
+    try:
+        left_eye = landmarks[36]
+        right_eye = landmarks[45]
+        nose = landmarks[30]
+        mouth_left = landmarks[48]
+        mouth_right = landmarks[54]
+        chin = landmarks[8]
+        eye_dist = np.linalg.norm(left_eye - right_eye) + 1e-10
+        features = [
+            np.linalg.norm(nose - left_eye) / eye_dist,
+            np.linalg.norm(nose - right_eye) / eye_dist,
+            np.linalg.norm(mouth_left - nose) / eye_dist,
+            np.linalg.norm(mouth_right - nose) / eye_dist,
+            np.linalg.norm(chin - nose) / eye_dist,
+            np.linalg.norm(mouth_left - mouth_right) / eye_dist
+        ]
+        features = np.array(features)
+        features = (features - np.mean(features)) / (np.std(features) + 1e-10)
+        logger.info(f"FA: 特徴量計算成功: {features.tolist()}")
+        return features
+    except Exception as e:
+        logger.error(f"FA: 特徴量計算エラー: {e}")
+        return None
+
+def group_by_person_face_alignment(input_dir):
+    processed_dir = os.path.join(input_dir, "processed")
+    logger.info(f"FA: {processed_dir} の人物グループ分け開始")
+    image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
+    logger.info(f"FA: {processed_dir} で {len(image_files)} 画像を検出")
+
+    features_dict = {}
+    for img_path in image_files:
+        landmarks = extract_landmarks_fa(img_path)
+        features = compute_face_features_fa(landmarks)
+        if features is not None:
+            features_dict[img_path] = features
+        else:
+            logger.info(f"FA: 特徴量抽出失敗、スキップ: {img_path}")
+
+    groups = []
+    used_images = set()
+    for i, img1_path in enumerate(features_dict):
+        if img1_path in used_images:
+            continue
+        current_group = [img1_path]
+        features1 = features_dict[img1_path]
+        for j, img2_path in enumerate(list(features_dict)[i+1:], i+1):
+            if img2_path in used_images:
+                continue
+            features2 = features_dict[img2_path]
+            dist = np.linalg.norm(features1 - features2)
+            logger.info(f"FA: 距離計算: {img1_path} vs {img2_path}, dist={dist}")
+            if dist < FA_DISTANCE_THRESHOLD:
+                current_group.append(img2_path)
+        if len(current_group) >= 1:
+            groups.append(current_group)
+            used_images.update(current_group)
+
+    if not groups:
+        logger.warning("FA: 人物グループが検出されませんでした")
+        return
+
+    logger.info(f"FA: {len(groups)} グループを表示開始")
+    for group_idx, group in enumerate(groups, 1):
+        logger.info(f"FA: グループ {group_idx} 表示開始")
+        group_images = []
+        for img_path in group:
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                group_images.append(img)
+                logger.info(f"FA: 表示用画像読み込み: {img_path}")
+            else:
+                logger.error(f"FA: 画像読み込み失敗: {img_path}")
+        if not group_images:
+            logger.warning(f"FA: グループ {group_idx} に表示可能な画像がありません")
+            continue
+        max_height = max(img.shape[0] for img in group_images)
+        resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
+        display_image = cv2.hconcat(resized_images)
+        window_name = f"FA Group {group_idx}"
+        try:
+            cv2.imshow(window_name, display_image)
+            logger.info(f"FA: グループ {group_idx} を表示: {window_name}")
+            key = cv2.waitKey(0) & 0xFF
+            cv2.destroyWindow(window_name)
+            if key == 27:
+                logger.info("FA: ユーザーにより表示中断（Escキー）")
+                break
+        except Exception as e:
+            logger.error(f"FA: グループ {group_idx} 表示エラー: {e}")
+    cv2.destroyAllWindows()
+    logger.info("FA: 人物グループの画面表示完了")
+
 def cleanup_directories(input_dir):
     logger.info("クリーンアップ開始")
     resized_dir = os.path.join(input_dir, "resized")
@@ -274,6 +543,8 @@ def process_images(keyword):
     detect_and_crop_faces(input_dir)
     find_similar_images(input_dir)
     cleanup_directories(input_dir)
+    group_by_person(input_dir)
+    group_by_person_face_alignment(input_dir)
     logger.info(f"画像処理完了：{input_dir}")
 
 def main():
@@ -289,6 +560,7 @@ def main():
         raise
     finally:
         face_detection.close()
+        face_mesh.close()
         selfie_segmentation.close()
         cv2.destroyAllWindows()
 
