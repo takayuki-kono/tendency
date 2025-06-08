@@ -1,6 +1,5 @@
 import os
 import cv2
-import mediapipe as mp
 import numpy as np
 import random
 import logging
@@ -14,8 +13,6 @@ MAX_NUM = 10
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
 SIMILARITY_THRESHOLD = 1250000
 IMG_SIZE = 224
-DISTANCE_THRESHOLD = 0.05  # グループ数を減らすため閾値を緩和
-FA_DISTANCE_THRESHOLD = 0.04  # グループ数を減らすため閾値を緩和
 
 logging.basicConfig(
     filename='log.txt',
@@ -25,17 +22,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-mp_face_detection = mp.solutions.face_detection
-mp_face_mesh = mp.solutions.face_mesh
-mp_selfie_segmentation = mp.solutions.selfie_segmentation
-face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=True,
-    max_num_faces=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
-selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation()
 fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, flip_input=False, device='cuda' if torch.cuda.is_available() else 'cpu')
 
 def setup_crawler(storage_dir):
@@ -114,12 +100,16 @@ def consolidate_files():
 def detect_and_crop_faces(input_dir):
     resized_dir = os.path.join(input_dir, "resized")
     processed_dir = os.path.join(input_dir, "processed")
+    rotated_dir = os.path.join(input_dir, "rotated")
     if os.path.exists(resized_dir):
         shutil.rmtree(resized_dir)
     if os.path.exists(processed_dir):
         shutil.rmtree(processed_dir)
+    if os.path.exists(rotated_dir):
+        shutil.rmtree(rotated_dir)
     os.makedirs(resized_dir, exist_ok=True)
     os.makedirs(processed_dir, exist_ok=True)
+    os.makedirs(rotated_dir, exist_ok=True)
     skip_counters = {'no_face': 0, 'deleted_no_face': 0}
     total_images = 0
     files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
@@ -138,8 +128,8 @@ def detect_and_crop_faces(input_dir):
                 logger.error(f"削除エラー {img_path} (no_face): {e}")
             continue
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = face_detection.process(img_rgb)
-        if not results.detections:
+        preds = fa.get_landmarks(img_rgb)
+        if not preds or len(preds) == 0:
             skip_counters['no_face'] += 1
             logger.info(f"顔検出失敗 {filename}")
             try:
@@ -149,31 +139,100 @@ def detect_and_crop_faces(input_dir):
             except Exception as e:
                 logger.error(f"削除エラー {img_path} (no_face): {e}")
             continue
+        landmarks = preds[0]
+        if len(landmarks) != 68:
+            skip_counters['no_face'] += 1
+            logger.info(f"ランドマーク数不正 {filename}")
+            try:
+                os.remove(img_path)
+                skip_counters['deleted_no_face'] += 1
+                logger.info(f"削除：{img_path} (no_face)")
+            except Exception as e:
+                logger.error(f"削除エラー {img_path} (no_face): {e}")
+            continue
+        nose = landmarks[30]
+        distances = np.linalg.norm(landmarks - nose, axis=1)
+        max_dist = np.max(distances)
+        x_min, x_max = int(nose[0] - max_dist), int(nose[0] + max_dist)
+        y_min, y_max = int(nose[1] - max_dist), int(nose[1] + max_dist)
         h, w = img.shape[:2]
-        for face_idx, detection in enumerate(results.detections):
-            bboxC = detection.location_data.relative_bounding_box
-            x, y, width, height = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
-            x, y = max(0, min(x, w-1)), max(0, min(y, h-1))
-            width, height = min(width, w-x), min(height, h-y)
-            face_image = img[y:y+height, x:x+width]
-            if face_image is None or face_image.size == 0:
-                skip_counters['no_face'] += 1
-                logger.info(f"顔領域切り取り失敗 {filename}")
-                continue
-            face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
-            base_name, ext = os.path.splitext(filename)
-            resized_filename = f"{base_name}_face{face_idx+1}{ext}"
-            resized_path = os.path.join(resized_dir, resized_filename)
-            cv2.imwrite(resized_path, face_image_resized)
-            logger.info(f"透過画像保存：{resized_path}")
-            gray = cv2.cvtColor(face_image_resized, cv2.COLOR_BGR2GRAY)
-            if gray.shape != (IMG_SIZE, IMG_SIZE):
-                logger.error(f"無効な画像サイズ: {resized_filename}")
-                continue
-            processed_filename = f"{base_name}_face{face_idx+1}.png"
-            processed_path = os.path.join(processed_dir, processed_filename)
-            cv2.imwrite(processed_path, gray)
-            logger.info(f"グレースケール画像保存：{processed_path}")
+        pad_top = max(0, -y_min)
+        pad_bottom = max(0, y_max - h)
+        pad_left = max(0, -x_min)
+        pad_right = max(0, x_max - w)
+        if pad_top or pad_bottom or pad_left or pad_right:
+            img = cv2.copyMakeBorder(img, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            landmarks = landmarks + [pad_left, pad_top]
+            x_min, x_max = x_min + pad_left, x_max + pad_left
+            y_min, y_max = y_min + pad_top, y_max + pad_top
+        face_image = img[y_min:y_max, x_min:x_max]
+        if face_image is None or face_image.size == 0:
+            skip_counters['no_face'] += 1
+            logger.info(f"顔領域切り取り失敗 {filename}")
+            continue
+        face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
+        scale_x = IMG_SIZE / (x_max - x_min)
+        scale_y = IMG_SIZE / (y_max - y_min)
+        for idx in [0, 8, 16, 30]:
+            x = int((landmarks[idx][0] - x_min) * scale_x)
+            y = int((landmarks[idx][1] - y_min) * scale_y)
+            cv2.circle(face_image_resized, (x, y), 3, (0, 0, 255), -1)
+        base_name, ext = os.path.splitext(filename)
+        resized_filename = f"{base_name}_face1{ext}"
+        resized_path = os.path.join(resized_dir, resized_filename)
+        cv2.imwrite(resized_path, face_image_resized)
+        logger.info(f"リサイズ画像保存：{resized_path}")
+        gray = cv2.cvtColor(face_image_resized, cv2.COLOR_BGR2GRAY)
+        if gray.shape != (IMG_SIZE, IMG_SIZE):
+            logger.error(f"無効な画像サイズ: {resized_filename}")
+            continue
+        processed_filename = f"{base_name}_face1.png"
+        processed_path = os.path.join(processed_dir, processed_filename)
+        cv2.imwrite(processed_path, gray)
+        logger.info(f"グレースケール画像保存：{processed_path}")
+        chin = landmarks[8]
+        nose = landmarks[30]
+        dx = nose[0] - chin[0]
+        dy = nose[1] - chin[1]
+        angle = np.arctan2(dx, -dy) * 180 / np.pi
+        center = ((x_min + x_max) / 2, (y_min + y_max) / 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated_img = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]))
+        rotated_landmarks = fa.get_landmarks(cv2.cvtColor(rotated_img, cv2.COLOR_BGR2RGB))
+        if not rotated_landmarks or len(rotated_landmarks) == 0:
+            logger.info(f"回転後顔検出失敗 {filename}")
+            continue
+        r_landmarks = rotated_landmarks[0]
+        r_nose = r_landmarks[30]
+        r_distances = np.linalg.norm(r_landmarks - r_nose, axis=1)
+        r_max_dist = np.max(r_distances)
+        rx_min, rx_max = int(r_nose[0] - r_max_dist), int(r_nose[0] + r_max_dist)
+        ry_min, ry_max = int(r_nose[1] - r_max_dist), int(r_nose[1] + r_max_dist)
+        rh, rw = rotated_img.shape[:2]
+        r_pad_top = max(0, -ry_min)
+        r_pad_bottom = max(0, ry_max - rh)
+        r_pad_left = max(0, -rx_min)
+        r_pad_right = max(0, rx_max - rw)
+        if r_pad_top or r_pad_bottom or r_pad_left or r_pad_right:
+            rotated_img = cv2.copyMakeBorder(rotated_img, r_pad_top, r_pad_bottom, r_pad_left, r_pad_right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            r_landmarks = r_landmarks + [r_pad_left, r_pad_top]
+            rx_min, rx_max = rx_min + r_pad_left, rx_max + r_pad_left
+            ry_min, ry_max = ry_min + r_pad_top, ry_max + r_pad_top
+        rotated_face = rotated_img[ry_min:ry_max, rx_min:rx_max]
+        if rotated_face is None or rotated_face.size == 0:
+            logger.info(f"回転後顔領域切り取り失敗 {filename}")
+            continue
+        rotated_face_resized = cv2.resize(rotated_face, (IMG_SIZE, IMG_SIZE))
+        r_scale_x = IMG_SIZE / (rx_max - rx_min)
+        r_scale_y = IMG_SIZE / (ry_max - ry_min)
+        for idx in [0, 8, 16, 30]:
+            x = int((r_landmarks[idx][0] - rx_min) * r_scale_x)
+            y = int((r_landmarks[idx][1] - ry_min) * r_scale_y)
+            cv2.circle(rotated_face_resized, (x, y), 3, (0, 0, 255), -1)
+        rotated_filename = f"{base_name}_face1_rotated{ext}"
+        rotated_path = os.path.join(rotated_dir, rotated_filename)
+        cv2.imwrite(rotated_path, rotated_face_resized)
+        logger.info(f"回転画像保存：{rotated_path}")
     for reason, count in skip_counters.items():
         rate = count / total_images * 100 if total_images > 0 else 0
         logger.info(f"{input_dir}: {reason} {count}/{total_images} ({rate:.1f}%)")
@@ -181,6 +240,7 @@ def detect_and_crop_faces(input_dir):
 def find_similar_images(input_dir):
     processed_dir = os.path.join(input_dir, "processed")
     resized_dir = os.path.join(input_dir, "resized")
+    rotated_dir = os.path.join(input_dir, "rotated")
     logger.info(f"{processed_dir} の類似画像検索開始")
     image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
     logger.info(f"{processed_dir} で {len(image_files)} 画像を検出")
@@ -189,7 +249,7 @@ def find_similar_images(input_dir):
         img1 = cv2.imread(img_path1, cv2.IMREAD_GRAYSCALE)
         img2 = cv2.imread(img_path2, cv2.IMREAD_GRAYSCALE)
         if img1 is None or img2 is None or img1.shape != img2.shape:
-            logger.error(f"比較失敗: {img_path1} vs {img2_path}")
+            logger.error(f"比較失敗: {img_path1} vs {img_path2}")
             return float('inf')
         diff = cv2.absdiff(img1, img2).sum()
         logger.info(f"差分計算: {img_path1} vs {img_path2}, diff={diff}")
@@ -261,303 +321,22 @@ def find_similar_images(input_dir):
                     if os.path.exists(resized_path):
                         os.remove(resized_path)
                         logger.info(f"成功的に削除: {resized_path} (resized)")
+                    rotated_path = os.path.join(rotated_dir, f"{base_name}_rotated{ext}")
+                    if os.path.exists(rotated_path):
+                        os.remove(rotated_path)
+                        logger.info(f"成功的に削除: {rotated_path} (rotated)")
             except Exception as e:
                 logger.error(f"削除エラー {img_path}: {e}")
-
-def extract_landmarks(img_path):
-    try:
-        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            logger.error(f"画像読み込み失敗: {img_path}")
-            return None
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        results = face_mesh.process(img_rgb)
-        if results.multi_face_landmarks:
-            landmarks = results.multi_face_landmarks[0].landmark
-            coords = [(l.x * IMG_SIZE, l.y * IMG_SIZE) for l in landmarks]
-            if len(coords) < 468:
-                logger.error(f"ランドマーク数不足: {img_path}")
-                return None
-            logger.info(f"ランドマーク検出成功: {img_path}")
-            return np.array(coords)
-        logger.info(f"ランドマーク検出失敗: {img_path}")
-        return None
-    except Exception as e:
-        logger.error(f"ランドマーク抽出エラー: {img_path}: {e}")
-        return None
-
-def compute_face_features(landmarks):
-    if landmarks is None:
-        return None
-    try:
-        left_eye = landmarks[159]
-        right_eye = landmarks[386]
-        nose = landmarks[4]
-        mouth_left = landmarks[61]
-        mouth_right = landmarks[291]
-        chin = landmarks[152]
-        forehead = landmarks[10]
-        left_brow = landmarks[70]
-        right_brow = landmarks[300]
-        eye_dist = np.linalg.norm(left_eye - right_eye) + 1e-10
-        features = [
-            np.linalg.norm(nose - left_eye) / eye_dist,
-            np.linalg.norm(nose - right_eye) / eye_dist,
-            np.linalg.norm(mouth_left - nose) / eye_dist,
-            np.linalg.norm(mouth_right - nose) / eye_dist,
-            np.linalg.norm(chin - nose) / eye_dist,
-            np.linalg.norm(forehead - nose) / eye_dist,
-            np.linalg.norm(left_brow - right_brow) / eye_dist,
-            np.linalg.norm(left_eye - left_brow) / eye_dist,
-            np.linalg.norm(right_eye - right_brow) / eye_dist
-        ]
-        features = np.array(features)
-        features = (features - np.mean(features)) / (np.std(features) + 1e-10)
-        logger.info(f"特徴量計算成功: {features.tolist()}")
-        return features
-    except Exception as e:
-        logger.error(f"特徴量計算エラー: {e}")
-        return None
-
-def group_by_person(input_dir):
-    processed_dir = os.path.join(input_dir, "processed")
-    resized_dir = os.path.join(input_dir, "resized")
-    logger.info(f"{processed_dir} の人物グループ分け開始")
-    image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
-    logger.info(f"{processed_dir} で {len(image_files)} 画像を検出")
-
-    features_dict = {}
-    for img_path in image_files:
-        landmarks = extract_landmarks(img_path)
-        features = compute_face_features(landmarks)
-        if features is not None:
-            features_dict[img_path] = features
-        else:
-            logger.info(f"特徴量抽出失敗、スキップ: {img_path}")
-
-    groups = []
-    used_images = set()
-    for i, img1_path in enumerate(features_dict):
-        if img1_path in used_images:
-            continue
-        current_group = [img1_path]
-        features1 = features_dict[img1_path]
-        for j, img2_path in enumerate(list(features_dict)[i+1:], i+1):
-            if img2_path in used_images:
-                continue
-            features2 = features_dict[img2_path]
-            dist = np.linalg.norm(features1 - features2)
-            logger.info(f"距離計算: {img1_path} vs {img2_path}, dist={dist}")
-            if dist < DISTANCE_THRESHOLD:
-                current_group.append(img2_path)
-        if len(current_group) >= 1:
-            groups.append(current_group)
-            used_images.update(current_group)
-
-    if not groups:
-        logger.warning("人物グループが検出されませんでした")
-        return
-
-    logger.info(f"{len(groups)} グループを検出")
-    for group_idx, group in enumerate(groups, 1):
-        logger.info(f"グループ {group_idx} 表示開始")
-        group_images = []
-        for img_path in group:
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                group_images.append(img)
-                logger.info(f"表示用画像読み込み: {img_path}")
-            else:
-                logger.error(f"画像読み込み失敗: {img_path}")
-        if not group_images:
-            logger.warning(f"グループ {group_idx} に表示可能な画像がありません")
-            continue
-        max_height = max(img.shape[0] for img in group_images)
-        resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
-        display_image = cv2.hconcat(resized_images)
-        window_name = f"Person Group {group_idx}"
-        try:
-            cv2.imshow(window_name, display_image)
-            logger.info(f"グループ {group_idx} を表示: {window_name}")
-            key = cv2.waitKey(0) & 0xFF
-            cv2.destroyWindow(window_name)
-            if key == 27:
-                logger.info("ユーザーにより表示中断（Escキー）")
-                break
-        except Exception as e:
-            logger.error(f"グループ {group_idx} 表示エラー: {e}")
-    
-    logger.info("人物グループの削除処理開始")
-    for group_idx, group in enumerate(groups, 1):
-        if len(group) < 2:
-            continue
-        keep_img_path = group[0]
-        logger.info(f"グループ {group_idx}: 保持: {keep_img_path}")
-        for img_path in group[1:]:
-            logger.info(f"削除: {img_path} (processed)")
-            try:
-                if os.path.exists(img_path):
-                    os.remove(img_path)
-                    logger.info(f"成功的に削除: {img_path} (processed)")
-                base_name = os.path.splitext(os.path.basename(img_path))[0]
-                for ext in ['.jpg', '.jpeg', '.png']:
-                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
-                    if os.path.exists(resized_path):
-                        os.remove(resized_path)
-                        logger.info(f"成功的に削除: {resized_path} (resized)")
-            except Exception as e:
-                logger.error(f"削除エラー {img_path}: {e}")
-    cv2.destroyAllWindows()
-    logger.info("人物グループの画面表示および削除完了")
-
-def extract_landmarks_fa(img_path):
-    try:
-        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            logger.error(f"FA: 画像読み込み失敗: {img_path}")
-            return None
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        preds = fa.get_landmarks(img_rgb)
-        if preds and len(preds) > 0:
-            landmarks = preds[0]
-            if len(landmarks) != 68:
-                logger.error(f"FA: ランドマーク数不正: {img_path}, 取得数={len(landmarks)}")
-                return None
-            logger.info(f"FA: ランドマーク検出成功: {img_path}")
-            return np.array(landmarks)
-        logger.info(f"FA: ランドマーク検出失敗: {img_path}")
-        return None
-    except Exception as e:
-        logger.error(f"FA: ランドマーク抽出エラー: {img_path}: {e}")
-        return None
-
-def compute_face_features_fa(landmarks):
-    if landmarks is None:
-        return None
-    try:
-        left_eye = landmarks[36]
-        right_eye = landmarks[45]
-        nose = landmarks[30]
-        mouth_left = landmarks[48]
-        mouth_right = landmarks[54]
-        chin = landmarks[8]
-        eye_dist = np.linalg.norm(left_eye - right_eye) + 1e-10
-        features = [
-            np.linalg.norm(nose - left_eye) / eye_dist,
-            np.linalg.norm(nose - right_eye) / eye_dist,
-            np.linalg.norm(mouth_left - nose) / eye_dist,
-            np.linalg.norm(mouth_right - nose) / eye_dist,
-            np.linalg.norm(chin - nose) / eye_dist,
-            np.linalg.norm(mouth_left - mouth_right) / eye_dist
-        ]
-        features = np.array(features)
-        features = (features - np.mean(features)) / (np.std(features) + 1e-10)
-        logger.info(f"FA: 特徴量計算成功: {features.tolist()}")
-        return features
-    except Exception as e:
-        logger.error(f"FA: 特徴量計算エラー: {e}")
-        return None
-
-def group_by_person_face_alignment(input_dir):
-    processed_dir = os.path.join(input_dir, "processed")
-    resized_dir = os.path.join(input_dir, "resized")
-    logger.info(f"FA: {processed_dir} の人物グループ分け開始")
-    image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
-    logger.info(f"FA: {processed_dir} で {len(image_files)} 画像を検出")
-
-    features_dict = {}
-    for img_path in image_files:
-        landmarks = extract_landmarks_fa(img_path)
-        features = compute_face_features_fa(landmarks)
-        if features is not None:
-            features_dict[img_path] = features
-        else:
-            logger.info(f"FA: 特徴量抽出失敗、スキップ: {img_path}")
-
-    groups = []
-    used_images = set()
-    for i, img1_path in enumerate(features_dict):
-        if img1_path in used_images:
-            continue
-        current_group = [img1_path]
-        features1 = features_dict[img1_path]
-        for j, img2_path in enumerate(list(features_dict)[i+1:], i+1):
-            if img2_path in used_images:
-                continue
-            features2 = features_dict[img2_path]
-            dist = np.linalg.norm(features1 - features2)
-            logger.info(f"FA: 距離計算: {img1_path} vs {img2_path}, dist={dist}")
-            if dist < FA_DISTANCE_THRESHOLD:
-                current_group.append(img2_path)
-        if len(current_group) >= 1:
-            groups.append(current_group)
-            used_images.update(current_group)
-
-    if not groups:
-        logger.warning("FA: 人物グループが検出されませんでした")
-        return
-
-    logger.info(f"FA: {len(groups)} グループを検出")
-    for group_idx, group in enumerate(groups, 1):
-        logger.info(f"FA: グループ {group_idx} 表示開始")
-        group_images = []
-        for img_path in group:
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                group_images.append(img)
-                logger.info(f"FA: 表示用画像読み込み: {img_path}")
-            else:
-                logger.error(f"FA: 画像読み込み失敗: {img_path}")
-        if not group_images:
-            logger.warning(f"FA: グループ {group_idx} に表示可能な画像がありません")
-            continue
-        max_height = max(img.shape[0] for img in group_images)
-        resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
-        display_image = cv2.hconcat(resized_images)
-        window_name = f"FA Group {group_idx}"
-        try:
-            cv2.imshow(window_name, display_image)
-            logger.info(f"FA: グループ {group_idx} を表示: {window_name}")
-            key = cv2.waitKey(0) & 0xFF
-            cv2.destroyWindow(window_name)
-            if key == 27:
-                logger.info("FA: ユーザーにより表示中断（Escキー）")
-                break
-        except Exception as e:
-            logger.error(f"FA: グループ {group_idx} 表示エラー: {e}")
-    
-    logger.info("FA: 人物グループの削除処理開始")
-    for group_idx, group in enumerate(groups, 1):
-        if len(group) < 2:
-            continue
-        keep_img_path = group[0]
-        logger.info(f"FA: グループ {group_idx}: 保持: {keep_img_path}")
-        for img_path in group[1:]:
-            logger.info(f"FA: 削除: {img_path} (processed)")
-            try:
-                if os.path.exists(img_path):
-                    os.remove(img_path)
-                    logger.info(f"FA: 成功的に削除: {img_path} (processed)")
-                base_name = os.path.splitext(os.path.basename(img_path))[0]
-                for ext in ['.jpg', '.jpeg', '.png']:
-                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
-                    if os.path.exists(resized_path):
-                        os.remove(resized_path)
-                        logger.info(f"FA: 成功的に削除: {resized_path} (resized)")
-            except Exception as e:
-                logger.error(f"FA: 削除エラー {img_path}: {e}")
-    cv2.destroyAllWindows()
-    logger.info("FA: 人物グループの画面表示および削除完了")
 
 def cleanup_directories(input_dir):
     logger.info("クリーンアップ開始")
-    resized_dir = os.path.join(input_dir, "resized")
+    processed_dir = os.path.join(input_dir, "processed")
     try:
-        if os.path.exists(resized_dir):
-            shutil.rmtree(resized_dir)
-            logger.info(f"成功的に削除: {resized_dir} (resizedディレクトリ)")
+        if os.path.exists(processed_dir):
+            shutil.rmtree(processed_dir)
+            logger.info(f"成功的に削除: {processed_dir} (processedディレクトリ)")
         else:
-            logger.warning(f"ディレクトリが存在しません: {resized_dir}")
+            logger.warning(f"ディレクトリが存在しません: {processed_dir}")
         for file in os.listdir(input_dir):
             file_path = os.path.join(input_dir, file)
             if os.path.isfile(file_path):
@@ -571,8 +350,7 @@ def process_images(keyword):
     logger.info(f"画像処理開始：{input_dir}")
     detect_and_crop_faces(input_dir)
     find_similar_images(input_dir)
-    group_by_person(input_dir)
-    group_by_person_face_alignment(input_dir)
+    cleanup_directories(input_dir)
     logger.info(f"画像処理完了：{input_dir}")
 
 def main():
@@ -587,9 +365,6 @@ def main():
         logger.error(f"メインエラー: {e}")
         raise
     finally:
-        face_detection.close()
-        face_mesh.close()
-        selfie_segmentation.close()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
