@@ -186,8 +186,8 @@ def detect_and_crop_faces(input_dir):
             logger.info(f"バウンディングボックス画像サイズ: {face_img.shape} for {filename}")
 
             # バウンディングボックス画像を保存
-            base_name, ext = os.path.splitext(filename)
-            bbox_filename = f"{base_name}_bbox{ext}"
+            base_name, ext = os.path.splitext(filename) # base_name will be like "0000_001"
+            bbox_filename = f"{base_name}{ext}" # Keep original filename
             bbox_path = os.path.join(bbox_cropped_dir, bbox_filename)
             cv2.imwrite(bbox_path, face_img)
             logger.info(f"バウンディングボックス画像保存：{bbox_path}")
@@ -248,8 +248,8 @@ def detect_and_crop_faces(input_dir):
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
             bbox_rotated_img = cv2.warpAffine(face_img, M, (face_img.shape[1], face_img.shape[0]))
 
-            # 傾き修正後のバウンディングボックス画像を保存
-            bbox_rotated_filename = f"{base_name}_bbox_rotated{ext}"
+            # 傾き修正後のバウンディングボックス画像を保存 (ファイル名は変更しない)
+            bbox_rotated_filename = f"{base_name}{ext}"
             bbox_rotated_path = os.path.join(bbox_rotated_dir, bbox_rotated_filename)
             cv2.imwrite(bbox_rotated_path, bbox_rotated_img)
             logger.info(f"傾き修正バウンディングボックス画像保存：{bbox_rotated_path}")
@@ -296,16 +296,16 @@ def detect_and_crop_faces(input_dir):
                 else:
                     logger.warning(f"Invalid landmark position for {point} in {filename}: ({x}, {y})")
 
-            resized_filename = f"{base_name}_face1{ext}"
+            resized_filename = f"{base_name}{ext}" # ファイル名は変更しない
             resized_path = os.path.join(resized_dir, resized_filename)
             cv2.imwrite(resized_path, face_image_resized)
             logger.info(f"リサイズ画像保存：{resized_path}")
 
             gray = cv2.cvtColor(face_image_resized, cv2.COLOR_BGR2GRAY)
             if gray.shape != (IMG_SIZE, IMG_SIZE):
-                logger.error(f"無効な画像サイズ: {resized_filename}")
+                logger.error(f"無効な画像サイズ: {filename}")
                 continue
-            processed_filename = f"{base_name}_face1.png"
+            processed_filename = f"{base_name}.png" # グレースケールは常に.png
             processed_path = os.path.join(processed_dir, processed_filename)
             cv2.imwrite(processed_path, gray)
             logger.info(f"グレースケール画像保存：{processed_path}")
@@ -393,7 +393,7 @@ def detect_and_crop_faces(input_dir):
                 else:
                     logger.warning(f"Invalid landmark position for {point} in {filename}: ({rx}, {ry})")
 
-            rotated_filename = f"{base_name}_face1_rotated{ext}"
+            rotated_filename = f"{base_name}{ext}" # ファイル名は変更しない
             rotated_path = os.path.join(rotated_dir, rotated_filename)
             cv2.imwrite(rotated_path, rotated_face_resized)
             logger.info(f"回転画像保存：{rotated_path}")
@@ -406,6 +406,8 @@ def find_similar_images(input_dir):
     processed_dir = os.path.join(input_dir, "processed")
     resized_dir = os.path.join(input_dir, "resized")
     rotated_dir = os.path.join(input_dir, "rotated")
+    bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
+    bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
     deleted_dir = os.path.join(input_dir, "deleted")
     if os.path.exists(deleted_dir):
         shutil.rmtree(deleted_dir)
@@ -413,6 +415,12 @@ def find_similar_images(input_dir):
     logger.info(f"{processed_dir} の類似画像検索開始")
     image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if os.path.isfile(os.path.join(processed_dir, f))]
     logger.info(f"{os.path.basename(processed_dir)} で {len(image_files)} 画像を検出")
+
+    # オリジナルファイル名と拡張子を保持するためのマップ
+    original_files_map = {}
+    for f in os.listdir(input_dir):
+        if os.path.isfile(os.path.join(input_dir, f)):
+            original_files_map[os.path.splitext(f)[0]] = f
 
     def compare_images(img_path1, img_path2):
         img1 = cv2.imread(img_path1, cv2.IMREAD_GRAYSCALE)
@@ -482,43 +490,54 @@ def find_similar_images(input_dir):
         keep_img_path = group[0]
         logger.info(f"グループ {group_idx}: 保持: {keep_img_path}")
         for img_path in group[1:]:
-            logger.info(f"処理対象: {img_path} (processed)")
+            logger.info(f"削除対象: {img_path} (processed)")
             try:
                 base_name = os.path.splitext(os.path.basename(img_path))[0]
-                deleted_path = os.path.join(deleted_dir, os.path.basename(img_path))
-                if os.path.exists(img_path):
-                    shutil.move(img_path, deleted_path)
-                    logger.info(f"移動: {img_path} -> {deleted_path} (processed)")
-                for ext in ['.jpg', '.jpeg', '.png']:
-                    resized_path = os.path.join(resized_dir, f"{base_name}{ext}")
-                    if os.path.exists(resized_path):
-                        deleted_resized_path = os.path.join(deleted_dir, os.path.basename(resized_path))
-                        shutil.move(resized_path, deleted_resized_path)
-                        logger.info(f"移動: {resized_path} -> {deleted_resized_path} (resized)")
-                    rotated_path = os.path.join(rotated_dir, f"{base_name}_rotated{ext}")
-                    if os.path.exists(rotated_path):
-                        deleted_rotated_path = os.path.join(deleted_dir, os.path.basename(rotated_path))
-                        shutil.move(rotated_path, deleted_rotated_path)
-                        logger.info(f"移動: {rotated_path} -> {deleted_rotated_path} (rotated)")
+                
+                original_filename_with_ext = original_files_map.get(base_name)
+                if not original_filename_with_ext:
+                    logger.warning(f"オリジナルファイル名が見つかりません。スキップ: {base_name}")
+                    continue
+
+                files_to_delete = [
+                    os.path.join(processed_dir, f"{base_name}.png"), # processed image is always .png
+                    os.path.join(resized_dir, original_filename_with_ext),
+                    os.path.join(rotated_dir, original_filename_with_ext),
+                    os.path.join(bbox_cropped_dir, original_filename_with_ext),
+                    os.path.join(bbox_rotated_dir, original_filename_with_ext),
+                    os.path.join(input_dir, original_filename_with_ext) # Original image
+                ]
+
+                for file_path_to_move in files_to_delete:
+                    if os.path.exists(file_path_to_move):
+                        destination_path = os.path.join(deleted_dir, os.path.basename(file_path_to_move))
+                        shutil.move(file_path_to_move, destination_path)
+                        logger.info(f"移動: {file_path_to_move} -> {destination_path}")
+                    else:
+                        logger.info(f"ファイルが見つかりません（既に削除済みか、存在しない）: {file_path_to_move}")
             except Exception as e:
                 logger.error(f"処理エラー {img_path}: {e}")
 
 def cleanup_directories(input_dir):
+    # find_similar_imagesで削除対象のファイルは全てdeleted_dirに移動済み
+    # ここでは一時ディレクトリを削除するのみ
+    # input_dir直下のファイルは、類似画像処理で「保持」されたオリジナル画像なので削除しない
     logger.info("クリーンアップ開始")
-    processed_dir = os.path.join(input_dir, "processed")
-    try:
-        if os.path.exists(processed_dir):
-            shutil.rmtree(processed_dir)
-            logger.info(f"成功的に削除された: {processed_dir} (processed directory)")
-        else:
-            logger.warning(f"ディレクトリが存在しません: {processed_dir}")
-        for file in os.listdir(input_dir):
-            file_path = os.path.join(input_dir, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-                logger.info(f"成功的に削除された: {file_path} (original)")
-    except Exception as e:
-        logger.error(f"クリーンアップエラー: {e}")
+    temp_dirs_to_delete = [
+        os.path.join(input_dir, "processed"),
+        os.path.join(input_dir, "bbox_cropped"),
+        os.path.join(input_dir, "bbox_rotated")
+    ]
+    
+    for d in temp_dirs_to_delete:
+        try:
+            if os.path.exists(d):
+                shutil.rmtree(d)
+                logger.info(f"成功的に削除された: {d}")
+            else:
+                logger.warning(f"ディレクトリが存在しません: {d}")
+        except Exception as e:
+            logger.error(f"クリーンアップエラー {d}: {e}")
 
 def process_images(keyword):
     input_dir = OUTPUT_DIR
