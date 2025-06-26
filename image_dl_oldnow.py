@@ -532,26 +532,42 @@ def find_similar_images(input_dir, processed_face_to_original_map):
             except Exception as e:
                 logger.error(f"処理エラー {img_path}: {e}")
 
+                logger.error(f"処理エラー {img_path}: {e}")
+
 def cleanup_directories(input_dir):
-    # find_similar_imagesで削除対象のファイルは全てdeleted_dirに移動済み
-    # ここでは一時ディレクトリを削除するのみ
-    # input_dir直下のファイルは、類似画像処理で「保持」されたオリジナル画像なので削除しない
+    """
+    OUTPUT_DIR内の 'deleted' フォルダを除くすべてのファイルとフォルダを削除する。
+    OUTPUT_DIR内の不要な中間ファイルとフォルダを削除する。
+    削除したくないフォルダは、下のリストからコメントアウトしてください。
+    """
     logger.info("クリーンアップ開始")
-    temp_dirs_to_delete = [
-        os.path.join(input_dir, "processed"),
-        os.path.join(input_dir, "bbox_cropped"),
-        os.path.join(input_dir, "bbox_rotated")
+    # 削除対象のサブディレクトリリスト
+    dirs_to_delete = [
+        "processed",
+        # "resized", # 残したい場合はこの行をコメントアウト
+        # "rotated", # 残したい場合はこの行をコメントアウト
+        "bbox_cropped",
+        "bbox_rotated",
     ]
-    
-    for d in temp_dirs_to_delete:
+
+    for dir_name in dirs_to_delete:
+        dir_path = os.path.join(input_dir, dir_name)
         try:
-            if os.path.exists(d):
-                shutil.rmtree(d)
-                logger.info(f"成功的に削除された: {d}")
-            else:
-                logger.warning(f"ディレクトリが存在しません: {d}")
+            if os.path.exists(dir_path):
+                shutil.rmtree(dir_path)
+                logger.info(f"成功的に削除されたディレクトリ: {dir_path}")
         except Exception as e:
-            logger.error(f"クリーンアップエラー {d}: {e}")
+            logger.error(f"ディレクトリ削除エラー {dir_path}: {e}")
+
+    # input_dir直下のファイルの削除 (log.txtとdeletedフォルダを除く)
+    for item_name in os.listdir(input_dir):
+        item_path = os.path.join(input_dir, item_name)
+        if os.path.isfile(item_path) and item_name.lower() != 'log.txt':
+            try:
+                os.remove(item_path)
+                logger.info(f"成功的に削除されたファイル: {item_path}")
+            except Exception as e:
+                logger.error(f"ファイル削除エラー {item_path}: {e}")
 
 def process_images(keyword):
     input_dir = OUTPUT_DIR
