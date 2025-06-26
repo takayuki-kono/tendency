@@ -8,6 +8,8 @@ from icrawler.builtin import GoogleImageCrawler
 import mediapipe as mp
 from insightface.app import FaceAnalysis
 from skimage.metrics import structural_similarity as ssim
+from sklearn.cluster import DBSCAN
+import face_recognition
 
 KEYWORD = "安藤サクラ"
 MAX_NUM = 10
@@ -532,7 +534,117 @@ def find_similar_images(input_dir, processed_face_to_original_map):
             except Exception as e:
                 logger.error(f"処理エラー {img_path}: {e}")
 
-                logger.error(f"処理エラー {img_path}: {e}")
+def filter_by_main_person(input_dir, processed_face_to_original_map):
+    """
+    rotatedフォルダの画像を人物ごとにグループ分けし、最も画像数の多い人物以外の画像を削除する。
+    face_recognitionライブラリを使用。
+    """
+    # 注意: この関数は 'face_recognition' ライブラリを使用します。
+    # 事前に 'pip install cmake dlib face_recognition' を実行してインストールが必要です。
+    # dlibのインストールに失敗する場合は、Visual Studio C++ Build Toolsのインストールが必要な場合があります。
+
+    logger.info("人物ごとの画像グループ分けとフィルタリングを開始 (face_recognition)")
+
+    # 処理対象の画像はrotatedフォルダから取得
+    rotated_dir = os.path.join(input_dir, "rotated")
+    if not os.path.exists(rotated_dir) or not os.listdir(rotated_dir):
+        logger.warning(f"rotatedディレクトリが見つからないか空です: {rotated_dir}。人物フィルタリングをスキップします。")
+        return
+
+    image_files = [f for f in os.listdir(rotated_dir) if os.path.isfile(os.path.join(rotated_dir, f))]
+    
+    encodings = []
+    image_path_list = []
+
+    # 1. 全ての残存画像から顔のエンコーディングを抽出
+    logger.info("顔のエンコーディングを抽出中...")
+    for filename in image_files:
+        img_path = os.path.join(rotated_dir, filename)
+        try:
+            image = face_recognition.load_image_file(img_path)
+            face_encodings = face_recognition.face_encodings(image)
+            
+            if face_encodings:
+                encodings.append(face_encodings[0])
+                image_path_list.append(img_path)
+            else:
+                logger.warning(f"face_recognitionが顔を検出できませんでした: {img_path}")
+        except Exception as e:
+            logger.error(f"face_recognition処理中にエラーが発生しました {img_path}: {e}")
+            continue
+
+    if len(encodings) < 2:
+        logger.info("クラスタリング対象の画像が2枚未満のため、人物フィルタリングを終了します。")
+        return
+
+    encodings_np = np.array(encodings)
+    
+    # 2. DBSCANでエンコーディングをクラスタリング
+    logger.info(f"{len(encodings_np)}個のエンコーディングをクラスタリングします...")
+    clt = DBSCAN(metric="euclidean", eps=0.3235, min_samples=1)
+    clt.fit(encodings_np)
+    labels = clt.labels_
+
+    # 3. 最大クラスタ（主要人物）を特定
+    cluster_summary = dict(zip(*np.unique(labels, return_counts=True)))
+    logger.info(f"クラスタリング結果 (ラベル: 画像数): {cluster_summary}")
+
+    core_labels = labels[labels != -1]
+    if len(core_labels) == 0:
+        logger.warning("主要な人物クラスタが見つかりませんでした。全ての画像がノイズと判断されたため、フィルタリングをスキップします。")
+        return
+
+    unique_core_labels, core_counts = np.unique(core_labels, return_counts=True)
+    max_cluster_index = np.argmax(core_counts)
+    main_cluster_label = unique_core_labels[max_cluster_index]
+    main_cluster_size = core_counts[max_cluster_index]
+    
+    logger.info(f"主要な人物のクラスタラベル: {main_cluster_label} (画像数: {main_cluster_size})")
+
+    MIN_CLUSTER_SIZE = 3
+    MIN_CLUSTER_RATIO = 0.2
+
+    if main_cluster_size < MIN_CLUSTER_SIZE or (main_cluster_size / len(image_files)) < MIN_CLUSTER_RATIO:
+        logger.warning(f"最大クラスタのサイズ ({main_cluster_size}) が閾値（{MIN_CLUSTER_SIZE}枚 or 全体の{MIN_CLUSTER_RATIO*100:.0f}%）に満たないため、人物フィルタリングをスキップします。")
+        return
+
+    # 4. 削除対象の画像を特定し、関連ファイルを全て削除（deletedフォルダへ移動）
+    deleted_dir = os.path.join(input_dir, "deleted")
+    processed_dir = os.path.join(input_dir, "processed")
+    resized_dir = os.path.join(input_dir, "resized")
+    bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
+    bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
+
+    for i, label in enumerate(labels):
+        if label != main_cluster_label:
+            img_path_to_delete = image_path_list[i]
+            base_name = os.path.splitext(os.path.basename(img_path_to_delete))[0]
+            
+            original_filename_with_ext = processed_face_to_original_map.get(base_name)
+            if not original_filename_with_ext:
+                logger.warning(f"人物フィルタリング: オリジナルファイル名が見つかりません。スキップ: {base_name}")
+                continue
+            _, original_ext = os.path.splitext(original_filename_with_ext)
+
+            files_to_move = [
+                img_path_to_delete,
+                os.path.join(processed_dir, f"{base_name}.png"),
+                os.path.join(resized_dir, f"{base_name}{original_ext}"),
+                os.path.join(bbox_cropped_dir, f"{base_name}{original_ext}"),
+                os.path.join(bbox_rotated_dir, f"{base_name}{original_ext}"),
+                os.path.join(input_dir, original_filename_with_ext)
+            ]
+
+            for file_path in files_to_move:
+                if os.path.exists(file_path):
+                    destination_path = os.path.join(deleted_dir, os.path.basename(file_path))
+                    try:
+                        shutil.move(file_path, destination_path)
+                        logger.info(f"人物フィルタリングにより移動: {file_path} -> {destination_path}")
+                    except Exception as e:
+                        logger.error(f"人物フィルタリング中の移動エラー {file_path}: {e}")
+                else:
+                    logger.warning(f"人物フィルタリング: ファイルが見つかりません（移動済みか）: {file_path}")
 
 def cleanup_directories(input_dir):
     """
@@ -574,6 +686,7 @@ def process_images(keyword):
     logger.info(f"画像処理開始：{input_dir}")
     processed_face_to_original_map = detect_and_crop_faces(input_dir)
     find_similar_images(input_dir, processed_face_to_original_map)
+    filter_by_main_person(input_dir, processed_face_to_original_map)
     cleanup_directories(input_dir)
     logger.info(f"画像処理完了：{input_dir}")
 
