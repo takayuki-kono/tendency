@@ -12,7 +12,7 @@ from skimage.metrics import structural_similarity as ssim
 KEYWORD = "安藤サクラ"
 MAX_NUM = 10
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
-SIMILARITY_THRESHOLD = 0.9  # SSIM threshold (0 to 1, higher means more similar)
+SIMILARITY_THRESHOLD = 0.7  # SSIM threshold (0 to 1, higher means more similar)
 IMG_SIZE = 224
 
 logging.basicConfig(
