@@ -18,8 +18,9 @@ IMG_SIZE = 224
 logging.basicConfig(
     filename='log.txt',
     level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    filemode='w'
+    format='%(asctime)s - %(levelname)s - %(message)s',  # ログフォーマットにレベルを追加
+    filemode='w',
+    encoding='utf-8'
 )
 logger = logging.getLogger(__name__)
 
