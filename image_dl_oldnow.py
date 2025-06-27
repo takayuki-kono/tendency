@@ -608,43 +608,86 @@ def filter_by_main_person(input_dir, processed_face_to_original_map):
         logger.warning(f"最大クラスタのサイズ ({main_cluster_size}) が閾値（{MIN_CLUSTER_SIZE}枚 or 全体の{MIN_CLUSTER_RATIO*100:.0f}%）に満たないため、人物フィルタリングをスキップします。")
         return
 
-    # 4. 削除対象の画像を特定し、関連ファイルを全て削除（deletedフォルダへ移動）
+    # 4. 削除対象の画像を特定し、表示してから削除
+    images_to_delete_paths = []
+    for i, label in enumerate(labels):
+        if label != main_cluster_label:
+            images_to_delete_paths.append(image_path_list[i])
+
+    if not images_to_delete_paths:
+        logger.info("削除対象の異人物画像はありません。")
+        return
+
+    # 削除対象の画像を表示
+    logger.info(f"{len(images_to_delete_paths)}枚の異人物画像を削除前に表示します。")
+    display_images = []
+    for img_path in images_to_delete_paths:
+        img = cv2.imread(img_path)
+        if img is not None:
+            resized_img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+            display_images.append(resized_img)
+        else:
+            logger.warning(f"表示用画像の読み込みに失敗: {img_path}")
+    
+    if display_images:
+        num_images = len(display_images)
+        cols = 5  # 1行に表示する画像数
+        rows = (num_images + cols - 1) // cols
+        
+        montage_h = rows * IMG_SIZE
+        montage_w = cols * IMG_SIZE
+        montage = np.zeros((montage_h, montage_w, 3), dtype=np.uint8)
+
+        for i, img in enumerate(display_images):
+            row = i // cols
+            col = i % cols
+            y_start = row * IMG_SIZE
+            x_start = col * IMG_SIZE
+            montage[y_start:y_start+IMG_SIZE, x_start:x_start+IMG_SIZE] = img
+
+        try:
+            cv2.imshow("Deleted - Not Main Person", montage)
+            logger.info("異人物/ノイズ画像を表示中。任意のキーを押して削除を続行してください...")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        except cv2.error as e:
+            logger.error(f"画像表示エラー: {e}")
+
+    # 削除処理の実行
     deleted_dir = os.path.join(input_dir, "deleted")
     processed_dir = os.path.join(input_dir, "processed")
     resized_dir = os.path.join(input_dir, "resized")
     bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
     bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
 
-    for i, label in enumerate(labels):
-        if label != main_cluster_label:
-            img_path_to_delete = image_path_list[i]
-            base_name = os.path.splitext(os.path.basename(img_path_to_delete))[0]
-            
-            original_filename_with_ext = processed_face_to_original_map.get(base_name)
-            if not original_filename_with_ext:
-                logger.warning(f"人物フィルタリング: オリジナルファイル名が見つかりません。スキップ: {base_name}")
-                continue
-            _, original_ext = os.path.splitext(original_filename_with_ext)
+    for img_path_to_delete in images_to_delete_paths:
+        base_name = os.path.splitext(os.path.basename(img_path_to_delete))[0]
+        
+        original_filename_with_ext = processed_face_to_original_map.get(base_name)
+        if not original_filename_with_ext:
+            logger.warning(f"人物フィルタリング: オリジナルファイル名が見つかりません。スキップ: {base_name}")
+            continue
+        _, original_ext = os.path.splitext(original_filename_with_ext)
 
-            files_to_move = [
-                img_path_to_delete,
-                os.path.join(processed_dir, f"{base_name}.png"),
-                os.path.join(resized_dir, f"{base_name}{original_ext}"),
-                os.path.join(bbox_cropped_dir, f"{base_name}{original_ext}"),
-                os.path.join(bbox_rotated_dir, f"{base_name}{original_ext}"),
-                os.path.join(input_dir, original_filename_with_ext)
-            ]
+        files_to_move = [
+            img_path_to_delete,
+            os.path.join(processed_dir, f"{base_name}.png"),
+            os.path.join(resized_dir, f"{base_name}{original_ext}"),
+            os.path.join(bbox_cropped_dir, f"{base_name}{original_ext}"),
+            os.path.join(bbox_rotated_dir, f"{base_name}{original_ext}"),
+            os.path.join(input_dir, original_filename_with_ext)
+        ]
 
-            for file_path in files_to_move:
-                if os.path.exists(file_path):
-                    destination_path = os.path.join(deleted_dir, os.path.basename(file_path))
-                    try:
-                        shutil.move(file_path, destination_path)
-                        logger.info(f"人物フィルタリングにより移動: {file_path} -> {destination_path}")
-                    except Exception as e:
-                        logger.error(f"人物フィルタリング中の移動エラー {file_path}: {e}")
-                else:
-                    logger.warning(f"人物フィルタリング: ファイルが見つかりません（移動済みか）: {file_path}")
+        for file_path in files_to_move:
+            if os.path.exists(file_path):
+                destination_path = os.path.join(deleted_dir, os.path.basename(file_path))
+                try:
+                    shutil.move(file_path, destination_path)
+                    logger.info(f"人物フィルタリングにより移動: {file_path} -> {destination_path}")
+                except Exception as e:
+                    logger.error(f"人物フィルタリング中の移動エラー {file_path}: {e}")
+            else:
+                logger.warning(f"人物フィルタリング: ファイルが見つかりません（移動済みか）: {file_path}")
 
 def cleanup_directories(input_dir):
     """
