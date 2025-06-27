@@ -9,10 +9,11 @@ import mediapipe as mp
 from insightface.app import FaceAnalysis
 from skimage.metrics import structural_similarity as ssim
 from sklearn.cluster import DBSCAN
+from collections import defaultdict
 import face_recognition
 
 KEYWORD = "安藤サクラ"
-MAX_NUM = 10
+MAX_NUM = 100
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
 SIMILARITY_THRESHOLD = 0.7  # SSIM threshold (0 to 1, higher means more similar)
 IMG_SIZE = 224
@@ -288,15 +289,16 @@ def detect_and_crop_faces(input_dir):
                 face_image_resized = cv2.resize(face_image, (IMG_SIZE, IMG_SIZE))
 
                 # ランドマークを描画
-                scale_x = IMG_SIZE / (x_max_crop - x_min_crop)
-                scale_y = IMG_SIZE / (y_max_crop - y_min_crop)
-                for point in ['left_eyebrow', 'right_eyebrow', 'chin', 'nose']:
-                    x = int((landmarks[point][0] - x_min_crop) * scale_x)
-                    y = int((landmarks[point][1] - y_min_crop) * scale_y)
-                    if 0 <= x < IMG_SIZE and 0 <= y < IMG_SIZE:
-                        cv2.circle(face_image_resized, (x, y), 3, (0, 0, 255), -1)
-                    else:
-                        logger.warning(f"Invalid landmark position for {point} in {filename} (face_idx: {face_idx}): ({x}, {y})")
+                # # ランドマーク表示を有効にする場合は、以下のブロックのコメントを解除してください
+                # scale_x = IMG_SIZE / (x_max_crop - x_min_crop)
+                # scale_y = IMG_SIZE / (y_max_crop - y_min_crop)
+                # for point in ['left_eyebrow', 'right_eyebrow', 'chin', 'nose']:
+                #     x = int((landmarks[point][0] - x_min_crop) * scale_x)
+                #     y = int((landmarks[point][1] - y_min_crop) * scale_y)
+                #     if 0 <= x < IMG_SIZE and 0 <= y < IMG_SIZE:
+                #         cv2.circle(face_image_resized, (x, y), 3, (0, 0, 255), -1)
+                #     else:
+                #         logger.warning(f"Invalid landmark position for {point} in {filename} (face_idx: {face_idx}): ({x}, {y})")
 
                 resized_filename = f"{current_face_base_name}{ext}" # ファイル名は変更しない
                 resized_path = os.path.join(resized_dir, resized_filename)
@@ -385,15 +387,16 @@ def detect_and_crop_faces(input_dir):
                     continue
                 rotated_face_resized = cv2.resize(rotated_face, (IMG_SIZE, IMG_SIZE))
 
-                r_scale_x = IMG_SIZE / (rx_max_crop - rx_min_crop)
-                r_scale_y = IMG_SIZE / (ry_max_crop - ry_min_crop)
-                for point in ['left_eyebrow', 'right_eyebrow', 'chin', 'nose']:
-                    rx = int((rot_landmarks[point][0] - rx_min_crop) * r_scale_x)
-                    ry = int((rot_landmarks[point][1] - ry_min_crop) * r_scale_y)
-                    if 0 <= rx < IMG_SIZE and 0 <= ry < IMG_SIZE:
-                        cv2.circle(rotated_face_resized, (rx, ry), 3, (0, 255, 0), 1)
-                    else:
-                        logger.warning(f"Invalid landmark position for {point} in {filename} (face_idx: {face_idx}): ({rx}, {ry})")
+                # # ランドマーク表示を有効にする場合は、以下のブロックのコメントを解除してください
+                # r_scale_x = IMG_SIZE / (rx_max_crop - rx_min_crop)
+                # r_scale_y = IMG_SIZE / (ry_max_crop - ry_min_crop)
+                # for point in ['left_eyebrow', 'right_eyebrow', 'chin', 'nose']:
+                #     rx = int((rot_landmarks[point][0] - rx_min_crop) * r_scale_x)
+                #     ry = int((rot_landmarks[point][1] - ry_min_crop) * r_scale_y)
+                #     if 0 <= rx < IMG_SIZE and 0 <= ry < IMG_SIZE:
+                #         cv2.circle(rotated_face_resized, (rx, ry), 3, (0, 255, 0), 1)
+                #     else:
+                #         logger.warning(f"Invalid landmark position for {point} in {filename} (face_idx: {face_idx}): ({rx}, {ry})")
 
                 rotated_filename = f"{current_face_base_name}{ext}" # ファイル名は変更しない
                 rotated_path = os.path.join(rotated_dir, rotated_filename)
@@ -581,7 +584,7 @@ def filter_by_main_person(input_dir, processed_face_to_original_map):
     
     # 2. DBSCANでエンコーディングをクラスタリング
     logger.info(f"{len(encodings_np)}個のエンコーディングをクラスタリングします...")
-    clt = DBSCAN(metric="euclidean", eps=0.3235, min_samples=1)
+    clt = DBSCAN(metric="euclidean", eps=0.31, min_samples=1)
     clt.fit(encodings_np)
     labels = clt.labels_
 
@@ -608,50 +611,75 @@ def filter_by_main_person(input_dir, processed_face_to_original_map):
         logger.warning(f"最大クラスタのサイズ ({main_cluster_size}) が閾値（{MIN_CLUSTER_SIZE}枚 or 全体の{MIN_CLUSTER_RATIO*100:.0f}%）に満たないため、人物フィルタリングをスキップします。")
         return
 
-    # 4. 削除対象の画像を特定し、表示してから削除
-    images_to_delete_paths = []
+    # 4. 削除対象の画像をグループごとに特定し、表示してから削除
+    images_to_delete_by_group = defaultdict(list)
+    all_images_to_delete_paths = []
     for i, label in enumerate(labels):
         if label != main_cluster_label:
-            images_to_delete_paths.append(image_path_list[i])
+            img_path = image_path_list[i]
+            images_to_delete_by_group[label].append(img_path)
+            all_images_to_delete_paths.append(img_path)
 
-    if not images_to_delete_paths:
+    if not all_images_to_delete_paths:
         logger.info("削除対象の異人物画像はありません。")
         return
 
-    # 削除対象の画像を表示
-    logger.info(f"{len(images_to_delete_paths)}枚の異人物画像を削除前に表示します。")
-    display_images = []
-    for img_path in images_to_delete_paths:
-        img = cv2.imread(img_path)
-        if img is not None:
-            resized_img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
-            display_images.append(resized_img)
-        else:
-            logger.warning(f"表示用画像の読み込みに失敗: {img_path}")
-    
-    if display_images:
-        num_images = len(display_images)
-        cols = 5  # 1行に表示する画像数
-        rows = (num_images + cols - 1) // cols
-        
-        montage_h = rows * IMG_SIZE
-        montage_w = cols * IMG_SIZE
-        montage = np.zeros((montage_h, montage_w, 3), dtype=np.uint8)
+    # グループごとに削除対象の画像を表示
+    logger.info(f"{len(all_images_to_delete_paths)}枚の異人物画像を削除前に表示します。")
+    MAX_IMAGES_PER_WINDOW = 25  # 5x5 グリッド
+    COLS = 5
 
-        for i, img in enumerate(display_images):
-            row = i // cols
-            col = i % cols
-            y_start = row * IMG_SIZE
-            x_start = col * IMG_SIZE
-            montage[y_start:y_start+IMG_SIZE, x_start:x_start+IMG_SIZE] = img
+    should_skip_deletion = False
+    for label, paths in sorted(images_to_delete_by_group.items()):
+        if should_skip_deletion:
+            break
 
-        try:
-            cv2.imshow("Deleted - Not Main Person", montage)
-            logger.info("異人物/ノイズ画像を表示中。任意のキーを押して削除を続行してください...")
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-        except cv2.error as e:
-            logger.error(f"画像表示エラー: {e}")
+        num_images_in_group = len(paths)
+        num_windows = (num_images_in_group + MAX_IMAGES_PER_WINDOW - 1) // MAX_IMAGES_PER_WINDOW
+
+        for part_num in range(num_windows):
+            start_index = part_num * MAX_IMAGES_PER_WINDOW
+            end_index = start_index + MAX_IMAGES_PER_WINDOW
+            chunk_paths = paths[start_index:end_index]
+
+            display_images = []
+            for img_path in chunk_paths:
+                img = cv2.imread(img_path)
+                if img is not None:
+                    resized_img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+                    display_images.append(resized_img)
+                else:
+                    logger.warning(f"表示用画像の読み込みに失敗: {img_path}")
+            
+            if not display_images:
+                continue
+
+            num_images = len(display_images)
+            rows = (num_images + COLS - 1) // COLS
+            montage = np.zeros((rows * IMG_SIZE, COLS * IMG_SIZE, 3), dtype=np.uint8)
+
+            for i, img in enumerate(display_images):
+                row, col = divmod(i, COLS)
+                montage[row*IMG_SIZE:(row+1)*IMG_SIZE, col*IMG_SIZE:(col+1)*IMG_SIZE] = img
+
+            window_title = f"Deleted - Group {label}"
+            if num_windows > 1:
+                window_title += f" (Part {part_num + 1}/{num_windows})"
+            
+            try:
+                cv2.imshow(window_title, montage)
+                logger.info(f"{window_title} を表示中。任意のキーを押して次へ。Escで全削除を中止。")
+                key = cv2.waitKey(0) & 0xFF
+                cv2.destroyWindow(window_title)
+                if key == 27: # Escキー
+                    logger.info("ユーザーにより表示が中断されました。削除処理をスキップします。")
+                    should_skip_deletion = True
+                    break
+            except cv2.error as e:
+                logger.error(f"画像表示エラー: {e}")
+
+    if should_skip_deletion:
+        return
 
     # 削除処理の実行
     deleted_dir = os.path.join(input_dir, "deleted")
@@ -660,7 +688,7 @@ def filter_by_main_person(input_dir, processed_face_to_original_map):
     bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
     bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
 
-    for img_path_to_delete in images_to_delete_paths:
+    for img_path_to_delete in all_images_to_delete_paths:
         base_name = os.path.splitext(os.path.basename(img_path_to_delete))[0]
         
         original_filename_with_ext = processed_face_to_original_map.get(base_name)
