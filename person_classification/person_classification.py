@@ -7,7 +7,8 @@ from sklearn.cluster import DBSCAN
 # ====== 設定 ======
 image_dir = "input_images"  # 例: "./images"
 tolerance = 0.349 # 類似顔認識のしきい値
-output_dir = "grouped_faces"
+output_dir = "grouped_faces" # 分類済みフォルダ
+unclassified_dir = os.path.join(output_dir, "unclassified") # 未分類フォルダ
 
 import shutil
 
@@ -15,35 +16,42 @@ import shutil
 if os.path.exists(output_dir):
     shutil.rmtree(output_dir)
 os.makedirs(output_dir, exist_ok=True)
+os.makedirs(unclassified_dir, exist_ok=True)
 
 # ====== 顔特徴抽出 ======
 encodings = []
 file_paths = []
 
-from PIL import Image
-
 for filename in os.listdir(image_dir):
     if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
         path = os.path.join(image_dir, filename)
 
-        # face_recognition推奨の読み込み方法を使用
-        try:
-            image = face_recognition.load_image_file(path)
-        except Exception as e:
-            print(f"読み込み失敗: {path}, 理由: {e}")
+        # OpenCVで画像を読み込み、BGRからRGBに変換します。
+        # face_recognitionライブラリはRGB順の画像を期待するためです。
+        print(f"{filename}")
+        bgr_image = cv2.imread(path)
+        if bgr_image is None:
+            print(f"画像の読み込みに失敗しました: {path}")
             continue
+        image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 
         if image.dtype != np.uint8:
             print(f"dtype不正: {path}")
-            continue
-        if len(image.shape) != 3 or image.shape[2] != 3:
-            print(f"形式不正: {path}")
             continue
 
         print(f"image dtype: {image.dtype}, shape: {image.shape}")
 
         # 顔検出と特徴抽出
-        face_locations = face_recognition.face_locations(image)
+        # HOGモデル(デフォルト)よりも高精度なCNNモデルを使用します。
+        # 処理に時間がかかりますが、検出率が向上します。
+        # GPUが利用可能な環境では高速に動作します。
+        face_locations = face_recognition.face_locations(image, model="cnn")
+
+        if not face_locations:
+            print(f"顔が検出されませんでした: {path}")
+            shutil.copy(path, os.path.join(unclassified_dir, filename))
+            continue
+
         face_encodings = face_recognition.face_encodings(image, face_locations)
 
         for encoding in face_encodings:
@@ -66,6 +74,8 @@ for label, path in zip(labels, file_paths):
 
     filename = os.path.basename(path)
     output_path = os.path.join(person_dir, filename)
-    cv2.imwrite(output_path, cv2.imread(path))
+    # 元のファイルをコピーする方が効率的です。
+    # cv2.imwrite(output_path, cv2.imread(path))
+    shutil.copy(path, output_path)
 
 print(f"グループ分け完了: {len(set(labels))} 人物グループ")
