@@ -4,10 +4,12 @@ import face_recognition
 import numpy as np
 from sklearn.cluster import DBSCAN
 import shutil
+from collections import defaultdict
+import math
 
 # ====== 設定 ======
 image_dir = "input_images"  # 画像が保存されているフォルダ
-tolerance = 0.349           # 顔の類似度を判断するための距離のしきい値
+tolerance = 0.35         # 顔の類似度を判断するための距離のしきい値
 output_dir = "grouped_faces_simple" # 分類結果の出力先フォルダ
 unclassified_dir = os.path.join(output_dir, "unclassified") # 未分類フォルダ
 
@@ -80,6 +82,9 @@ labels = clustering.labels_
 print("\nグループ分け結果を保存します...")
 copied_files = set()
 for label, path in zip(labels, file_paths):
+    # DBSCANでノイズと判定されたもの(-1)はここでは扱わない
+    if label == -1:
+        continue
     person_dir = os.path.join(output_dir, f"person_{label}")
     os.makedirs(person_dir, exist_ok=True)
 
@@ -90,6 +95,76 @@ for label, path in zip(labels, file_paths):
         shutil.copy(path, output_path)
         copied_files.add(output_path)
 
-num_clusters = len(set(labels))
+num_clusters = len(set(l for l in labels if l != -1))
 print(f"\nグループ分け完了: {num_clusters} 人物グループに分類されました。")
 print(f"結果は '{output_dir}' フォルダに保存されています。")
+
+
+# ====== グループ分け結果表示 (OpenCV) ======
+def display_grouped_images_cv(labels, file_paths):
+    """
+    グループ分けされた画像をOpenCVウィンドウでグリッド表示する。
+    キー操作で次のグループに進み、Escで終了できる。
+    """
+    print("\nグループ分け結果を画面に表示します...")
+
+    # グループごとにファイルパスをまとめる
+    grouped_images = defaultdict(list)
+    for label, path in zip(labels, file_paths):
+        # DBSCANでノイズ(-1)と判定されたものは表示しない
+        if label != -1:
+            grouped_images[label].append(path)
+
+    # 表示するグループがない場合は終了
+    if not grouped_images:
+        print("表示する分類済みグループがありません。")
+        return
+
+    # 表示設定
+    IMG_SIZE = 150  # 表示する各画像のサイズ
+    COLS = 5        # グリッドの列数
+
+    key = 0
+    sorted_labels = sorted(grouped_images.keys())
+    for label in sorted_labels:
+        # グループの画像パスを重複なく取得
+        image_paths = sorted(list(set(grouped_images[label])))
+        num_images = len(image_paths)
+
+        if num_images == 0:
+            continue
+
+        # グリッドの行数を計算
+        rows = math.ceil(num_images / COLS)
+
+        # グリッド表示用の大きな画像（モンタージュ）を作成
+        montage = np.zeros((rows * IMG_SIZE, COLS * IMG_SIZE, 3), dtype=np.uint8)
+
+        # 各画像を読み込み、リサイズしてモンタージュに配置
+        for i, image_path in enumerate(image_paths):
+            img = cv2.imread(image_path)
+            if img is None:
+                img = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
+                cv2.putText(img, "Error", (10, IMG_SIZE // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            else:
+                img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+
+            row_idx, col_idx = divmod(i, COLS)
+            montage[row_idx*IMG_SIZE:(row_idx+1)*IMG_SIZE, col_idx*IMG_SIZE:(col_idx+1)*IMG_SIZE] = img
+
+        window_title = f"Person {label} ({num_images} images) - Press any key for next, ESC to quit"
+        cv2.imshow(window_title, montage)
+
+        key = cv2.waitKey(0) & 0xFF
+        cv2.destroyWindow(window_title)
+
+        if key == 27:  # ESCキー
+            print("表示を中断しました。")
+            break
+
+    cv2.destroyAllWindows()
+    if key != 27:
+        print("全てのグループの表示が完了しました。")
+
+# 表示関数を呼び出し
+display_grouped_images_cv(labels, file_paths)
