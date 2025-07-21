@@ -8,7 +8,7 @@ from collections import defaultdict
 import math
 # ====== 設定 ======
 image_dir = "input_images"  # 画像が保存されているフォルダ
-tolerance = 0.35         # 顔の類似度を判断するための距離のしきい値
+tolerance = 0.024        # 顔の類似度を判断するための距離のしきい値
 # 0.0 76group 71unclassified
 # 0.2 78group 63unclassified
 # 0.3 81group 68unclassified
@@ -49,6 +49,14 @@ for i, filename in enumerate(image_files):
         print(f"  -> パディング追加: 元サイズ({w}, {h}) -> 新サイズ({padded_bgr_image.shape[1]}, {padded_bgr_image.shape[0]})")
         # ★★★ 前処理ここまで ★★★
 
+        # ★★★ 前処理: ノイズリダクション (コメントアウト) ★★★
+        # Non-Local Means Denoisingを使用してノイズを削減します。
+        # これにより、顔検出の精度が向上する可能性があります。
+        padded_bgr_image = cv2.fastNlMeansDenoisingColored(padded_bgr_image, None, 10, 10, 7, 21)
+        print("  -> ノイズリダクションを適用しました。")
+        # ★★★ 前処理ここまで ★★★
+
+        # ヒストグラム均一化はコメントアウトしました。
         image = cv2.cvtColor(padded_bgr_image, cv2.COLOR_BGR2RGB)
 
         # 高速なHOGモデルで顔を検出 (CNNモデルより精度は低いが高速)
@@ -105,7 +113,9 @@ if len(encodings) < 2:
 
 print("\n顔特徴のクラスタリングを実行します (DBSCAN)...")
 encodings_np = np.array(encodings)
-clustering = DBSCAN(metric='euclidean', eps=tolerance, min_samples=1).fit(encodings_np)
+# 距離計算手法をユークリッド距離からコサイン類似度（コサイン距離）に変更します。
+# これに伴い、最適な `tolerance` (eps) の値が変わる可能性がある点にご注意ください。
+clustering = DBSCAN(metric='cosine', eps=tolerance, min_samples=1).fit(encodings_np)
 labels = clustering.labels_
 
 # ====== グループ分け結果保存 ======
