@@ -12,8 +12,8 @@ image_dir = "input_images"  # 画像が保存されているフォルダ
 # CNNモデルとユークリッド距離を使用する場合のしきい値。
 # この値はデータセットに大きく依存するため、結果を見ながら調整が必要です。
 # 一般的にユークリッド距離では0.4 (緩い) ~ 0.6 (厳しい) の範囲で調整します。
-tolerance = 0.3
-padding_ratio = 0.0      # 画像の端を拡張する割合 (例: 0.2 = 上下左右に20%ずつ余白を追加)
+tolerance = 0.311
+padding_ratio = 0.0     # 画像の端を拡張する割合 (例: 0.2 = 上下左右に20%ずつ余白を追加)
 output_dir = "grouped_faces_cnn_euclidean" # 分類結果の出力先フォルダ
 unclassified_dir = os.path.join(output_dir, "unclassified") # 未分類フォルダ
 
@@ -41,21 +41,21 @@ for i, filename in enumerate(image_files):
             continue
 
         # ★★★ 前処理: 画像の周囲にパディングを追加 ★★★
-        h, w = bgr_image.shape[:2]
-        pad_h = int(h * padding_ratio)
-        pad_w = int(w * padding_ratio)
-        padded_bgr_image = cv2.copyMakeBorder(bgr_image, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REPLICATE)
-        print(f"  -> パディング追加: 元サイズ({w}, {h}) -> 新サイズ({padded_bgr_image.shape[1]}, {padded_bgr_image.shape[0]})")
+        # h, w = bgr_image.shape[:2]
+        # pad_h = int(h * padding_ratio)
+        # pad_w = int(w * padding_ratio)
+        # bgr_image = cv2.copyMakeBorder(bgr_image, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REPLICATE)
+        # print(f"  -> パディング追加: 元サイズ({w}, {h}) -> 新サイズ({bgr_image.shape[1]}, {bgr_image.shape[0]})")
         # ★★★ 前処理ここまで ★★★
 
         # ★★★ 前処理: ノイズリダクション ★★★
         # Non-Local Means Denoisingを使用してノイズを削減します。
         # これにより、顔検出の精度が向上する可能性があります。
-        padded_bgr_image = cv2.fastNlMeansDenoisingColored(padded_bgr_image, None, 10, 10, 7, 21)
+        # bgr_image = cv2.fastNlMeansDenoisingColored(bgr_image, None, 10, 10, 7, 21)
         print("  -> ノイズリダクションを適用しました。")
         # ★★★ 前処理ここまで ★★★
 
-        image = cv2.cvtColor(padded_bgr_image, cv2.COLOR_BGR2RGB)
+        image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 
         # ★★★★★ 高精度なCNNモデルで顔を検出 ★★★★★
         # HOGモデルよりも精度が高いですが、計算コストが高くなります。
@@ -68,7 +68,7 @@ for i, filename in enumerate(image_files):
             continue
 
         # --- デバッグ用: 検出した顔領域を描画して保存 ---
-        debug_image = padded_bgr_image.copy()
+        debug_image = bgr_image.copy()
         # face_locationsは (top, right, bottom, left) のリスト
         for (top, right, bottom, left) in face_locations:
             # OpenCVのrectangleは (left, top) と (right, bottom) の順
