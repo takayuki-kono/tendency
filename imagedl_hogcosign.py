@@ -11,6 +11,7 @@ from skimage.metrics import structural_similarity as ssim
 from sklearn.cluster import DBSCAN
 from collections import defaultdict
 import face_recognition
+from person_classification.clustering_utils import perform_dbscan_clustering
 
 KEYWORD = "安藤サクラ"
 MAX_NUM = 100
@@ -584,7 +585,7 @@ def filter_by_main_person(input_dir, processed_face_to_original_map):
     
     # 2. DBSCANでエンコーディングをクラスタリング
     logger.info(f"{len(encodings_np)}個のエンコーディングをクラスタリングします...")
-    clt = DBSCAN(metric="euclidean", eps=0.31, min_samples=1)
+    clt = DBSCAN(metric="euclidean", eps=0.30, min_samples=1)
     clt.fit(encodings_np)
     labels = clt.labels_
 
@@ -717,6 +718,158 @@ def filter_by_main_person(input_dir, processed_face_to_original_map):
             else:
                 logger.warning(f"人物フィルタリング: ファイルが見つかりません（移動済みか）: {file_path}")
 
+def filter_by_main_person_cosine(input_dir, processed_face_to_original_map):
+    """
+    rotatedフォルダの画像を人物ごとにグループ分けし、最も大きいグループの画像のみ残す。
+    face_recognitionライブラリとDBSCAN(コサイン類似度)を使用。
+    """
+    logger.info("人物ごとの画像グループ分けとフィルタリングを開始 (face_recognition, cosine, DBSCAN, largest cluster only)")
+    rotated_dir = os.path.join(input_dir, "rotated")
+    if not os.path.exists(rotated_dir) or not os.listdir(rotated_dir):
+        logger.warning(f"rotatedディレクトリが見つからないか空です: {rotated_dir}。人物フィルタリングをスキップします。")
+        return
+
+    # デバッグ用のディレクトリを作成
+    debug_dir = os.path.join(input_dir, "debug_person_classification")
+    if os.path.exists(debug_dir):
+        shutil.rmtree(debug_dir)
+    os.makedirs(debug_dir, exist_ok=True)
+
+    image_files = [f for f in os.listdir(rotated_dir) if os.path.isfile(os.path.join(rotated_dir, f))]
+    encodings = []
+    image_path_list = []
+
+    logger.info("顔のエンコーディングを抽出中...")
+    for filename in image_files:
+        img_path = os.path.join(rotated_dir, filename)
+        try:
+            # OpenCVで画像を読み込み、パディングを追加して検出率を向上
+            bgr_image = cv2.imread(img_path)
+            if bgr_image is None:
+                logger.warning(f"画像の読み込みに失敗しました: {img_path}")
+                continue
+
+            # 前処理1: パディングを追加 (HOG検出器の性能向上のため)
+            padding_ratio = 0.4
+            h, w = bgr_image.shape[:2]
+            pad_h = int(h * padding_ratio)
+            pad_w = int(w * padding_ratio)
+            padded_bgr_image = cv2.copyMakeBorder(bgr_image, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REPLICATE)
+
+            # 前処理2: ノイズリダクション
+            denoised_image = cv2.fastNlMeansDenoisingColored(padded_bgr_image, None, 10, 10, 7, 21)
+            logger.info(f"  -> ノイズリダクションを適用: {filename}")
+
+            # デバッグ用: 前処理後の画像を保存
+            debug_preprocessed_path = os.path.join(debug_dir, f"preprocessed_{filename}")
+            cv2.imwrite(debug_preprocessed_path, denoised_image)
+
+            # face_recognitionで使えるようにRGBに変換
+            image_rgb = cv2.cvtColor(denoised_image, cv2.COLOR_BGR2RGB)
+
+            # パディングされた画像で顔を検出し、エンコーディングを抽出
+            # 高速なHOGモデルを使用。精度が必要な場合は "cnn" に変更（ただし非常に遅い）
+            face_locations = face_recognition.face_locations(image_rgb, model="hog")
+            if face_locations:
+                logger.info(f"  -> {len(face_locations)}個の顔を検出: {filename}")
+                # デバッグ用: 検出領域を描画して保存
+                debug_detection_image = denoised_image.copy()
+                for (top, right, bottom, left) in face_locations:
+                    cv2.rectangle(debug_detection_image, (left, top), (right, bottom), (0, 255, 0), 2)
+                debug_detected_path = os.path.join(debug_dir, f"detected_{filename}")
+                cv2.imwrite(debug_detected_path, debug_detection_image)
+
+                face_encodings = face_recognition.face_encodings(image_rgb, face_locations)
+                if face_encodings:
+                    encodings.append(face_encodings[0])
+                    image_path_list.append(img_path)
+            else:
+                logger.warning(f"face_recognitionが顔を検出できませんでした: {img_path}")
+        except Exception as e:
+            logger.error(f"face_recognition処理中にエラーが発生しました {img_path}: {e}")
+            continue
+
+    if len(encodings) < 2:
+        logger.info("クラスタリング対象の画像が2枚未満のため、人物フィルタリングを終了します。")
+        return
+
+    # コサイン類似度を使用。toleranceは0.4を一般的な値として使用。
+    # 元スクリプトのmin_samples=1を適用
+    TOLERANCE = 0.024
+    labels = perform_dbscan_clustering(encodings, metric='cosine', eps=TOLERANCE, min_samples=1)
+
+    # 最大クラスタ（主要人物）を特定
+    cluster_summary = dict(zip(*np.unique(labels, return_counts=True)))
+    logger.info(f"クラスタリング結果 (ラベル: 画像数): {cluster_summary}")
+
+    # ノイズ(-1)を除いたコアなクラスタを対象にする
+    core_labels = labels[labels != -1]
+    if len(core_labels) == 0:
+        logger.warning("主要な人物クラスタが見つかりませんでした。全ての画像がノイズと判断されたため、全ての画像を削除対象とします。")
+        # 主要人物がいないため、全ての画像を削除
+        images_to_delete_paths = image_path_list
+    else:
+        # 最も大きいクラスタを主要人物とする
+        unique_core_labels, core_counts = np.unique(core_labels, return_counts=True)
+        max_cluster_index = np.argmax(core_counts)
+        main_cluster_label = unique_core_labels[max_cluster_index]
+        main_cluster_size = core_counts[max_cluster_index]
+        logger.info(f"主要な人物のクラスタラベル: {main_cluster_label} (画像数: {main_cluster_size})")
+
+        # 削除対象の画像を特定 (主要人物クラスタ以外)
+        images_to_delete_paths = []
+        for i, label in enumerate(labels):
+            if label != main_cluster_label:
+                img_path = image_path_list[i]
+                images_to_delete_paths.append(img_path)
+
+    if not images_to_delete_paths:
+        logger.info("削除対象の異人物画像はありません (全てが主要人物クラスタに属しています)。")
+        return
+
+    # 削除対象の画像の内訳をログに出力
+    delete_summary = defaultdict(int)
+    for i, label in enumerate(labels):
+        if label != main_cluster_label:
+            delete_summary[label] += 1
+    logger.info(f"削除対象の画像 {len(images_to_delete_paths)}枚の内訳 (ラベル: 画像数): {dict(delete_summary)}")
+
+    # 削除処理
+    deleted_dir = os.path.join(input_dir, "deleted")
+    processed_dir = os.path.join(input_dir, "processed")
+    resized_dir = os.path.join(input_dir, "resized")
+    bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
+    bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
+
+    for img_path_to_delete in images_to_delete_paths:
+        base_name = os.path.splitext(os.path.basename(img_path_to_delete))[0]
+        
+        original_filename_with_ext = processed_face_to_original_map.get(base_name)
+        if not original_filename_with_ext:
+            logger.warning(f"人物フィルタリング: オリジナルファイル名が見つかりません。スキップ: {base_name}")
+            continue
+        _, original_ext = os.path.splitext(original_filename_with_ext)
+
+        files_to_move = [
+            img_path_to_delete,
+            os.path.join(processed_dir, f"{base_name}.png"),
+            os.path.join(resized_dir, f"{base_name}{original_ext}"),
+            os.path.join(bbox_cropped_dir, f"{base_name}{original_ext}"),
+            os.path.join(bbox_rotated_dir, f"{base_name}{original_ext}"),
+            os.path.join(input_dir, original_filename_with_ext)
+        ]
+
+        for file_path in files_to_move:
+            if os.path.exists(file_path):
+                destination_path = os.path.join(deleted_dir, os.path.basename(file_path))
+                try:
+                    shutil.move(file_path, destination_path)
+                    logger.info(f"人物フィルタリングにより移動: {file_path} -> {destination_path}")
+                except Exception as e:
+                    logger.error(f"人物フィルタリング中の移動エラー {file_path}: {e}")
+            else:
+                logger.warning(f"人物フィルタリング: ファイルが見つかりません（移動済みか）: {file_path}")
+
 def cleanup_directories(input_dir):
     """
     OUTPUT_DIR内の 'deleted' フォルダを除くすべてのファイルとフォルダを削除する。
@@ -757,7 +910,8 @@ def process_images(keyword):
     logger.info(f"画像処理開始：{input_dir}")
     processed_face_to_original_map = detect_and_crop_faces(input_dir)
     find_similar_images(input_dir, processed_face_to_original_map)
-    filter_by_main_person(input_dir, processed_face_to_original_map)
+    # filter_by_main_person(input_dir, processed_face_to_original_map)
+    filter_by_main_person_cosine(input_dir, processed_face_to_original_map)
     cleanup_directories(input_dir)
     logger.info(f"画像処理完了：{input_dir}")
 
