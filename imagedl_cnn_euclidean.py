@@ -14,7 +14,7 @@ from collections import defaultdict
 import face_recognition
 
 KEYWORD = "安藤サクラ"
-MAX_NUM = 10
+MAX_NUM = 5
 OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
 SIMILARITY_THRESHOLD = 0.7  # SSIM threshold (0 to 1, higher means more similar)
 IMG_SIZE = 224
@@ -582,8 +582,6 @@ def filter_by_main_person_cnn_euclidean(input_dir, processed_face_to_original_ma
     unclassified_indices = np.where(labels == -1)[0]
     unclassified_paths = [image_path_list[i] for i in unclassified_indices]
     
-    # 非削除対象リストを初期化
-    images_not_to_delete_paths = []
     
     if len(unclassified_paths) > 0:
         logger.info(f"{len(unclassified_paths)}枚の未分類（ノイズ）画像を削除対象に追加します。")
@@ -591,9 +589,6 @@ def filter_by_main_person_cnn_euclidean(input_dir, processed_face_to_original_ma
     core_labels = labels[labels != -1]
     if len(core_labels) == 0:
         logger.warning("主要な人物クラスタが見つかりませんでした。残りの画像も全て削除対象とします。")
-        # 未分類以外の画像もすべて削除対象に追加
-        # core_indices = np.where(labels != -1)[0]
-        # images_to_delete_paths.extend([image_path_list[i] for i in core_indices])
     else:
         unique_core_labels, core_counts = np.unique(core_labels, return_counts=True)
         max_cluster_index = np.argmax(core_counts)
@@ -601,128 +596,21 @@ def filter_by_main_person_cnn_euclidean(input_dir, processed_face_to_original_ma
         main_cluster_size = core_counts[max_cluster_index]
         logger.info(f"主要な人物のクラスタラベル: {main_cluster_label} (画像数: {main_cluster_size})")
 
-        # 主要人物以外のクラスタに属する画像も削除対象に追加
-        for i, label in enumerate(labels):
-            # if label != -1 and label != main_cluster_label:
-            #     img_path = image_path_list[i]
-            #     if img_path not in images_to_delete_paths:
-            #         images_to_delete_paths.append(img_path)
-            if label != -1 and label == main_cluster_label:
-                img_path = image_path_list[i]
-                images_not_to_delete_paths.append(img_path)
-
-
-    # if not images_to_delete_paths:
-    #     logger.info("削除対象の異人物画像はありません (全てが主要人物クラスタに属しています)。")
-    #     return
-
-    # # グループごとに削除対象の画像を表示
-    # logger.info(f"{len(images_to_delete_paths)}枚の異人物画像を削除前に表示します。")
-    # MAX_IMAGES_PER_WINDOW = 25  # 5x5 グリッド
-    # COLS = 5
-
-    # # 表示のために、削除対象をグループ分けする
-    # images_to_delete_by_group = defaultdict(list)
-    # # main_cluster_labelが定義されているか確認
-    # main_cluster_label_defined = 'main_cluster_label' in locals() or 'main_cluster_label' in globals()
-
-    # for i, label in enumerate(labels):
-    #     # 主要クラスタでない、かつ未分類でない画像、または主要クラスタがない場合はすべての画像
-    #     if not main_cluster_label_defined or label != main_cluster_label:
-    #         img_path = image_path_list[i]
-    #         images_to_delete_by_group[label].append(img_path)
-
-    # should_skip_deletion = False
-    # for label, paths in sorted(images_to_delete_by_group.items()):
-    #     if should_skip_deletion:
-    #         break
-
-    #     num_images_in_group = len(paths)
-    #     num_windows = (num_images_in_group + MAX_IMAGES_PER_WINDOW - 1) // MAX_IMAGES_PER_WINDOW
-
-    #     for part_num in range(num_windows):
-    #         start_index = part_num * MAX_IMAGES_PER_WINDOW
-    #         end_index = start_index + MAX_IMAGES_PER_WINDOW
-    #         chunk_paths = paths[start_index:end_index]
-
-    #         display_images = []
-    #         for img_path in chunk_paths:
-    #             img = cv2.imread(img_path)
-    #             if img is not None:
-    #                 resized_img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
-    #                 display_images.append(resized_img)
-    #             else:
-    #                 logger.warning(f"表示用画像の読み込みに失敗: {img_path}")
-            
-    #         if not display_images:
-    #             continue
-
-    #         num_images = len(display_images)
-    #         rows = (num_images + COLS - 1) // COLS
-    #         montage = np.zeros((rows * IMG_SIZE, COLS * IMG_SIZE, 3), dtype=np.uint8)
-
-    #         for i, img in enumerate(display_images):
-    #             row, col = divmod(i, COLS)
-    #             montage[row*IMG_SIZE:(row+1)*IMG_SIZE, col*IMG_SIZE:(col+1)*IMG_SIZE] = img
-
-    #         window_title = f"Deleted - Group {label}"
-    #         if num_windows > 1:
-    #             window_title += f" (Part {part_num + 1}/{num_windows})"
-            
-    #         try:
-    #             cv2.imshow(window_title, montage)
-    #             logger.info(f"{window_title} を表示中。任意のキーを押して次へ。Escで全削除を中止。")
-    #             key = cv2.waitKey(0) & 0xFF
-    #             cv2.destroyWindow(window_title)
-    #             if key == 27: # Escキー
-    #                 logger.info("ユーザーにより表示が中断されました。削除処理は続行されます。")
-    #                 break
-    #         except cv2.error as e:
-    #             logger.error(f"画像表示エラー: {e}")
-
-    # if should_skip_deletion:
-    #     return
+    # 非削除対象リスト
+    images_not_to_delete_paths = []
+    for i, label in enumerate(labels):
+        if label != -1 and label == main_cluster_label:
+            img_path = image_path_list[i]
+            images_not_to_delete_paths.append(img_path)
 
     # 削除処理の実行
     deleted_dir = os.path.join(input_dir, "deleted")
-    # processed_dir = os.path.join(input_dir, "processed")
-    # resized_dir = os.path.join(input_dir, "resized")
-    # bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
-    # bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
-
-    # for img_path_to_delete in images_not_to_delete_paths:
-    #     base_name = os.path.splitext(os.path.basename(img_path_to_delete))[0]
-        
-    #     original_filename_with_ext = processed_face_to_original_map.get(base_name)
-    #     if not original_filename_with_ext:
-    #         logger.warning(f"人物フィルタリング: オリジナルファイル名が見つかりません。スキップ: {base_name}")
-    #         continue
-    #     _, original_ext = os.path.splitext(original_filename_with_ext)
-
-        # files_to_move = [
-        #     img_path_to_delete,
-        #     os.path.join(processed_dir, f"{base_name}.png"),
-        #     os.path.join(resized_dir, f"{base_name}{original_ext}"),
-        #     os.path.join(bbox_cropped_dir, f"{base_name}{original_ext}"),
-        #     os.path.join(bbox_rotated_dir, f"{base_name}{original_ext}"),
-        #     os.path.join(input_dir, original_filename_with_ext)
-        # ]
 
     for f in os.listdir(rotated_dir):
         file_path = os.path.join(rotated_dir, os.path.basename(f))
         if file_path not in images_not_to_delete_paths:
             shutil.move(file_path, os.path.join(deleted_dir, os.path.basename(f)))
 
-        # for file_path in files_to_move:
-        #     if os.path.exists(file_path):
-        #         destination_path = os.path.join(deleted_dir, os.path.basename(file_path))
-        #         try:
-        #             shutil.move(file_path, destination_path)
-        #             logger.info(f"人物フィルタリングにより移動: {file_path} -> {destination_path}")
-        #         except Exception as e:
-        #             logger.error(f"人物フィルタリング中の移動エラー {file_path}: {e}")
-        #     else:
-        #         logger.warning(f"人物フィルタリング: ファイルが見つかりません（移動済みか）: {file_path}")
 
 def cleanup_directories(input_dir):
     """
