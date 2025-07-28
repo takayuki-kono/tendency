@@ -1,4 +1,3 @@
-
 import os
 import cv2
 import numpy as np
@@ -13,9 +12,10 @@ from sklearn.cluster import DBSCAN
 from collections import defaultdict
 import face_recognition
 
-KEYWORD = "安藤サクラ"
-MAX_NUM = 5
-OUTPUT_DIR = str(random.randint(0, 1000)).zfill(4)
+# キーワードをリスト形式に変更
+KEYWORDS = ["吉岡里穂", "奈緒"]
+MAX_NUM = 10
+# OUTPUT_DIRはキーワードごとに生成するため、グローバル変数は削除
 SIMILARITY_THRESHOLD = 0.7  # SSIM threshold (0 to 1, higher means more similar)
 IMG_SIZE = 224
 
@@ -80,12 +80,12 @@ def rename_files(keyword):
             except Exception as e:
                 logger.error(f"Error renaming {old_path} to {new_path}: {e}")
 
-def consolidate_files():
-    output_dir = OUTPUT_DIR
+# consolidate_filesがkeywordとoutput_dirを引数に取るように修正
+def consolidate_files(keyword, output_dir):
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    folders = [KEYWORD, f"{KEYWORD}_昔", f"{KEYWORD}_現在", f"{KEYWORD}_正面", f"{KEYWORD}_顔"]
+    folders = [keyword, f"{keyword}_昔", f"{keyword}_現在", f"{keyword}_正面", f"{keyword}_顔"]
     for folder in folders:
         if not os.path.exists(folder):
             logger.warning(f"Folder {folder} does not exist, skipping consolidation")
@@ -107,7 +107,8 @@ def consolidate_files():
     for i, file in enumerate(files, 1):
         old_path = os.path.join(output_dir, file)
         ext = os.path.splitext(file)[1].lower()
-        new_filename = f"{OUTPUT_DIR}_{i:03d}{ext}"
+        # ファイル名をoutput_dirベースに変更
+        new_filename = f"{output_dir}_{i:03d}{ext}"
         new_path = os.path.join(output_dir, new_filename)
         try:
             os.rename(old_path, new_path)
@@ -466,17 +467,17 @@ def find_similar_images(input_dir, processed_face_to_original_map):
         resized_images = [cv2.resize(img, (IMG_SIZE, max_height)) for img in group_images]
         display_image = np.hstack(resized_images)
         window_name = f"Group {group_idx}"
-        try:
-            cv2.imshow(window_name, display_image)
-            logger.info(f"グループ {group_idx} を表示: {window_name}")
-            key = cv2.waitKey(0) & 0xFF
-            cv2.destroyWindow(window_name)
-            logger.info(f"キー入力: {group_idx} for group {group_idx} {key}")
-            if key == 27:
-                logger.info("ユーザーにより表示が中断されました。削除処理は続行されます。")
-                break
-        except Exception as e:
-            logger.error(f"グループ {group_idx} 表示エラー: {e}")
+        # try:
+        #     cv2.imshow(window_name, display_image)
+        #     logger.info(f"グループ {group_idx} を表示: {window_name}")
+        #     key = cv2.waitKey(0) & 0xFF
+        #     cv2.destroyWindow(window_name)
+        #     logger.info(f"キー入力: {group_idx} for group {group_idx} {key}")
+        #     if key == 27:
+        #         logger.info("ユーザーにより表示が中断されました。削除処理は続行されます。")
+        #         break
+        # except Exception as e:
+        #     logger.error(f"グループ {group_idx} 表示エラー: {e}")
     cv2.destroyAllWindows()
     logger.info("類似画像グループの表示完了")
 
@@ -643,8 +644,8 @@ def cleanup_directories(input_dir):
             except Exception as e:
                 logger.error(f"ファイル削除エラー {item_path}: {e}")
 
-def process_images(keyword):
-    input_dir = OUTPUT_DIR
+# process_imagesがkeywordとinput_dirを引数に取るように修正
+def process_images(keyword, input_dir):
     logger.info(f"画像処理開始：{input_dir}")
     processed_face_to_original_map = detect_and_crop_faces(input_dir)
     find_similar_images(input_dir, processed_face_to_original_map)
@@ -652,18 +653,26 @@ def process_images(keyword):
     cleanup_directories(input_dir)
     logger.info(f"画像処理完了：{input_dir}")
 
+# main関数をキーワードリストでループするように修正
 def main():
     try:
-        logger.info(f"処理開始 for keyword: {KEYWORD}")
-        download_images(KEYWORD, MAX_NUM)
-        rename_files(KEYWORD)
-        consolidate_files()
-        process_images(KEYWORD)
-        logger.info(f"全処理完了 for keyword: {KEYWORD}")
-    except Exception as e:
-        logger.error(f"メインエラー: {e}")
-        raise
+        for keyword in KEYWORDS:
+            try:
+                logger.info(f"処理開始 for keyword: {keyword}")
+                # キーワードごとに一意の出力ディレクトリを生成
+                output_dir = str(random.randint(0, 1000)).zfill(4)
+                
+                download_images(keyword, MAX_NUM)
+                rename_files(keyword)
+                consolidate_files(keyword, output_dir)
+                process_images(keyword, output_dir)
+                
+                logger.info(f"全処理完了 for keyword: {keyword}")
+            except Exception as e:
+                # 特定のキーワードでエラーが発生しても処理を続ける
+                logger.error(f"メインエラー for keyword '{keyword}': {e}")
     finally:
+        # 全ての処理が終わった後にリソースを解放
         cv2.destroyAllWindows()
         face_detector.close()
         face_mesh.close()
