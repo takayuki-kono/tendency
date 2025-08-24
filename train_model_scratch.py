@@ -1,3 +1,4 @@
+
 import os
 import tensorflow as tf
 from tensorflow.keras import layers, models
@@ -6,32 +7,13 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import math
 import logging
 
-# --- モデルのインポート ---
-# 使用したいモデルに応じて、対応する行のコメントを解除してください
-from tensorflow.keras.applications import EfficientNetV2B0, ResNet50V2, Xception, DenseNet121
-
-# --- 前処理関数のインポート ---
-# 使用したいモデルに応じて、対応する行のコメントを解除してください
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as efficientnet_preprocess
-from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
-from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
-from tensorflow.keras.applications.densenet import preprocess_input as densenet_preprocess
-
-
-# ===== モデル選択 =====
-# ここで使用したいモデル名を設定してください
-# 利用可能なモデル: 'EfficientNetV2B0', 'ResNet50V2', 'Xception', 'DenseNet121'0.40
-MODEL_TO_USE = 'DenseNet121'
-# =====================
-
-
 # ログ設定
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(f'train_log_{MODEL_TO_USE}.txt', mode='w')
+        logging.FileHandler('train_log_scratch_4class.txt', mode='w')
     ],
     force=True
 )
@@ -42,16 +24,8 @@ PREPROCESSED_TRAIN_DIR = 'preprocessed/train'
 PREPROCESSED_VALIDATION_DIR = 'preprocessed/validation'
 
 # 設定
-img_size = 224
-
-# データ拡張設定
-ROTATION_RANGE = 15
-WIDTH_SHIFT_RANGE = 0.1
-HEIGHT_SHIFT_RANGE = 0.1
-SHEAR_RANGE = 0.1
-ZOOM_RANGE = 0.1
-HORIZONTAL_FLIP = True
-BRIGHTNESS_RANGE = [0.9, 1.1]
+ROTATION_RANGE = 1
+img_size = 56 # 元の画像サイズに戻す
 
 def count_images(directory):
     total_images = 0
@@ -114,44 +88,24 @@ def weighted_sparse_categorical_crossentropy(class_weights):
         return tf.reduce_mean(weighted_loss)
     return loss
 
-def create_transfer_model(model_name, input_shape=(224, 224, 3), num_classes=4):
-    model_map = {
-        'EfficientNetV2B0': EfficientNetV2B0,
-        'ResNet50V2': ResNet50V2,
-        'Xception': Xception,
-        'DenseNet121': DenseNet121
-    }
-    
-    if model_name not in model_map:
-        raise ValueError(f"Unsupported model name: {model_name}. Available models: {list(model_map.keys())}")
-
-    BaseCnnModel = model_map[model_name]
-    base_model = BaseCnnModel(include_top=False, weights='imagenet', input_shape=input_shape)
-    base_model.trainable = False
-    
-    inputs = layers.Input(shape=input_shape)
-    x = base_model(inputs, training=False)
-    x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dropout(0.3)(x)
-    outputs = layers.Dense(num_classes, activation='softmax')(x)
-    
-    model = models.Model(inputs, outputs)
+# CNNモデル（ゼロから学習）
+def create_cnn_model(input_shape=(56, 56, 1), num_classes=4):
+    model = models.Sequential([
+        layers.Conv2D(32, (3,3), input_shape=input_shape),
+        layers.Activation('relu'),
+        layers.MaxPooling2D((2,2)),
+        layers.Conv2D(64, (3,3)),
+        layers.Activation('relu'),
+        layers.MaxPooling2D((2,2)),
+        layers.Flatten(),
+        layers.Dense(128, activation='relu'),
+        layers.Dense(num_classes, activation='softmax') # 出力層を4クラスに変更
+    ])
     return model
-
-def get_preprocessing_function(model_name):
-    preprocess_map = {
-        'EfficientNetV2B0': efficientnet_preprocess,
-        'ResNet50V2': resnet_preprocess,
-        'Xception': xception_preprocess,
-        'DenseNet121': densenet_preprocess
-    }
-    if model_name not in preprocess_map:
-        raise ValueError(f"Unsupported model name: {model_name}. Available models: {list(preprocess_map.keys())}")
-    return preprocess_map[model_name]
 
 def main():
     try:
-        logger.info(f"Using model: {MODEL_TO_USE}")
+        logger.info("Starting 4-class model training from scratch")
         
         num_classes = get_num_classes(PREPROCESSED_TRAIN_DIR)
         if num_classes < 2:
@@ -166,13 +120,12 @@ def main():
             return
             
         BATCH_SIZE = max(4, min(32, train_image_count // 32 if train_image_count > 32 else 4))
-        logger.info(f"Dynamic BATCH_SIZE set to {BATCH_SIZE} for {train_image_count} training images")
+        batch_count = math.ceil(train_image_count / BATCH_SIZE)
+        logger.info(f"Dynamic BATCH_SIZE set to {BATCH_SIZE} for {train_image_count} training images ({batch_count} batches per epoch)")
 
         train_class_weights = compute_class_weights(PREPROCESSED_TRAIN_DIR)
-        
-        preprocessing_function = get_preprocessing_function(MODEL_TO_USE)
 
-        model = create_transfer_model(MODEL_TO_USE, input_shape=(img_size, img_size, 3), num_classes=num_classes)
+        model = create_cnn_model(input_shape=(img_size, img_size, 1), num_classes=num_classes)
         model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
             loss=weighted_sparse_categorical_crossentropy(train_class_weights),
@@ -180,25 +133,16 @@ def main():
         )
         model.summary(print_fn=logger.info)
 
-        train_datagen = ImageDataGenerator(
-            rotation_range=ROTATION_RANGE,
-            width_shift_range=WIDTH_SHIFT_RANGE,
-            height_shift_range=HEIGHT_SHIFT_RANGE,
-            shear_range=SHEAR_RANGE,
-            zoom_range=ZOOM_RANGE,
-            horizontal_flip=HORIZONTAL_FLIP,
-            brightness_range=BRIGHTNESS_RANGE,
-            fill_mode='nearest',
-            preprocessing_function=preprocessing_function
-        )
-        validation_datagen = ImageDataGenerator(preprocessing_function=preprocessing_function)
+        # rescaleのみのシンプルなジェネレータ
+        train_datagen = ImageDataGenerator(rescale=1./255, rotation_range=ROTATION_RANGE)
+        validation_datagen = ImageDataGenerator(rescale=1./255)
 
         train_generator = train_datagen.flow_from_directory(
             PREPROCESSED_TRAIN_DIR, 
             target_size=(img_size, img_size), 
             batch_size=BATCH_SIZE, 
             class_mode='sparse', 
-            color_mode='rgb'
+            color_mode='grayscale' # グレースケールに戻す
         )
 
         validation_generator = validation_datagen.flow_from_directory(
@@ -206,35 +150,32 @@ def main():
             target_size=(img_size, img_size), 
             batch_size=BATCH_SIZE, 
             class_mode='sparse', 
-            color_mode='rgb'
+            color_mode='grayscale' # グレースケールに戻す
         )
 
-        model_filename = f'best_model_{MODEL_TO_USE}.keras'
-        tflite_filename = f'model_{MODEL_TO_USE}.tflite'
-
-        model_checkpoint = ModelCheckpoint(model_filename, monitor='val_accuracy', save_best_only=True, verbose=1)
-        early_stopping = EarlyStopping(monitor='val_accuracy', patience=12, verbose=1)
-        reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', factor=0.2, patience=6, min_lr=1e-6, verbose=1)
+        model_checkpoint = ModelCheckpoint('best_model_scratch_4class.keras', monitor='val_accuracy', save_best_only=True, verbose=1)
+        early_stopping = EarlyStopping(monitor='val_accuracy', patience=24, verbose=1)
+        reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', factor=0.5, patience=12, min_lr=1e-6, verbose=1)
         
         history = model.fit(
             train_generator,
             validation_data=validation_generator,
-            epochs=50,
+            epochs=100, # エポック数を増やす
             callbacks=[model_checkpoint, early_stopping, reduce_lr]
         )
 
         logger.info(f"Final Training accuracy: {history.history['accuracy'][-1]}")
         logger.info(f"Best Validation accuracy: {max(history.history['val_accuracy'])}")
 
-        best_model = tf.keras.models.load_model(model_filename, custom_objects={'loss': weighted_sparse_categorical_crossentropy(train_class_weights)})
+        best_model = tf.keras.models.load_model('best_model_scratch_4class.keras', custom_objects={'loss': weighted_sparse_categorical_crossentropy(train_class_weights)})
         converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         tflite_model = converter.convert()
 
-        with open(tflite_filename, 'wb') as f:
+        with open('model_scratch_4class.tflite', 'wb') as f:
             f.write(tflite_model)
 
-        logger.info(f"Model converted to TensorFlow Lite format and saved as '{tflite_filename}'.")
+        logger.info("Model converted to TensorFlow Lite format and saved as 'model_scratch_4class.tflite'.")
 
     except Exception as e:
         logger.error(f"Error processing training: {e}", exc_info=True)
