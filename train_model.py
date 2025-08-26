@@ -223,8 +223,13 @@ def main():
             callbacks=[model_checkpoint, early_stopping, reduce_lr]
         )
 
-        logger.info(f"Final Training accuracy: {history.history['accuracy'][-1]}")
-        logger.info(f"Best Validation accuracy: {max(history.history['val_accuracy'])}")
+        # 学習結果を一度変数に保存
+        final_train_acc = history.history['accuracy'][-1]
+        best_val_acc = max(history.history['val_accuracy'])
+
+        # ログファイルにはこれまで通り記録
+        logger.info(f"Final Training accuracy: {final_train_acc}")
+        logger.info(f"Best Validation accuracy: {best_val_acc}")
 
         best_model = tf.keras.models.load_model(model_filename, custom_objects={'loss': weighted_sparse_categorical_crossentropy(train_class_weights)})
         converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
@@ -235,6 +240,14 @@ def main():
             f.write(tflite_model)
 
         logger.info(f"Model converted to TensorFlow Lite format and saved as '{tflite_filename}'.")
+
+        # 全ての処理が終わった後、ターミナルに最終結果を出力
+        print("\n" + "="*50)
+        print("TRAINING COMPLETE")
+        print(f"Final Training Accuracy: {final_train_acc:.4f}")
+        print(f"Best Validation Accuracy: {best_val_acc:.4f}")
+        print("="*50)
+
 
     except Exception as e:
         logger.error(f"Error processing training: {e}", exc_info=True)
