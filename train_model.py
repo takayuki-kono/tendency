@@ -5,6 +5,7 @@ from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLRO
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import math
 import logging
+import kerastuner as kt # KerasTunerをインポート
 
 # --- モデルのインポート ---
 # 使用したいモデルに応じて、対応する行のコメントを解除してください
@@ -149,80 +150,116 @@ def get_preprocessing_function(model_name):
         raise ValueError(f"Unsupported model name: {model_name}. Available models: {list(preprocess_map.keys())}")
     return preprocess_map[model_name]
 
+def build_model_for_tuning(hp):
+    """KerasTunerが呼び出すモデル構築関数"""
+    # --- 1. データ拡張の探索範囲を定義 ---
+    rotation_range = hp.Int('rotation_range', min_value=0, max_value=20, step=5)
+    width_shift_range = hp.Float('width_shift_range', min_value=0.0, max_value=0.2, step=0.05)
+    height_shift_range = hp.Float('height_shift_range', min_value=0.0, max_value=0.2, step=0.05)
+    zoom_range = hp.Float('zoom_range', min_value=0.0, max_value=0.2, step=0.05)
+    horizontal_flip = hp.Boolean('horizontal_flip')
+    
+    # --- 2. 学習率の探索範囲を定義 ---
+    learning_rate = hp.Choice('learning_rate', values=[1e-3, 5e-4, 1e-4])
+
+    # --- 3. モデルを構築 ---
+    num_classes = get_num_classes(PREPROCESSED_TRAIN_DIR)
+    model = create_transfer_model(MODEL_TO_USE, input_shape=(img_size, img_size, 3), num_classes=num_classes)
+    
+    train_class_weights = compute_class_weights(PREPROCESSED_TRAIN_DIR)
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        loss=weighted_sparse_categorical_crossentropy(train_class_weights),
+        metrics=['accuracy']
+    )
+    return model
+
 def main():
     try:
-        logger.info(f"Using model: {MODEL_TO_USE}")
+        logger.info(f"Starting hyperparameter tuning for model: {MODEL_TO_USE}")
         
         num_classes = get_num_classes(PREPROCESSED_TRAIN_DIR)
         if num_classes < 2:
-            logger.error(f"Not enough class directories found in {PREPROCESSED_TRAIN_DIR}. Found {num_classes}. Aborting.")
+            logger.error(f"Not enough classes found. Aborting.")
             return
 
-        logger.info(f"Found {num_classes} classes.")
-
-        train_image_count = count_images(PREPROCESSED_TRAIN_DIR)
-        if train_image_count == 0:
-            logger.error("No training images found. Aborting.")
-            return
-            
-        BATCH_SIZE = max(4, min(32, train_image_count // 32 if train_image_count > 32 else 4))
-        logger.info(f"Dynamic BATCH_SIZE set to {BATCH_SIZE} for {train_image_count} training images")
-
+        # クラス重みをmain関数のスコープで計算
         train_class_weights = compute_class_weights(PREPROCESSED_TRAIN_DIR)
-        
+
+        # --- データジェネレータの準備 (前処理のみ) ---
+        # データ拡張の設定はチューナーが試行するため、ここでは設定しない
         preprocessing_function = get_preprocessing_function(MODEL_TO_USE)
-
-        model = create_transfer_model(MODEL_TO_USE, input_shape=(img_size, img_size, 3), num_classes=num_classes)
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-            loss=weighted_sparse_categorical_crossentropy(train_class_weights),
-            metrics=['accuracy']
+        train_datagen = ImageDataGenerator(preprocessing_function=preprocessing_function)
+        validation_datagen = ImageDataGenerator(preprocessing_function=preprocessing_function)
+        
+        BATCH_SIZE = 32 # チューニング中は固定
+        train_generator = train_datagen.flow_from_directory(
+            PREPROCESSED_TRAIN_DIR, target_size=(img_size, img_size), batch_size=BATCH_SIZE, class_mode='sparse', color_mode='rgb'
         )
-        model.summary(print_fn=logger.info)
+        validation_generator = validation_datagen.flow_from_directory(
+            PREPROCESSED_VALIDATION_DIR, target_size=(img_size, img_size), batch_size=BATCH_SIZE, class_mode='sparse', color_mode='rgb'
+        )
 
-        train_datagen = ImageDataGenerator(
-            rotation_range=ROTATION_RANGE,
-            width_shift_range=WIDTH_SHIFT_RANGE,
-            height_shift_range=HEIGHT_SHIFT_RANGE,
-            shear_range=SHEAR_RANGE,
-            zoom_range=ZOOM_RANGE,
-            horizontal_flip=HORIZONTAL_FLIP,
-            brightness_range=BRIGHTNESS_RANGE,
+        # --- KerasTunerのセットアップ ---
+        tuner = kt.Hyperband(
+            build_model_for_tuning,
+            objective='val_accuracy',
+            max_epochs=20,  # 1回の試行での最大エポック数
+            factor=3,
+            directory='kerastuner_dir',
+            project_name=f'tuning_{MODEL_TO_USE}'
+        )
+
+        stop_early = EarlyStopping(monitor='val_loss', patience=5)
+        
+        logger.info("--- Starting Hyperparameter Search ---")
+        tuner.search(train_generator, validation_data=validation_generator, callbacks=[stop_early])
+
+        # --- 最適なハイパーパラメータを取得 ---
+        best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+        logger.info("--- Hyperparameter Search Complete ---")
+        logger.info(f"Optimal rotation_range: {best_hps.get('rotation_range')}")
+        logger.info(f"Optimal width_shift_range: {best_hps.get('width_shift_range')}")
+        logger.info(f"Optimal height_shift_range: {best_hps.get('height_shift_range')}")
+        logger.info(f"Optimal zoom_range: {best_hps.get('zoom_range')}")
+        logger.info(f"Optimal horizontal_flip: {best_hps.get('horizontal_flip')}")
+        logger.info(f"Optimal learning_rate: {best_hps.get('learning_rate')}")
+
+        # --- 最適なパラメータで最終的なモデルを学習 ---
+        logger.info("--- Training final model with best hyperparameters ---")
+        
+        # 最適なデータ拡張でジェネレータを再作成
+        final_train_datagen = ImageDataGenerator(
+            rotation_range=best_hps.get('rotation_range'),
+            width_shift_range=best_hps.get('width_shift_range'),
+            height_shift_range=best_hps.get('height_shift_range'),
+            zoom_range=best_hps.get('zoom_range'),
+            horizontal_flip=best_hps.get('horizontal_flip'),
+            brightness_range=[0.9, 1.1],
             fill_mode='nearest',
             preprocessing_function=preprocessing_function
         )
-        validation_datagen = ImageDataGenerator(preprocessing_function=preprocessing_function)
-
-        train_generator = train_datagen.flow_from_directory(
-            PREPROCESSED_TRAIN_DIR, 
-            target_size=(img_size, img_size), 
-            batch_size=BATCH_SIZE, 
-            class_mode='sparse', 
-            color_mode='rgb'
+        final_train_generator = final_train_datagen.flow_from_directory(
+            PREPROCESSED_TRAIN_DIR, target_size=(img_size, img_size), batch_size=BATCH_SIZE, class_mode='sparse', color_mode='rgb'
         )
 
-        validation_generator = validation_datagen.flow_from_directory(
-            PREPROCESSED_VALIDATION_DIR, 
-            target_size=(img_size, img_size), 
-            batch_size=BATCH_SIZE, 
-            class_mode='sparse', 
-            color_mode='rgb'
-        )
-
+        model = tuner.hypermodel.build(best_hps)
+        
         model_filename = f'best_model_{MODEL_TO_USE}.keras'
         tflite_filename = f'model_{MODEL_TO_USE}.tflite'
-
+        
         model_checkpoint = ModelCheckpoint(model_filename, monitor='val_accuracy', save_best_only=True, verbose=1)
         early_stopping = EarlyStopping(monitor='val_accuracy', patience=12, verbose=1)
         reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', factor=0.2, patience=6, min_lr=1e-6, verbose=1)
-        
+
         history = model.fit(
-            train_generator,
+            final_train_generator,
             validation_data=validation_generator,
-            epochs=50,
+            epochs=100, # 最終学習は多めのエポックで
             callbacks=[model_checkpoint, early_stopping, reduce_lr]
         )
-
+        
         # 学習結果を一度変数に保存
         final_train_acc = history.history['accuracy'][-1]
         best_val_acc = max(history.history['val_accuracy'])
@@ -230,6 +267,39 @@ def main():
         # ログファイルにはこれまで通り記録
         logger.info(f"Final Training accuracy: {final_train_acc}")
         logger.info(f"Best Validation accuracy: {best_val_acc}")
+
+        # --- ここからファインチューニング処理を追加 ---
+        logger.info("--- Starting Fine-tuning ---")
+        
+        # 最良のモデルをロード
+        best_model = tf.keras.models.load_model(model_filename, custom_objects={'loss': weighted_sparse_categorical_crossentropy(train_class_weights)})
+        
+        # ベースモデルを再学習可能に設定
+        best_model.trainable = True
+        
+        # ファインチューニング用の非常に低い学習率で再コンパイル
+        best_model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5), # 低い学習率
+            loss=weighted_sparse_categorical_crossentropy(train_class_weights),
+            metrics=['accuracy']
+        )
+        
+        logger.info("Fine-tuning with base model unfrozen.")
+        best_model.summary(print_fn=logger.info)
+        
+        # 追加で数エポック学習
+        history_fine_tune = best_model.fit(
+            train_generator,
+            validation_data=validation_generator,
+            epochs=history.epoch[-1] + 15, # 現在のエポックからさらに15エポック
+            initial_epoch=history.epoch[-1] + 1,
+            callbacks=[model_checkpoint, early_stopping, reduce_lr] # コールバックを再利用
+        )
+        
+        # ファインチューニング後の最良スコアを取得
+        best_val_acc = max(history_fine_tune.history['val_accuracy'])
+        final_train_acc = history_fine_tune.history['accuracy'][-1]
+        # --- ファインチューニング処理ここまで ---
 
         best_model = tf.keras.models.load_model(model_filename, custom_objects={'loss': weighted_sparse_categorical_crossentropy(train_class_weights)})
         converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
