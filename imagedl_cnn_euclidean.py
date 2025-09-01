@@ -5,7 +5,6 @@ import random
 import logging
 import shutil
 from icrawler.builtin import GoogleImageCrawler
-import mediapipe as mp
 from insightface.app import FaceAnalysis
 from skimage.metrics import structural_similarity as ssim
 from sklearn.cluster import DBSCAN
@@ -13,8 +12,8 @@ from collections import defaultdict
 import face_recognition
 
 # キーワードをリスト形式に変更
-KEYWORDS = ["吉岡里穂", "奈緒"]
-MAX_NUM = 10
+KEYWORDS = ["葵わかな"]
+MAX_NUM = 100
 # OUTPUT_DIRはキーワードごとに生成するため、グローバル変数は削除
 SIMILARITY_THRESHOLD = 0.7  # SSIM threshold (0 to 1, higher means more similar)
 IMG_SIZE = 224
@@ -29,10 +28,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # MediapipeとInsightFaceの初期化
-mp_face_detection = mp.solutions.face_detection
-mp_face_mesh = mp.solutions.face_mesh
-face_detector = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
 logger.info("Initializing FaceAnalysis")
 try:
     app = FaceAnalysis(providers=['CPUExecutionProvider'], det_thresh=0.3)
@@ -159,11 +154,15 @@ def detect_and_crop_faces(input_dir):
             continue
 
         # Mediapipe でバウンディングボックス検出
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = face_detector.process(img_rgb)
-        if not results.detections:
+        try:
+            faces = app.get(img)
+        except Exception as e:
+            logger.error(f"InsightFace app.get() failed for {filename}: {e}")
+            continue
+
+        if not faces:
             skip_counters['no_face'] += 1
-            logger.info(f"Mediapipeで顔検出失敗 {filename}")
+            logger.info(f"InsightFaceで顔検出失敗 {filename}")
             try:
                 os.remove(img_path)
                 skip_counters['deleted_no_face'] += 1
@@ -171,23 +170,23 @@ def detect_and_crop_faces(input_dir):
             except Exception as e:
                 logger.error(f"削除エラー {img_path} (no_face): {e}")
             continue
-
+        
         at_least_one_face_processed = False
-        for face_idx, detection in enumerate(results.detections):
+        # enumerate(faces.detections) -> enumerate(faces) に変更
+        # detection -> face に変更
+        for face_idx, face in enumerate(faces):
             try:
                 original_base_name, ext = os.path.splitext(filename)
                 current_face_base_name = f"{original_base_name}_{face_idx}"
 
-                bbox = detection.location_data.relative_bounding_box
-                h, w = img.shape[:2]
-                x_min = int(bbox.xmin * w)
-                y_min = int(bbox.ymin * h)
-                x_max = int((bbox.xmin + bbox.width) * w)
-                y_max = int((bbox.ymin + bbox.height) * h)
+                # InsightFaceのbboxは絶対座標 [x_min, y_min, x_max, y_max] なので、計算方法を変更
+                bbox = face.bbox.astype(int)
+                x_min, y_min, x_max, y_max = bbox
+                
                 x_min = max(0, x_min - int(0.1 * (x_max - x_min)))  # 10% 拡大
                 y_min = max(0, y_min - int(0.1 * (y_max - y_min)))
-                x_max = min(w, x_max + int(0.1 * (x_max - x_min)))
-                y_max = min(h, y_max + int(0.1 * (y_max - y_min)))
+                x_max = min(img.shape[1], x_max + int(0.1 * (x_max - x_min)))
+                y_max = min(img.shape[0], y_max + int(0.1 * (y_max - y_min)))
 
                 # バウンディングボックスで切り抜き
                 face_img = img[y_min:y_max, x_min:x_max]
@@ -203,19 +202,8 @@ def detect_and_crop_faces(input_dir):
                 cv2.imwrite(bbox_path, face_img)
                 logger.info(f"バウンディングボックス画像保存：{bbox_path}")
 
-                # バウンディングボックス画像からランドマーク検出
                 face_img_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-                mesh_results = face_mesh.process(face_img_rgb)
-                mp_landmarks = None
-                if mesh_results.multi_face_landmarks:
-                    landmarks = mesh_results.multi_face_landmarks[0].landmark
-                    mp_landmarks = {
-                        'left_eyebrow': np.array([landmarks[105].x * face_img.shape[1], landmarks[105].y * face_img.shape[0]]),
-                        'right_eyebrow': np.array([landmarks[334].x * face_img.shape[1], landmarks[334].y * face_img.shape[0]]),
-                        'chin': np.array([landmarks[152].x * face_img.shape[1], landmarks[152].y * face_img.shape[0]]),
-                        'nose': np.array([landmarks[1].x * face_img.shape[1], landmarks[1].y * face_img.shape[0]])
-                    }
-
+ 
                 faces = app.get(face_img_rgb)
                 ins_landmarks = None
                 if faces:
@@ -232,7 +220,7 @@ def detect_and_crop_faces(input_dir):
                     logger.warning(f"InsightFace failed to detect face for {filename} (face_idx: {face_idx})")
                     continue
 
-                if mp_landmarks is None or ins_landmarks is None:
+                if ins_landmarks is None:
                     skip_counters['no_face'] += 1
                     logger.info(f"ランドマーク取得失敗 {filename} (face_idx: {face_idx})")
                     continue
@@ -240,10 +228,10 @@ def detect_and_crop_faces(input_dir):
                 # ランドマークの平均を計算
                 landmarks = {
                     
-                    'left_eyebrow': [(mp_landmarks['left_eyebrow'][0] + ins_landmarks['left_eyebrow'][0]) / 2, min(mp_landmarks['left_eyebrow'][1], ins_landmarks['left_eyebrow'][1])], 
-                    'right_eyebrow': [(mp_landmarks['right_eyebrow'][0] + ins_landmarks['right_eyebrow'][0]) / 2, min(mp_landmarks['right_eyebrow'][1], ins_landmarks['right_eyebrow'][1])],
-                    'chin': (mp_landmarks['chin'] + ins_landmarks['chin']) / 2,
-                    'nose': (mp_landmarks['nose'] + ins_landmarks['nose']) / 2
+                    'left_eyebrow': ins_landmarks['left_eyebrow'], 
+                    'right_eyebrow': ins_landmarks['right_eyebrow'],
+                    'chin': ins_landmarks['chin'], 
+                    'nose': ins_landmarks['nose']
                 }
 
                 # バウンディングボックス画像の傾き修正
@@ -311,16 +299,6 @@ def detect_and_crop_faces(input_dir):
                     logger.info(f"回転後バウンディングボックス画像読み込み失敗 {bbox_rotated_path}")
                     continue
                 rotated_img_rgb = cv2.cvtColor(rotated_img, cv2.COLOR_BGR2RGB)
-                mesh_results = face_mesh.process(rotated_img_rgb)
-                mp_rot_landmarks = None
-                if mesh_results.multi_face_landmarks:
-                    landmarks = mesh_results.multi_face_landmarks[0].landmark
-                    mp_rot_landmarks = {
-                        'left_eyebrow': np.array([landmarks[105].x * rotated_img.shape[1], landmarks[105].y * rotated_img.shape[0]]),
-                        'right_eyebrow': np.array([landmarks[334].x * rotated_img.shape[1], landmarks[334].y * rotated_img.shape[0]]),
-                        'chin': np.array([landmarks[152].x * rotated_img.shape[1], landmarks[152].y * rotated_img.shape[0]]),
-                        'nose': np.array([landmarks[1].x * rotated_img.shape[1], landmarks[1].y * rotated_img.shape[0]])
-                    }
 
                 faces = app.get(rotated_img_rgb)
                 ins_rot_landmarks = None
@@ -337,15 +315,15 @@ def detect_and_crop_faces(input_dir):
                     logger.warning(f"InsightFace failed to detect face for rotated {filename} (face_idx: {face_idx})")
                     continue
 
-                if mp_rot_landmarks is None or ins_rot_landmarks is None:
+                if  ins_rot_landmarks is None:
                     logger.info(f"回転後ランドマーク取得失敗 {filename} (face_idx: {face_idx})")
                     continue
 
                 rot_landmarks = {
-                    'left_eyebrow': (mp_rot_landmarks['left_eyebrow'] + ins_rot_landmarks['left_eyebrow']) / 2,
-                    'right_eyebrow': (mp_rot_landmarks['right_eyebrow'] + ins_rot_landmarks['right_eyebrow']) / 2,
-                    'chin': (mp_rot_landmarks['chin'] + ins_rot_landmarks['chin']) / 2,
-                    'nose': (mp_rot_landmarks['nose'] + ins_rot_landmarks['nose']) / 2
+                    'left_eyebrow': ins_rot_landmarks['left_eyebrow'],
+                    'right_eyebrow': ins_rot_landmarks['right_eyebrow'],
+                    'chin': ins_rot_landmarks['chin'],
+                    'nose': ins_rot_landmarks['nose']
                 }
 
                 # 回転後バウンディングボックス画像の切り抜き
@@ -674,8 +652,6 @@ def main():
     finally:
         # 全ての処理が終わった後にリソースを解放
         cv2.destroyAllWindows()
-        face_detector.close()
-        face_mesh.close()
 
 if __name__ == "__main__":
     main()
