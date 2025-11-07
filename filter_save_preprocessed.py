@@ -2,14 +2,14 @@ import os
 import cv2
 import logging
 import numpy as np
-import mediapipe as mp
 import shutil
+from insightface.app import FaceAnalysis
 
 # 簡潔ログ
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", encoding='utf-8', force=True)
 logger = logging.getLogger(__name__)
 
-# 入出力ディレクトリ（変更しない場合はこのまま）
+# 入出力ディレクトリ
 TRAIN_DIR = "train"
 VALIDATION_DIR = "validation"
 PREPRO_DIR = "preprocessed"
@@ -17,29 +17,26 @@ PREPRO_TRAIN = os.path.join(PREPRO_DIR, "train")
 PREPRO_VALID = os.path.join(PREPRO_DIR, "validation")
 
 # チェック閾値（画像幅/高さに対する割合）
-THRESH_RATIO = 0.1  # 5%
+THRESH_RATIO = 0.1  # 10%
 
-# MediaPipe FaceMesh 初期化
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
+# InsightFace 初期化
+face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+face_app.prepare(ctx_id=0, det_size=(320, 320))
 
-# 顔の頬に相当する FaceMesh の代表インデックス（一般的に使われるペア）
-LEFT_CHEEK_IDX = 454   # 左頬（画像左寄り）
-RIGHT_CHEEK_IDX = 234   # 右頬（画像右寄り）
-
+# InsightFaceのランドマークインデックス
+# Mediapipe 454 (左頬) -> InsightFace 28
+# Mediapipe 234 (右頬) -> InsightFace 12
+LEFT_CHEEK_IDX = 28
+RIGHT_CHEEK_IDX = 12
 
 def extract_landmarks(img_bgr):
     if img_bgr is None:
         return None
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    res = face_mesh.process(img_rgb)
-    if not res or not res.multi_face_landmarks:
+    faces = face_app.get(img_bgr)
+    if not faces:
         return None
-    h, w = img_bgr.shape[:2]
-    lm = res.multi_face_landmarks[0].landmark
-    pts = [(int(p.x * w), int(p.y * h)) for p in lm]
-    return pts
-
+    # 最初の顔のランドマークを返す
+    return faces[0].landmark_2d_106
 
 def process_folder(src_dir, dst_dir):
     os.makedirs(dst_dir, exist_ok=True)
@@ -64,40 +61,36 @@ def process_folder(src_dir, dst_dir):
                 continue
 
             h, w = img.shape[:2]
-            lm = extract_landmarks(img)
-            if lm is None or max(LEFT_CHEEK_IDX, RIGHT_CHEEK_IDX) >= len(lm):
+            landmarks = extract_landmarks(img)
+            if landmarks is None or max(LEFT_CHEEK_IDX, RIGHT_CHEEK_IDX) >= len(landmarks):
                 logger.info(f"ランドマーク未検出でスキップ: {src_path}")
                 skipped += 1
                 continue
 
-            lx, ly = lm[LEFT_CHEEK_IDX]
-            rx, ry = lm[RIGHT_CHEEK_IDX]
+            # 座標を取得
+            lx, ly = landmarks[LEFT_CHEEK_IDX]
+            rx, ry = landmarks[RIGHT_CHEEK_IDX]
 
-            # 修正: x座標フィルタリング
-            # 右頬のx座標が左端から画像幅の5%以上離れている場合スキップ
+            # x座標フィルタリング
             if rx >= THRESH_RATIO * w:
                 logger.info(f"右頬が左端から離れているためスキップ: {src_path} (rx={rx} >= {THRESH_RATIO*w:.1f})")
                 skipped += 1
                 continue
 
-            # 左頬のx座標が右端から画像幅の5%以上離れている場合スキップ
             if lx <= (1.0 - THRESH_RATIO) * w:
                 logger.info(f"左頬が右端から離れているためスキップ: {src_path} (lx={lx} <= {(1.0-THRESH_RATIO)*w:.1f})")
                 skipped += 1
                 continue
 
-            # ② y差チェック（画像高さの5%以上離れている → スキップ）
+            # y差チェック
             if abs(ry - ly) >= THRESH_RATIO * h:
                 logger.info(f"y差が大きいのでスキップ: {src_path} ({abs(ry-ly)} >= {THRESH_RATIO*h:.1f})")
                 skipped += 1
                 continue
 
-            # ③ グレースケール変換
-            # img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-            # ④ preprocessed に保存（元ファイル名維持）
+            # preprocessed に保存
             try:
-                cv2.imwrite(dst_path, img)
+                shutil.copy(src_path, dst_path)
                 saved += 1
             except Exception as e:
                 logger.warning(f"保存失敗 {dst_path}: {e}")
@@ -106,25 +99,19 @@ def process_folder(src_dir, dst_dir):
     logger.info(f"処理完了: {src_dir} -> {dst_dir} (total={total}, saved={saved}, skipped={skipped})")
     return total, saved, skipped
 
-
 def main():
     try:
-        # 処理前に preprocessed フォルダを削除
         if os.path.exists(PREPRO_DIR):
             logger.info(f"既存の '{PREPRO_DIR}' フォルダを削除します...")
             shutil.rmtree(PREPRO_DIR)
             logger.info(f"'{PREPRO_DIR}' フォルダを削除しました。")
 
-        logger.info("開始: フィルタ + グレースケール保存")
+        logger.info("開始: InsightFaceによるフィルタリング")
         process_folder(TRAIN_DIR, PREPRO_TRAIN)
         process_folder(VALIDATION_DIR, PREPRO_VALID)
         logger.info("全処理完了")
-    finally:
-        try:
-            face_mesh.close()
-        except Exception:
-            pass
-
+    except Exception as e:
+        logger.error(f"エラーが発生しました: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
