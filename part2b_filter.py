@@ -36,20 +36,48 @@ def filter_by_main_person_insightface(input_dir):
     image_path_list = []
 
     logger.info("Extracting face embeddings with InsightFace...")
+    skipped_aspect = 0
+    skipped_resolution = 0
+
     for filename in image_files:
         img_path = os.path.join(rotated_dir, filename)
         try:
             bgr_image = cv2.imread(img_path)
             if bgr_image is None: continue
+
+            img_h, img_w = bgr_image.shape[:2]
             faces = app.get(bgr_image)
+
             if faces:
-                embedding = faces[0].embedding
+                face = faces[0]
+                x1, y1, x2, y2 = face.bbox
+
+                # 縮尺チェック1: アスペクト比（潰れすぎ/伸びすぎ）
+                face_width = x2 - x1
+                face_height = y2 - y1
+                aspect_ratio = face_height / face_width if face_width > 0 else 0
+
+                if aspect_ratio < 0.9 or aspect_ratio > 1.8:
+                    logger.info(f"Skipped (abnormal aspect ratio {aspect_ratio:.3f}): {img_path}")
+                    skipped_aspect += 1
+                    continue
+
+                # 縮尺チェック2: 解像度（顔が小さすぎる）
+                if face_width < 50 or face_height < 50:
+                    logger.info(f"Skipped (low resolution {face_width:.0f}x{face_height:.0f}): {img_path}")
+                    skipped_resolution += 1
+                    continue
+
+                # 全チェック通過
+                embedding = face.embedding
                 encodings.append(embedding)
                 image_path_list.append(img_path)
             else:
                 logger.warning(f"InsightFace did not find a face in: {img_path}")
         except Exception as e:
             logger.error(f"Error during InsightFace processing for {img_path}: {e}", exc_info=True)
+
+    logger.info(f"Filtering summary: skipped {skipped_aspect} (aspect), {skipped_resolution} (resolution)")
 
     if len(encodings) < 2: 
         logger.info("Fewer than 2 images to cluster. Skipping filtering.")

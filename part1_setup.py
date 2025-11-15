@@ -167,6 +167,21 @@ def detect_and_crop_faces(input_dir):
                 r_pad_bottom = max(0, ry_max_crop - rh)
                 r_pad_left = max(0, -rx_min_crop)
                 r_pad_right = max(0, rx_max_crop - rw)
+
+                # パディング量チェック（各辺のパディング比率）
+                crop_height = ry_max_crop - ry_min_crop
+                crop_width = rx_max_crop - rx_min_crop
+                max_padding_ratio = max(
+                    r_pad_top / crop_height if crop_height > 0 else 0,
+                    r_pad_bottom / crop_height if crop_height > 0 else 0,
+                    r_pad_left / crop_width if crop_width > 0 else 0,
+                    r_pad_right / crop_width if crop_width > 0 else 0
+                )
+
+                if max_padding_ratio > 0.05:  # いずれかの辺が5%超のパディング
+                    logger.info(f"Skipped (excessive padding {max_padding_ratio:.3f}): {current_face_base_name}")
+                    continue
+
                 final_img_padded = cv2.copyMakeBorder(reloaded_rotated_img, r_pad_top, r_pad_bottom, r_pad_left, r_pad_right, cv2.BORDER_CONSTANT, value=(0,0,0))
                 rx_min_crop += r_pad_left; rx_max_crop += r_pad_left
                 ry_min_crop += r_pad_top; ry_max_crop += r_pad_top

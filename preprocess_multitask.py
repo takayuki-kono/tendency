@@ -17,7 +17,10 @@ PREPRO_TRAIN = os.path.join(PREPRO_DIR, "train")
 PREPRO_VALID = os.path.join(PREPRO_DIR, "validation")
 
 # チェック閾値（画像幅/高さに対する割合）
-THRESH_RATIO = 0.1  # 10%
+# 0.125 50% 0.47 0.49
+# 0.19 66% 0.44 0.31
+# 0.25 75% 0.43 0.44
+THRESH_RATIO = 0.19
 
 # InsightFace 初期化
 face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])

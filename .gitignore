@@ -2,6 +2,18 @@ env/
 facexformer_env/
 myenv/
 .env/
+.venv_imagedl_cnn/
+.venv_new/
+.venv_preprocess/
+.venv_train_model/
+.venv_filter_save/
+.venv/
+.venv_imagedl/
+.venv_windows_gpu/
+.venv_windows_gpu/
+tendency.venv_tf210_gpu/
+kerastuner_dir/
+kerastuner_efficient/
 
 *.jpg
 *.png
@@ -10,3 +22,7 @@ myenv/
 *.tflite
 *.webp
 *.avif
+*.json
+*.h5
+*.txt
+*.log
