@@ -19,8 +19,8 @@ DEFAULT_PREPRO_DIR = "preprocessed_multitask"
 DEFAULT_THRESH_RATIO = 1.0
 
 # Pose filtering: 上位何%をフィルタリングするか（ここを変更するだけでOK）
-PITCH_FILTER_PERCENTILE = 50      # 上位0%（前傾後傾）をフィルタ = フィルタ無効
-SYMMETRY_FILTER_PERCENTILE = 0  # 上位50%（左右非対称）をフィルタ
+PITCH_FILTER_PERCENTILE = 0      # 上位0%（前傾後傾）をフィルタ = フィルタ無効
+SYMMETRY_FILTER_PERCENTILE = 40  # 上位40%（左右非対称）をフィルタ
 SAMPLE_SIZE = 500                # 閾値計算用のサンプル数
 
 # InsightFaceのランドマークインデックス
@@ -117,12 +117,16 @@ def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry
                     rx, ry = landmarks[RIGHT_CHEEK_IDX]
                     
                     center_x = w / 2.0
-                    diff_left_screen = (rx - center_x) * -1
-                    diff_right_screen = lx - center_x
+                    diff_left_screen = lx - center_x
+                    diff_right_screen = center_x - rx
                     
-                    if diff_right_screen > 0:
-                        ratio = abs(diff_left_screen / diff_right_screen - 1)
-                        symmetry_values.append(ratio)
+                    # 位置が異常な顔はスキップ
+                    if diff_right_screen <= 0 or diff_left_screen <= 0:
+                        continue
+                    
+                    # 左右の距離の比率（対称性）
+                    ratio = abs(diff_left_screen / diff_right_screen - 1)
+                    symmetry_values.append(ratio)
         except:
             continue
     
@@ -175,18 +179,22 @@ def process_single_image(args):
         center_x = w / 2.0
 
         # ユーザー指定の計算式に基づく差分
-        # 左頬(画面左側, rx) - 中心 -> 負の値なので *-1 で距離にする
-        diff_left_screen = (rx - center_x) * -1
-        # 右頬(画面右側, lx) - 中心 -> 正の値
-        diff_right_screen = lx - center_x
+        # 左頬(画面右側, rx) - 中心 -> 正
+        diff_left_screen = lx - center_x
+        # 中心 - 右頬(画面左側, lx) -> 正
+        diff_right_screen = center_x - rx 
+
+        if diff_right_screen <= 0 or diff_left_screen <= 0:
+            return 'skipped', f'face_position_invalid_left={diff_left_screen:.1f}_right={diff_right_screen:.1f}'
+
 
         # 左右の距離の比率チェック（対称性）
         # SYMMETRY_FILTER_PERCENTILE > 0 の場合のみチェック
         if symmetry_threshold is not None and SYMMETRY_FILTER_PERCENTILE > 0:
-            if diff_right_screen > 0:  # ゼロ除算を避ける
-                ratio = abs(diff_left_screen / diff_right_screen -1)
-                if ratio >= symmetry_threshold:
-                    return 'skipped', f'symmetry_ratio_{ratio:.3f}>={symmetry_threshold:.3f}'
+            # ユーザー指定: 左右の比率が閾値を超えたらスキップ
+            if abs(diff_left_screen / diff_right_screen - 1) >= symmetry_threshold:
+                ratio = abs(diff_left_screen / diff_right_screen - 1)
+                return 'skipped', f'symmetry_ratio_{ratio:.3f}>={symmetry_threshold:.3f}'
 
         # y差チェック (既存のまま)
         if abs(ry - ly) >= thresh_ratio * h:
