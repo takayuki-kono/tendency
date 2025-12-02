@@ -16,11 +16,12 @@ DEFAULT_TRAIN_DIR = "train"
 DEFAULT_VALIDATION_DIR = "validation"
 DEFAULT_PREPRO_DIR = "preprocessed_multitask"
 # チェック閾値（画像幅/高さに対する割合）
-DEFAULT_THRESH_RATIO = 1.0
+DEFAULT_THRESH_RATIO = 0.03
 
 # Pose filtering: 上位何%をフィルタリングするか（ここを変更するだけでOK）
 PITCH_FILTER_PERCENTILE = 0      # 上位0%（前傾後傾）をフィルタ = フィルタ無効
 SYMMETRY_FILTER_PERCENTILE = 40  # 上位40%（左右非対称）をフィルタ
+Y_DIFF_FILTER_PERCENTILE = 0     # 上位0%（頬の高さ差）をフィルタ = フィルタ無効
 SAMPLE_SIZE = 500                # 閾値計算用のサンプル数
 
 # InsightFaceのランドマークインデックス
@@ -31,15 +32,17 @@ RIGHT_CHEEK_IDX = 12
 face_app = None
 pitch_threshold = None
 symmetry_threshold = None
+y_diff_threshold = None
 
-def init_worker(pitch_th, symmetry_th):
+def init_worker(pitch_th, symmetry_th, y_diff_th):
     """
     Worker process initialization.
     Each process needs its own FaceAnalysis instance.
     """
-    global face_app, pitch_threshold, symmetry_threshold
+    global face_app, pitch_threshold, symmetry_threshold, y_diff_threshold
     pitch_threshold = pitch_th
     symmetry_threshold = symmetry_th
+    y_diff_threshold = y_diff_th
     # Providers can be adjusted based on environment (e.g., CPU only for workers if GPU memory is tight)
     # For now, we try CUDA if available, else CPU.
     face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
@@ -55,16 +58,17 @@ def extract_face_info(img_bgr):
         return None
     return faces[0]
 
-def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry_percentile=50):
+def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry_percentile=50, y_diff_percentile=50):
     """
-    データセットをサンプリングしてpitchと左右対称性の閾値を計算
+    データセットをサンプリングしてpitchと左右対称性、頬の高さ差の閾値を計算
     Args:
         src_dir: ソースディレクトリ
         sample_size: サンプル数
         pitch_percentile: pitchのパーセンタイル（上位 X% をフィルタ）
         symmetry_percentile: 対称性のパーセンタイル（上位 Y% をフィルタ）
+        y_diff_percentile: 頬の高さ差のパーセンタイル（上位 Z% をフィルタ）
     Returns:
-        (pitch_threshold, symmetry_threshold)
+        (pitch_threshold, symmetry_threshold, y_diff_threshold)
     """
     logger.info(f"データセットをサンプリング中... (最大{sample_size}枚)")
     
@@ -89,6 +93,7 @@ def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry
     
     pitch_values = []
     symmetry_values = []
+    y_diff_values = []
     
     logger.info(f"{len(image_files)}枚の画像を分析中...")
     for img_path in image_files:
@@ -127,22 +132,28 @@ def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry
                     # 左右の距離の比率（対称性）
                     ratio = abs(diff_left_screen / diff_right_screen - 1)
                     symmetry_values.append(ratio)
+                    
+                    # 頬のy座標の差（高さ差）
+                    y_diff = abs(ly - ry) / h
+                    y_diff_values.append(y_diff)
         except:
             continue
     
-    if len(pitch_values) < 10 or len(symmetry_values) < 10:
+    if len(pitch_values) < 10 or len(symmetry_values) < 10 or len(y_diff_values) < 10:
         logger.warning(f"pose値が十分に取得できませんでした。デフォルト閾値を使用します。")
-        return 15.0, 0.2
+        return 15.0, 0.2, 0.03
     
     # パーセンタイル計算
     pitch_th = np.percentile(pitch_values, 100 - pitch_percentile)
     symmetry_th = np.percentile(symmetry_values, 100 - symmetry_percentile)
+    y_diff_th = np.percentile(y_diff_values, 100 - y_diff_percentile)
     
     logger.info(f"閾値計算完了:")
     logger.info(f"  Pitch (前傾後傾): 上位{pitch_percentile}%をフィルタ (>= {pitch_th:.2f}°)")
     logger.info(f"  Symmetry (左右対称): 上位{symmetry_percentile}%をフィルタ (>= {symmetry_th:.3f})")
+    logger.info(f"  Y-Diff (頬の高さ差): 上位{y_diff_percentile}%をフィルタ (>= {y_diff_th:.4f})")
     
-    return pitch_th, symmetry_th
+    return pitch_th, symmetry_th, y_diff_th
 
 def process_single_image(args):
     """
@@ -196,9 +207,12 @@ def process_single_image(args):
                 ratio = abs(diff_left_screen / diff_right_screen - 1)
                 return 'skipped', f'symmetry_ratio_{ratio:.3f}>={symmetry_threshold:.3f}'
 
-        # y差チェック (既存のまま)
-        if abs(ry - ly) >= thresh_ratio * h:
-            return 'skipped', f'y_diff_{abs(ry-ly):.1f}>={thresh_ratio*h:.1f}'
+        # y差チェック（頬の高さ差）
+        # Y_DIFF_FILTER_PERCENTILE > 0 の場合のみチェック
+        if y_diff_threshold is not None and Y_DIFF_FILTER_PERCENTILE > 0:
+            y_diff_ratio = abs(ry - ly) / h
+            if y_diff_ratio >= y_diff_threshold:
+                return 'skipped', f'y_diff_{y_diff_ratio:.4f}>={y_diff_threshold:.4f}'
         
         # ピッチチェック（顔の向き - 前傾後傾のみ）
         # PITCH_FILTER_PERCENTILE > 0 の場合のみチェック
@@ -215,7 +229,7 @@ def process_single_image(args):
     except Exception as e:
         return 'error', str(e)
 
-def process_folder(src_dir, dst_dir, thresh_ratio, pitch_th, symmetry_th):
+def process_folder(src_dir, dst_dir, thresh_ratio, pitch_th, symmetry_th, y_diff_th):
     """
     フォルダを再帰的に処理し、フィルタリング後の画像を保存する。
     並列処理を使用。
@@ -262,7 +276,7 @@ def process_folder(src_dir, dst_dir, thresh_ratio, pitch_th, symmetry_th):
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=max_workers, 
         initializer=init_worker,
-        initargs=(pitch_th, symmetry_th)
+        initargs=(pitch_th, symmetry_th, y_diff_th)
     ) as executor:
         # Map returns results in order
         results = executor.map(process_single_image, tasks)
@@ -295,6 +309,7 @@ def main():
     parser.add_argument("--thresh", type=float, default=DEFAULT_THRESH_RATIO, help="Threshold ratio for filtering")
     parser.add_argument("--pitch_percentile", type=int, default=PITCH_FILTER_PERCENTILE, help="Pitch filter percentile (0-100)")
     parser.add_argument("--symmetry_percentile", type=int, default=SYMMETRY_FILTER_PERCENTILE, help="Symmetry filter percentile (0-100)")
+    parser.add_argument("--y_diff_percentile", type=int, default=Y_DIFF_FILTER_PERCENTILE, help="Y-diff filter percentile (0-100)")
     
     args = parser.parse_args()
 
@@ -320,21 +335,23 @@ def main():
         logger.info("Filtering configuration:")
         logger.info(f"  Pitch filter: Top {args.pitch_percentile}% will be filtered")
         logger.info(f"  Symmetry filter: Top {args.symmetry_percentile}% will be filtered")
+        logger.info(f"  Y-diff filter: Top {args.y_diff_percentile}% will be filtered")
         logger.info("=" * 60)
         
-        pitch_th, symmetry_th = calculate_thresholds(
+        pitch_th, symmetry_th, y_diff_th = calculate_thresholds(
             train_dir, 
             sample_size=SAMPLE_SIZE,
             pitch_percentile=args.pitch_percentile,
-            symmetry_percentile=args.symmetry_percentile
+            symmetry_percentile=args.symmetry_percentile,
+            y_diff_percentile=args.y_diff_percentile
         )
         
         logger.info("=" * 60)
         logger.info(f"Train Source: {train_dir} -> {prepro_train}")
         logger.info(f"Val Source:   {val_dir} -> {prepro_valid}")
 
-        process_folder(train_dir, prepro_train, thresh, pitch_th, symmetry_th)
-        process_folder(val_dir, prepro_valid, thresh, pitch_th, symmetry_th)
+        process_folder(train_dir, prepro_train, thresh, pitch_th, symmetry_th, y_diff_th)
+        process_folder(val_dir, prepro_valid, thresh, pitch_th, symmetry_th, y_diff_th)
         
         logger.info("All processing complete.")
     except Exception as e:

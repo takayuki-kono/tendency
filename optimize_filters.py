@@ -28,16 +28,18 @@ class FilterHyperModel(kt.HyperModel):
         # 1. パラメータ決定
         pitch = hp.Int('pitch', min_value=0, max_value=50, step=5)
         symmetry = hp.Int('symmetry', min_value=0, max_value=50, step=5)
+        thresh = hp.Float('thresh', min_value=0.0, max_value=0.1, step=0.01)
         
         print(f"\n{'='*60}")
-        print(f"Trial: Pitch={pitch}, Symmetry={symmetry}")
+        print(f"Trial: Pitch={pitch}, Symmetry={symmetry}, Thresh={thresh}")
         print(f"{'='*60}")
 
         # 2. 前処理実行
         cmd_pre = [
             PYTHON_PREPROCESS, "preprocess_multitask.py",
             "--pitch_percentile", str(pitch),
-            "--symmetry_percentile", str(symmetry)
+            "--symmetry_percentile", str(symmetry),
+            "--thresh", str(thresh)
         ]
         print("Running preprocessing...")
         ret_pre = subprocess.run(cmd_pre, capture_output=True, text=True)
@@ -112,6 +114,7 @@ def main():
     print("OPTIMIZATION COMPLETE")
     print(f"Best Pitch: {best_hps.get('pitch')}")
     print(f"Best Symmetry: {best_hps.get('symmetry')}")
+    print(f"Best Thresh: {best_hps.get('thresh')}")
     print("="*60)
 
 if __name__ == "__main__":
