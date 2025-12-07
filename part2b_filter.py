@@ -62,12 +62,6 @@ def filter_by_main_person_insightface(input_dir):
                     skipped_aspect += 1
                     continue
 
-                # 縮尺チェック2: 解像度（顔が小さすぎる）
-                if face_width < 50 or face_height < 50:
-                    logger.info(f"Skipped (low resolution {face_width:.0f}x{face_height:.0f}): {img_path}")
-                    skipped_resolution += 1
-                    continue
-
                 # 全チェック通過
                 embedding = face.embedding
                 encodings.append(embedding)

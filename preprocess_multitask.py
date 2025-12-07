@@ -3,9 +3,15 @@ import cv2
 import logging
 import shutil
 import argparse
+import pickle
 import concurrent.futures
 import numpy as np
+import random
 from insightface.app import FaceAnalysis
+
+# Seed fix
+random.seed(42)
+np.random.seed(42)
 
 # 簡潔ログ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", encoding='utf-8', force=True)
@@ -33,16 +39,24 @@ face_app = None
 pitch_threshold = None
 symmetry_threshold = None
 y_diff_threshold = None
+pitch_filter_enabled = False
+symmetry_filter_enabled = False
+y_diff_filter_enabled = False
 
-def init_worker(pitch_th, symmetry_th, y_diff_th):
+def init_worker(pitch_th, symmetry_th, y_diff_th, pitch_pct, symmetry_pct, y_diff_pct):
     """
     Worker process initialization.
     Each process needs its own FaceAnalysis instance.
     """
     global face_app, pitch_threshold, symmetry_threshold, y_diff_threshold
+    global pitch_filter_enabled, symmetry_filter_enabled, y_diff_filter_enabled
     pitch_threshold = pitch_th
     symmetry_threshold = symmetry_th
     y_diff_threshold = y_diff_th
+    # フィルタ有効/無効はパーセンタイル値で判定
+    pitch_filter_enabled = (pitch_pct > 0)
+    symmetry_filter_enabled = (symmetry_pct > 0)
+    y_diff_filter_enabled = (y_diff_pct > 0)
     # Providers can be adjusted based on environment (e.g., CPU only for workers if GPU memory is tight)
     # For now, we try CUDA if available, else CPU.
     face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
@@ -70,75 +84,125 @@ def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry
     Returns:
         (pitch_threshold, symmetry_threshold, y_diff_threshold)
     """
-    logger.info(f"データセットをサンプリング中... (最大{sample_size}枚)")
+    CACHE_FILE = "distribution_cache.pkl"
     
-    # 画像ファイルを収集
-    image_files = []
+    # 高速化のためファイル数をカウント（キャッシュ検証用）
+    total_files = 0
     for root, _, files in os.walk(src_dir):
-        for fn in files:
-            if fn.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
-                image_files.append(os.path.join(root, fn))
-                if len(image_files) >= sample_size:
-                    break
-        if len(image_files) >= sample_size:
-            break
+        total_files += len([f for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
     
-    if len(image_files) == 0:
-        logger.warning("サンプル画像が見つかりません。デフォルト閾値を使用します。")
-        return 15.0, 0.2  # デフォルト値 (pitch, symmetry)
-    
-    # InsightFaceを初期化
-    app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-    app.prepare(ctx_id=0, det_size=(320, 320))
-    
-    pitch_values = []
-    symmetry_values = []
-    y_diff_values = []
-    
-    logger.info(f"{len(image_files)}枚の画像を分析中...")
-    for img_path in image_files:
+    # キャッシュ確認
+    cached_data = None
+    if os.path.exists(CACHE_FILE):
         try:
-            img = cv2.imread(img_path)
-            if img is None:
+            with open(CACHE_FILE, 'rb') as f:
+                cached_data = pickle.load(f)
+            
+            # キャッシュの有効性チェック
+            if (cached_data.get('src_dir') == src_dir and 
+                cached_data.get('file_count') == total_files and 
+                cached_data.get('sample_size') == sample_size):
+                logger.info("有効なキャッシュが見つかりました。サンプリングをスキップします。")
+                pitch_values = cached_data['pitch_values']
+                symmetry_values = cached_data['symmetry_values']
+                y_diff_values = cached_data['y_diff_values']
+            else:
+                logger.info("キャッシュが無効または古いため、再計算します。")
+                cached_data = None
+        except Exception as e:
+            logger.warning(f"キャッシュ読み込みエラー: {e}")
+            cached_data = None
+
+    if cached_data is None:
+        logger.info(f"データセットをサンプリング中... (最大{sample_size}枚)")
+        
+        # 画像ファイルを収集
+        if len(image_files) == 0:
+            logger.warning("サンプル画像が見つかりません。デフォルト閾値を使用します。")
+            return 15.0, 0.2, 0.03 # デフォルト値
+
+        # 全ファイルを収集してからランダムサンプリング（バイアス回避）
+        all_image_files = []
+        for root, _, files in os.walk(src_dir):
+            for fn in files:
+                if fn.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
+                    all_image_files.append(os.path.join(root, fn))
+        
+        # シャッフルして先頭から抽出
+        random.shuffle(all_image_files)
+        image_files = all_image_files[:sample_size]
+        
+        if len(image_files) == 0:
+            logger.warning("サンプル画像が見つかりません。デフォルト閾値を使用します。")
+            return 15.0, 0.2, 0.03 # デフォルト値
+        
+        # InsightFaceを初期化
+        app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        app.prepare(ctx_id=0, det_size=(320, 320))
+        
+        pitch_values = []
+        symmetry_values = []
+        y_diff_values = []
+        
+        logger.info(f"{len(image_files)}枚の画像を分析中...")
+        for img_path in image_files:
+            try:
+                img = cv2.imread(img_path)
+                if img is None:
+                    continue
+                
+                faces = app.get(img)
+                if not faces:
+                    continue
+                
+                face = faces[0]
+                
+                # Pitch値を収集
+                if face.pose is not None:
+                    pitch, yaw, roll = face.pose
+                    pitch_values.append(abs(pitch))
+                
+                # 対称性比率を計算
+                if face.landmark_2d_106 is not None:
+                    landmarks = face.landmark_2d_106
+                    if len(landmarks) > max(LEFT_CHEEK_IDX, RIGHT_CHEEK_IDX):
+                        h, w = img.shape[:2]
+                        lx, ly = landmarks[LEFT_CHEEK_IDX]
+                        rx, ry = landmarks[RIGHT_CHEEK_IDX]
+                        
+                        center_x = w / 2.0
+                        diff_left_screen = lx - center_x
+                        diff_right_screen = center_x - rx
+                        
+                        # 位置が異常な顔はスキップ
+                        if diff_right_screen <= 0 or diff_left_screen <= 0:
+                            continue
+                        
+                        # 左右の距離の比率（対称性）
+                        ratio = abs(diff_left_screen / diff_right_screen - 1)
+                        symmetry_values.append(ratio)
+                        
+                        # 頬のy座標の差（高さ差）
+                        y_diff = abs(ly - ry) / h
+                        y_diff_values.append(y_diff)
+            except:
                 continue
-            
-            faces = app.get(img)
-            if not faces:
-                continue
-            
-            face = faces[0]
-            
-            # Pitch値を収集
-            if face.pose is not None:
-                pitch, yaw, roll = face.pose
-                pitch_values.append(abs(pitch))
-            
-            # 対称性比率を計算
-            if face.landmark_2d_106 is not None:
-                landmarks = face.landmark_2d_106
-                if len(landmarks) > max(LEFT_CHEEK_IDX, RIGHT_CHEEK_IDX):
-                    h, w = img.shape[:2]
-                    lx, ly = landmarks[LEFT_CHEEK_IDX]
-                    rx, ry = landmarks[RIGHT_CHEEK_IDX]
-                    
-                    center_x = w / 2.0
-                    diff_left_screen = lx - center_x
-                    diff_right_screen = center_x - rx
-                    
-                    # 位置が異常な顔はスキップ
-                    if diff_right_screen <= 0 or diff_left_screen <= 0:
-                        continue
-                    
-                    # 左右の距離の比率（対称性）
-                    ratio = abs(diff_left_screen / diff_right_screen - 1)
-                    symmetry_values.append(ratio)
-                    
-                    # 頬のy座標の差（高さ差）
-                    y_diff = abs(ly - ry) / h
-                    y_diff_values.append(y_diff)
-        except:
-            continue
-    
+        
+        # キャッシュ保存
+        try:
+            with open(CACHE_FILE, 'wb') as f:
+                pickle.dump({
+                    'src_dir': src_dir,
+                    'file_count': total_files,
+                    'sample_size': sample_size,
+                    'pitch_values': pitch_values,
+                    'symmetry_values': symmetry_values,
+                    'y_diff_values': y_diff_values
+                }, f)
+            logger.info("サンプリング結果をキャッシュに保存しました。")
+        except Exception as e:
+            logger.warning(f"キャッシュ保存エラー: {e}")
+
     if len(pitch_values) < 10 or len(symmetry_values) < 10 or len(y_diff_values) < 10:
         logger.warning(f"pose値が十分に取得できませんでした。デフォルト閾値を使用します。")
         return 15.0, 0.2, 0.03
@@ -200,36 +264,33 @@ def process_single_image(args):
 
 
         # 左右の距離の比率チェック（対称性）
-        # SYMMETRY_FILTER_PERCENTILE > 0 の場合のみチェック
-        if symmetry_threshold is not None and SYMMETRY_FILTER_PERCENTILE > 0:
+        if symmetry_filter_enabled and symmetry_threshold is not None:
             # ユーザー指定: 左右の比率が閾値を超えたらスキップ
             if abs(diff_left_screen / diff_right_screen - 1) >= symmetry_threshold:
                 ratio = abs(diff_left_screen / diff_right_screen - 1)
                 return 'skipped', f'symmetry_ratio_{ratio:.3f}>={symmetry_threshold:.3f}'
 
         # y差チェック（頬の高さ差）
-        # Y_DIFF_FILTER_PERCENTILE > 0 の場合のみチェック
-        if y_diff_threshold is not None and Y_DIFF_FILTER_PERCENTILE > 0:
+        if y_diff_filter_enabled and y_diff_threshold is not None:
             y_diff_ratio = abs(ry - ly) / h
             if y_diff_ratio >= y_diff_threshold:
                 return 'skipped', f'y_diff_{y_diff_ratio:.4f}>={y_diff_threshold:.4f}'
         
         # ピッチチェック（顔の向き - 前傾後傾のみ）
-        # PITCH_FILTER_PERCENTILE > 0 の場合のみチェック
-        if face.pose is not None and pitch_threshold is not None and PITCH_FILTER_PERCENTILE > 0:
+        if pitch_filter_enabled and face.pose is not None and pitch_threshold is not None:
             pitch, yaw, roll = face.pose
             # グローバル閾値を使用（パーセンタイルベース）
             if abs(pitch) > pitch_threshold:
                 return 'skipped', f'pitch_{abs(pitch):.1f}>{pitch_threshold:.1f}'
 
-        # フィルタを通過した画像をコピー
-        shutil.copy(src_path, dst_path)
+        # フィルタを通過した画像をコピー（メタデータ不要なのでcopyfileで高速化）
+        shutil.copyfile(src_path, dst_path)
         return 'saved', None
 
     except Exception as e:
         return 'error', str(e)
 
-def process_folder(src_dir, dst_dir, thresh_ratio, pitch_th, symmetry_th, y_diff_th):
+def process_folder(src_dir, dst_dir, pitch_th, symmetry_th, y_diff_th, pitch_pct, symmetry_pct, y_diff_pct):
     """
     フォルダを再帰的に処理し、フィルタリング後の画像を保存する。
     並列処理を使用。
@@ -256,7 +317,7 @@ def process_folder(src_dir, dst_dir, thresh_ratio, pitch_th, symmetry_th, y_diff
             
             src_path = os.path.join(root, fn)
             dst_path = os.path.join(dst_label_path, fn)
-            tasks.append((src_path, dst_path, thresh_ratio))
+            tasks.append((src_path, dst_path, None))  # thresh_ratio は未使用
 
     total = len(tasks)
     logger.info(f"Found {total} images. Starting parallel processing...")
@@ -272,11 +333,11 @@ def process_folder(src_dir, dst_dir, thresh_ratio, pitch_th, symmetry_th, y_diff
     # Let's default to a safe number like 4 or os.cpu_count() // 2
     max_workers = max(1, os.cpu_count() // 2)
     
-    # Pass thresholds to worker initializer
+    # Pass thresholds and percentiles to worker initializer
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=max_workers, 
         initializer=init_worker,
-        initargs=(pitch_th, symmetry_th, y_diff_th)
+        initargs=(pitch_th, symmetry_th, y_diff_th, pitch_pct, symmetry_pct, y_diff_pct)
     ) as executor:
         # Map returns results in order
         results = executor.map(process_single_image, tasks)
@@ -350,8 +411,10 @@ def main():
         logger.info(f"Train Source: {train_dir} -> {prepro_train}")
         logger.info(f"Val Source:   {val_dir} -> {prepro_valid}")
 
-        process_folder(train_dir, prepro_train, thresh, pitch_th, symmetry_th, y_diff_th)
-        process_folder(val_dir, prepro_valid, thresh, pitch_th, symmetry_th, y_diff_th)
+        process_folder(train_dir, prepro_train, pitch_th, symmetry_th, y_diff_th, 
+                       args.pitch_percentile, args.symmetry_percentile, args.y_diff_percentile)
+        process_folder(val_dir, prepro_valid, pitch_th, symmetry_th, y_diff_th,
+                       args.pitch_percentile, args.symmetry_percentile, args.y_diff_percentile)
         
         logger.info("All processing complete.")
     except Exception as e:

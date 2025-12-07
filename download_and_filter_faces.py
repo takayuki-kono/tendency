@@ -1,22 +1,43 @@
 import subprocess
 import sys
 import os
-import random
+import argparse
+import datetime
 
 # --- Configuration ---
-# Edit this list to process multiple keywords
-KEYWORDS = ["石井杏奈", "和久井映見"]
+# Default list of keywords to process if no CLI arguments are provided
+DEFAULT_KEYWORDS = ["ゴミ箱"]
 
 # --- Main Orchestrator ---
 def main():
+    parser = argparse.ArgumentParser(description="Image Processing Pipeline Orchestrator")
+    parser.add_argument("keywords", nargs="*", help="Keywords to process. If empty, uses the internal DEFAULT_KEYWORDS list.")
+    args = parser.parse_args()
+
+    # Hybrid approach: Use CLI args if provided, otherwise fallback to internal list
+    keywords_to_process = args.keywords if args.keywords else DEFAULT_KEYWORDS
+
     print("--- Starting Image Processing Pipeline ---")
+    print(f"Target Keywords: {keywords_to_process}")
+    
     python_executable = sys.executable
 
-    for keyword in KEYWORDS:
+    for keyword in keywords_to_process:
         print(f"\n{'='*20}\nProcessing keyword: {keyword}\n{'='*20}")
         
-        # Generate a unique directory for this keyword's results
-        output_dir = str(random.randint(0, 9999)).zfill(4)
+        # Generate a deterministic directory name based on keyword and timestamp
+        # Format: output_<keyword>_<YYYYMMDD>
+        # Sanitizing keyword to be safe for directory names
+        safe_keyword = "".join(c for c in keyword if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
+        timestamp = datetime.datetime.now().strftime("%Y%m%d")
+        output_dir = f"output_{safe_keyword}_{timestamp}"
+        
+        # Ensure unique output dir if multiple runs happen on same day (optional, but good for safety)
+        # If you prefer strictly one folder per day per keyword, you can remove this check or handle it differently.
+        # For now, let's keep it simple: if it exists, we use it (scripts inside should handle overwrite/append if needed)
+        # or we can append a counter if we want fresh runs. 
+        # Let's stick to the simple deterministic name for now as requested.
+        
         print(f"Output will be in directory: {output_dir}")
 
         # Define the sequence of scripts to run for this keyword
