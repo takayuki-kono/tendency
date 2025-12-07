@@ -1,8 +1,27 @@
 import os
+
+# GPUメモリを必要な分だけ動的に割り当て（他アプリとの共存改善）
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
 import tensorflow as tf
+
+# GPU メモリ増分割り当てを有効化
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 from tensorflow.keras import layers, models
 from tensorflow.keras import mixed_precision
 import logging
+import random
+import numpy as np
+
+# 再現性のためのシード固定
+SEED = 42
+os.environ['PYTHONHASHSEED'] = str(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
 
 # 混合精度演算を有効化
 policy = mixed_precision.Policy('mixed_float16')
@@ -119,9 +138,9 @@ def main():
     val_weight_tables = calculate_class_weights_as_tables(VALIDATION_DIR)
 
     train_ds = create_dataset(TRAIN_DIR, ALL_TASK_LABELS, weight_tables=weight_tables)\
-        .cache().shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+        .shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
     val_ds = create_dataset(VALIDATION_DIR, ALL_TASK_LABELS, weight_tables=val_weight_tables)\
-        .cache().batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+        .batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
     # 固定モデル構築 (EfficientNetV2B0)
     from tensorflow.keras.applications import EfficientNetV2B0
@@ -139,10 +158,11 @@ def main():
     x = layers.Dropout(0.2)(x)
 
     output_names = [f'task_{chr(97+i)}_output' for i in range(len(ALL_TASK_LABELS))]
-    outputs = [
-        layers.Dense(len(labels), activation='softmax', name=name)(x)
-        for name, labels in zip(output_names, ALL_TASK_LABELS)
-    ]
+    outputs = []
+    for name, labels in zip(output_names, ALL_TASK_LABELS):
+        # Mixed Precision安定化: 出力層はfloat32で行う
+        x_out = layers.Dense(len(labels), name=name+'_logits')(x)
+        outputs.append(layers.Activation('softmax', dtype='float32', name=name)(x_out))
 
     model = models.Model(inputs=inputs, outputs=outputs)
 
@@ -155,7 +175,7 @@ def main():
         loss=loss_dict,
         loss_weights=loss_weights_dict,
         metrics=metrics_dict,
-        jit_compile=False
+        # jit_compile=True  # XLAコンパイルは libdevice.10.bc エラーのため無効化（GPUは引き続き使用される）
     )
 
     history = model.fit(
@@ -169,14 +189,9 @@ def main():
     results = model.evaluate(val_ds, return_dict=True)
     
     # 全タスクの平均精度を計算
-    task_accuracies = [
-        results.get('task_a_output_accuracy', 0.0),
-        results.get('task_b_output_accuracy', 0.0),
-        results.get('task_c_output_accuracy', 0.0),
-        results.get('task_d_output_accuracy', 0.0)
-    ]
-    avg_acc = sum(task_accuracies) / len(task_accuracies)
-    print(f"FINAL_SCORE: {avg_acc}") # この出力を optimize_filters.py で拾う
+    # Task A の精度を使用
+    final_score = results.get('task_a_output_accuracy', 0.0)
+    print(f"FINAL_SCORE: {final_score}") # この出力を optimize_with_optuna.py で拾う
 
 if __name__ == "__main__":
     main()
