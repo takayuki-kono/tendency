@@ -281,6 +281,8 @@ def main():
 
 
     # --- Phase 2: Fine-tuning (全層解凍) ---
+    final_val_acc = warmup_best_score  # Initialize with warmup score by default
+
     if args.fine_tune.lower() == 'true':
         logger.info(f"--- Phase 2: Fine-tuning ({args.epochs} epochs) ---")
         
@@ -342,7 +344,7 @@ def main():
                 final_val_acc = ft_best_score
         else:
             logger.warning("Base model layer not found for fine-tuning.")
-            final_val_acc = warmup_best_score
+            # final_val_acc は既に warmup_best_score で初期化済み
 
     # クリーンアップ
     if os.path.exists(temp_weights_path):

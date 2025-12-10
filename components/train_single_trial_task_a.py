@@ -43,6 +43,31 @@ TASK_A_LABELS = ['a', 'b', 'c']
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+def calculate_balanced_accuracy(model, dataset, num_classes):
+    """バランス精度を計算（各クラスの正解率の平均）"""
+    all_true = []
+    all_pred = []
+    
+    for images, labels in dataset:
+        preds = model.predict(images, verbose=0)
+        pred_classes = np.argmax(preds, axis=1)
+        all_true.extend(labels.numpy())
+        all_pred.extend(pred_classes)
+    
+    # 各クラスの正解率を計算
+    per_class_acc = []
+    for c in range(num_classes):
+        class_indices = [i for i, t in enumerate(all_true) if t == c]
+        if len(class_indices) > 0:
+            correct = sum(1 for i in class_indices if all_pred[i] == c)
+            per_class_acc.append(correct / len(class_indices))
+    
+    if len(per_class_acc) == 0:
+        return 0.0
+    
+    balanced_acc = sum(per_class_acc) / len(per_class_acc)
+    return balanced_acc, per_class_acc
+
 def calculate_class_weights(directory):
     """Task A のクラス重みを計算"""
     logger.info(f"Calculating class weights for Task A from: {directory}")
@@ -292,8 +317,16 @@ def main():
         model.save(save_path)
         logger.info(f"Model saved to {save_path}")
 
+    # Balanced Accuracy を計算
+    logger.info("Calculating Balanced Accuracy on validation set...")
+    balanced_acc, per_class_acc = calculate_balanced_accuracy(model, val_ds, len(TASK_A_LABELS))
+    
+    logger.info(f"Per-class accuracy: {dict(zip(TASK_A_LABELS, [f'{a:.2%}' for a in per_class_acc]))}")
+    logger.info(f"Balanced Accuracy: {balanced_acc:.4f}")
+
     # 最終結果出力
     print(f"FINAL_VAL_ACCURACY: {final_val_acc}")
+    print(f"FINAL_BALANCED_ACCURACY: {balanced_acc}")
 
 if __name__ == "__main__":
     main()
