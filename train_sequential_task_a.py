@@ -69,7 +69,7 @@ def run_trial(params):
     logger.info(f"Cache Miss. Running process... (File Count: {file_count})")
     logger.info(f"{'='*50}")
 
-    cmd = [PYTHON_EXEC, "train_single_trial_task_a.py"]
+    cmd = [PYTHON_EXEC, "components/train_single_trial_task_a.py"]
     for key, value in params.items():
         cmd.extend([f"--{key}", str(value)])
 
@@ -82,10 +82,13 @@ def run_trial(params):
 
         # スコア抽出
         match_a = re.search(r"FINAL_VAL_ACCURACY:\s*(\d+\.\d+)", ret.stdout)
+        match_bal = re.search(r"FINAL_BALANCED_ACCURACY:\s*(\d+\.\d+)", ret.stdout)
 
         if match_a:
             score = float(match_a.group(1))
-            logger.info(f"Result: Val Accuracy = {score}")
+            balanced_score = float(match_bal.group(1)) if match_bal else 0.0
+            
+            logger.info(f"Result: Val Accuracy = {score}, Balanced Accuracy = {balanced_score}")
             
             # キャッシュ保存
             cache = load_cache()

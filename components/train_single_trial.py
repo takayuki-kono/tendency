@@ -117,6 +117,9 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
     AUTOTUNE = tf.data.AUTOTUNE
     list_ds = tf.data.Dataset.list_files(f'{directory}/*/*.jpg', shuffle=True, seed=42)
     ds = list_ds.map(parse_path, num_parallel_calls=AUTOTUNE)
+    
+    # Cache here to avoid re-reading/decoding images
+    ds = ds.cache()
 
     # データ拡張 (GPUで行うためモデル内ではなくここでやるか、モデル内に入れるか。train_with_bayesianはモデル内)
     # ここではモデル内に任せるため、ここでは何もしない
