@@ -53,6 +53,68 @@ def imwrite_safe(path, img):
 def setup_crawler(storage_dir):
     return BingImageCrawler(storage={'root_dir': storage_dir}, downloader_threads=4)
 
+# --- Google Scraping Helper ---
+import requests
+from bs4 import BeautifulSoup
+import re
+import base64
+
+def scrape_google_images(keyword, max_num, output_dir):
+    logger.info(f"Starting Google scrape for: {keyword}, target: {max_num}")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.114 Safari/537.36"
+    }
+    
+    url = f"https://www.google.com/search?q={keyword}&tbm=isch"
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Regex to find image URLs (thumbnails often encoded in base64 or simpler http links in script tags)
+        # Google often stores images in AF_initDataCallback
+        # This is a heuristic approach for "fast" scraping of initial results
+        
+        # Method A: Look for direct image sources (thumbnails)
+        img_tags = soup.find_all("img")
+        
+        count = 0
+        for img in img_tags:
+            if count >= max_num:
+                break
+                
+            src = img.get('src')
+            if not src:
+                src = img.get('data-src')
+                
+            if not src or not src.startswith('http'):
+                continue
+                
+            # Skip google logos
+            if 'google' in src and 'logo' in src:
+                continue
+
+            try:
+                img_data = requests.get(src, timeout=5).content
+                file_path = os.path.join(output_dir, f"google_{count:04d}.jpg")
+                with open(file_path, 'wb') as f:
+                    f.write(img_data)
+                count += 1
+            except Exception as e:
+                pass
+                
+        # Method B: Regex for larger images in scripts (more fragile but better quality if works)
+        # matches = re.findall(r'\"(https?://[^\"]+?\.jpg)\"', response.text)
+        # ... skipped for stability per user request for "fast/simple" ...
+        
+        logger.info(f"Google scrape finished. Downloaded: {count} images.")
+        
+    except Exception as e:
+        logger.error(f"Google scrape failed for {keyword}: {e}")
+
 def download_images(keyword, max_num):
     search_terms = [
         (keyword, keyword),
@@ -72,12 +134,25 @@ def download_images(keyword, max_num):
         os.makedirs(storage_dir, exist_ok=True)
         
         logger.info(f"Starting download for: {search_keyword}, storage: {storage_dir}")
+        
+        # 1. Bing Download (Original)
         try:
             crawler = setup_crawler(storage_dir)
             crawler.crawl(keyword=search_keyword, max_num=max_num)
-            logger.info(f"Finished download for {search_keyword}")
+            logger.info(f"Bing finished for {search_keyword}")
         except Exception as e:
-            logger.error(f"Crawler failed for {search_keyword}: {e}")
+            logger.error(f"Bing Crawler failed for {search_keyword}: {e}")
+
+        # 2. Google Download (New)
+        # Save to the same folder, consolidate_files handles renaming/moving anyway
+        try:
+            # Create a subfolder to avoid filename collisions temporarily? 
+            # consolidate_files flattens subdirs so we can just download here with unique prefix
+            # BUT icrawler uses 000001.jpg etc.
+            # My google scraper uses google_0000.jpg. Safe to mix.
+            scrape_google_images(search_keyword, max_num, storage_dir)
+        except Exception as e:
+            logger.error(f"Google Scraper failed for {search_keyword}: {e}")
 
 def consolidate_files(keyword, output_dir):
     if os.path.exists(output_dir):
