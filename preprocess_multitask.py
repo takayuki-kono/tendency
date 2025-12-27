@@ -3,385 +3,354 @@ import cv2
 import logging
 import shutil
 import argparse
-import pickle
 import concurrent.futures
 import numpy as np
 import random
+from collections import defaultdict
 from insightface.app import FaceAnalysis
+import pickle
 
 # Seed fix
 random.seed(42)
 np.random.seed(42)
 
-# 簡潔ログ
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", encoding='utf-8', force=True)
 logger = logging.getLogger(__name__)
 
-# --- Default Configuration (Fallback) ---
+# --- Safe I/O ---
+def imread_safe(path):
+    try:
+        with open(path, "rb") as f:
+            bytes_data = bytearray(f.read())
+            numpy_array = np.asarray(bytes_data, dtype=np.uint8)
+            img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception as e:
+        logger.warning(f"Failed to read image {path}: {e}")
+        return None
+
+# Constants
 DEFAULT_TRAIN_DIR = "train"
 DEFAULT_VALIDATION_DIR = "validation"
+DEFAULT_TEST_DIR = "test"
 DEFAULT_PREPRO_DIR = "preprocessed_multitask"
-# チェック閾値（画像幅/高さに対する割合）
 DEFAULT_THRESH_RATIO = 0.03
 
-# Pose filtering: 上位何%をフィルタリングするか（ここを変更するだけでOK）
-PITCH_FILTER_PERCENTILE = 0      # 上位0%（前傾後傾）をフィルタ = フィルタ無効
-SYMMETRY_FILTER_PERCENTILE = 40  # 上位40%（左右非対称）をフィルタ
-Y_DIFF_FILTER_PERCENTILE = 0     # 上位0%（頬の高さ差）をフィルタ = フィルタ無効
-SAMPLE_SIZE = 500                # 閾値計算用のサンプル数
+# Default Filters
+PITCH_FILTER_PERCENTILE = 0
+SYMMETRY_FILTER_PERCENTILE = 0
+Y_DIFF_FILTER_PERCENTILE = 0
+MOUTH_OPEN_FILTER_PERCENTILE = 0
+EYEBROW_EYE_PERCENTILE_HIGH = 0 
+EYEBROW_EYE_PERCENTILE_LOW = 0  
+SHARPNESS_PERCENTILE_LOW = 5   # Filter bottom X% by sharpness (Laplacian variance)
 
-# InsightFaceのランドマークインデックス
+FACE_POSITION_FILTER_ENABLED = True
+
+# Landmarks (InsightFace 106)
 LEFT_CHEEK_IDX = 28
 RIGHT_CHEEK_IDX = 12
+UPPER_LIP_CENTER_IDX = 62
+LOWER_LIP_CENTER_IDX = 60
 
-# Global variables for worker processes
+# Eyebrow and Eye for distance calc
+RIGHT_EYEBROW_IDX = 49
+LEFT_EYEBROW_IDX = 104
+RIGHT_EYE_IDX = 40
+LEFT_EYE_IDX = 94
+
+# Global for Worker
 face_app = None
-pitch_threshold = None
-symmetry_threshold = None
-y_diff_threshold = None
-pitch_filter_enabled = False
-symmetry_filter_enabled = False
-y_diff_filter_enabled = False
+face_pos_enabled = True
 
-def init_worker(pitch_th, symmetry_th, y_diff_th, pitch_pct, symmetry_pct, y_diff_pct):
-    """
-    Worker process initialization.
-    Each process needs its own FaceAnalysis instance.
-    """
-    global face_app, pitch_threshold, symmetry_threshold, y_diff_threshold
-    global pitch_filter_enabled, symmetry_filter_enabled, y_diff_filter_enabled
-    pitch_threshold = pitch_th
-    symmetry_threshold = symmetry_th
-    y_diff_threshold = y_diff_th
-    # フィルタ有効/無効はパーセンタイル値で判定
-    pitch_filter_enabled = (pitch_pct > 0)
-    symmetry_filter_enabled = (symmetry_pct > 0)
-    y_diff_filter_enabled = (y_diff_pct > 0)
-    # Providers can be adjusted based on environment (e.g., CPU only for workers if GPU memory is tight)
-    # For now, we try CUDA if available, else CPU.
+def init_worker(fpe):
+    global face_app, face_pos_enabled
+    face_pos_enabled = fpe
     face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     face_app.prepare(ctx_id=0, det_size=(320, 320))
 
-def extract_face_info(img_bgr):
-    """画像から顔情報を抽出する"""
-    if img_bgr is None:
-        return None
-    # face_app is global in worker process
-    faces = face_app.get(img_bgr)
+def analyze_single_image(args):
+    path, label = args
+    res = {'path': path, 'label': label, 'valid': False, 'metrics': {}, 'reason': ''}
+    
+    img = imread_safe(path)
+    if img is None:
+        res['reason'] = 'read_error'
+        return res
+        
+    h, w = img.shape[:2]
+    faces = face_app.get(img)
     if not faces:
-        return None
-    return faces[0]
+        res['reason'] = 'no_face'
+        return res
+        
+    face = faces[0]
+    lmk = face.landmark_2d_106
+    if lmk is None:
+        res['reason'] = 'no_landmarks'
+        return res
+        
+    # Pitch
+    pitch = 0
+    if face.pose is not None:
+        pitch = abs(face.pose[0])
+    
+    # Symmetry
+    lx, ly = lmk[LEFT_CHEEK_IDX]
+    rx, ry = lmk[RIGHT_CHEEK_IDX]
+    center_x = w / 2.0
+    d_left = lx - center_x
+    d_right = center_x - rx
+    
+    if face_pos_enabled and (d_left <= 0 or d_right <= 0):
+        res['reason'] = f'face_pos_invalid'
+        return res
+        
+    symmetry = abs(d_left / d_right - 1)
+    
+    # Y Diff
+    y_diff = abs(ly - ry) / h
+    
+    # Mouth Open
+    ul_y = lmk[UPPER_LIP_CENTER_IDX][1]
+    ll_y = lmk[LOWER_LIP_CENTER_IDX][1]
+    mouth_open = abs(ll_y - ul_y) / h
+    
+    # Eyebrow Eye Dist
+    # R: 49(brow) - 40(eye)
+    # L: 104(brow) - 94(eye)
+    rb_y = lmk[RIGHT_EYEBROW_IDX][1]
+    re_y = lmk[RIGHT_EYE_IDX][1]
+    lb_y = lmk[LEFT_EYEBROW_IDX][1]
+    le_y = lmk[LEFT_EYE_IDX][1]
+    
+    dist_r = abs(rb_y - re_y)
+    dist_l = abs(lb_y - le_y)
+    eb_eye_dist = (dist_r + dist_l) / 2.0 / h
+    
+    # Sharpness (Laplacian Variance) - higher = sharper
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    
+    res['valid'] = True
+    res['metrics'] = {
+        'pitch': pitch,
+        'symmetry': symmetry,
+        'y_diff': y_diff,
+        'mouth_open': mouth_open,
+        'eb_eye_dist': eb_eye_dist,
+        'sharpness': sharpness
+    }
+    return res
 
-def calculate_thresholds(src_dir, sample_size=500, pitch_percentile=50, symmetry_percentile=50, y_diff_percentile=50):
-    """
-    データセットをサンプリングしてpitchと左右対称性、頬の高さ差の閾値を計算
-    Args:
-        src_dir: ソースディレクトリ
-        sample_size: サンプル数
-        pitch_percentile: pitchのパーセンタイル（上位 X% をフィルタ）
-        symmetry_percentile: 対称性のパーセンタイル（上位 Y% をフィルタ）
-        y_diff_percentile: 頬の高さ差のパーセンタイル（上位 Z% をフィルタ）
-    Returns:
-        (pitch_threshold, symmetry_threshold, y_diff_threshold)
-    """
-    CACHE_FILE = "distribution_cache.pkl"
-    
-    # 高速化のためファイル数をカウント（キャッシュ検証用）
-    total_files = 0
-    for root, _, files in os.walk(src_dir):
-        total_files += len([f for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
-    
-    # キャッシュ確認
-    cached_data = None
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, 'rb') as f:
-                cached_data = pickle.load(f)
-            
-            # キャッシュの有効性チェック
-            if (cached_data.get('src_dir') == src_dir and 
-                cached_data.get('file_count') == total_files and 
-                cached_data.get('sample_size') == sample_size):
-                logger.info("有効なキャッシュが見つかりました。サンプリングをスキップします。")
-                pitch_values = cached_data['pitch_values']
-                symmetry_values = cached_data['symmetry_values']
-                y_diff_values = cached_data['y_diff_values']
-            else:
-                logger.info("キャッシュが無効または古いため、再計算します。")
-                cached_data = None
-        except Exception as e:
-            logger.warning(f"キャッシュ読み込みエラー: {e}")
-            cached_data = None
-
-    if cached_data is None:
-        logger.info(f"データセットをサンプリング中... (最大{sample_size}枚)")
-        
-        # 画像ファイルを収集
-        if len(image_files) == 0:
-            logger.warning("サンプル画像が見つかりません。デフォルト閾値を使用します。")
-            return 15.0, 0.2, 0.03 # デフォルト値
-
-        # 全ファイルを収集してからランダムサンプリング（バイアス回避）
-        all_image_files = []
-        for root, _, files in os.walk(src_dir):
-            for fn in files:
-                if fn.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
-                    all_image_files.append(os.path.join(root, fn))
-        
-        # シャッフルして先頭から抽出
-        random.shuffle(all_image_files)
-        image_files = all_image_files[:sample_size]
-        
-        if len(image_files) == 0:
-            logger.warning("サンプル画像が見つかりません。デフォルト閾値を使用します。")
-            return 15.0, 0.2, 0.03 # デフォルト値
-        
-        # InsightFaceを初期化
-        app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-        app.prepare(ctx_id=0, det_size=(320, 320))
-        
-        pitch_values = []
-        symmetry_values = []
-        y_diff_values = []
-        
-        logger.info(f"{len(image_files)}枚の画像を分析中...")
-        for img_path in image_files:
-            try:
-                img = cv2.imread(img_path)
-                if img is None:
-                    continue
-                
-                faces = app.get(img)
-                if not faces:
-                    continue
-                
-                face = faces[0]
-                
-                # Pitch値を収集
-                if face.pose is not None:
-                    pitch, yaw, roll = face.pose
-                    pitch_values.append(abs(pitch))
-                
-                # 対称性比率を計算
-                if face.landmark_2d_106 is not None:
-                    landmarks = face.landmark_2d_106
-                    if len(landmarks) > max(LEFT_CHEEK_IDX, RIGHT_CHEEK_IDX):
-                        h, w = img.shape[:2]
-                        lx, ly = landmarks[LEFT_CHEEK_IDX]
-                        rx, ry = landmarks[RIGHT_CHEEK_IDX]
-                        
-                        center_x = w / 2.0
-                        diff_left_screen = lx - center_x
-                        diff_right_screen = center_x - rx
-                        
-                        # 位置が異常な顔はスキップ
-                        if diff_right_screen <= 0 or diff_left_screen <= 0:
-                            continue
-                        
-                        # 左右の距離の比率（対称性）
-                        ratio = abs(diff_left_screen / diff_right_screen - 1)
-                        symmetry_values.append(ratio)
-                        
-                        # 頬のy座標の差（高さ差）
-                        y_diff = abs(ly - ry) / h
-                        y_diff_values.append(y_diff)
-            except:
-                continue
-        
-        # キャッシュ保存
-        try:
-            with open(CACHE_FILE, 'wb') as f:
-                pickle.dump({
-                    'src_dir': src_dir,
-                    'file_count': total_files,
-                    'sample_size': sample_size,
-                    'pitch_values': pitch_values,
-                    'symmetry_values': symmetry_values,
-                    'y_diff_values': y_diff_values
-                }, f)
-            logger.info("サンプリング結果をキャッシュに保存しました。")
-        except Exception as e:
-            logger.warning(f"キャッシュ保存エラー: {e}")
-
-    if len(pitch_values) < 10 or len(symmetry_values) < 10 or len(y_diff_values) < 10:
-        logger.warning(f"pose値が十分に取得できませんでした。デフォルト閾値を使用します。")
-        return 15.0, 0.2, 0.03
-    
-    # パーセンタイル計算
-    pitch_th = np.percentile(pitch_values, 100 - pitch_percentile)
-    symmetry_th = np.percentile(symmetry_values, 100 - symmetry_percentile)
-    y_diff_th = np.percentile(y_diff_values, 100 - y_diff_percentile)
-    
-    logger.info(f"閾値計算完了:")
-    logger.info(f"  Pitch (前傾後傾): 上位{pitch_percentile}%をフィルタ (>= {pitch_th:.2f}°)")
-    logger.info(f"  Symmetry (左右対称): 上位{symmetry_percentile}%をフィルタ (>= {symmetry_th:.3f})")
-    logger.info(f"  Y-Diff (頬の高さ差): 上位{y_diff_percentile}%をフィルタ (>= {y_diff_th:.4f})")
-    
-    return pitch_th, symmetry_th, y_diff_th
-
-def process_single_image(args):
-    """
-    Single image processing function for parallel execution.
-    Args:
-        args: tuple (src_path, dst_path, thresh_ratio)
-    Returns:
-        tuple: (status, reason)
-        status: 'saved', 'skipped', or 'error'
-        reason: detailed reason for skipping or error
-    """
-    src_path, dst_path, thresh_ratio = args
-    
+def copy_worker(args):
+    src, dst = args
     try:
-        img = cv2.imread(src_path)
-        if img is None:
-            return 'skipped', 'read_error'
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst)
+        return True
+    except Exception:
+        return False
 
-        h, w = img.shape[:2]
-        face = extract_face_info(img)
-        
-        if face is None:
-            return 'skipped', 'no_face_detected'
-        
-        landmarks = face.landmark_2d_106
-        if landmarks is None or max(LEFT_CHEEK_IDX, RIGHT_CHEEK_IDX) >= len(landmarks):
-            return 'skipped', 'landmarks_missing'
+def calculate_thresholds(*args, **kwargs):
+    # Dummy function for compatibility if imported
+    logger.warning("calculate_thresholds is deprecated and does nothing.")
+    return 0,0,0,0
 
-        # ランドマーク座標を取得
-        lx, ly = landmarks[LEFT_CHEEK_IDX]
-        rx, ry = landmarks[RIGHT_CHEEK_IDX]
+def process_dataset(src_root, dst_root, args):
+    if not os.path.exists(src_root):
+        logger.warning(f"Source dir not found: {src_root}")
+        return 0, 0, 0
 
-        # 画面中心
-        center_x = w / 2.0
-
-        # ユーザー指定の計算式に基づく差分
-        # 左頬(画面右側, rx) - 中心 -> 正
-        diff_left_screen = lx - center_x
-        # 中心 - 右頬(画面左側, lx) -> 正
-        diff_right_screen = center_x - rx 
-
-        if diff_right_screen <= 0 or diff_left_screen <= 0:
-            return 'skipped', f'face_position_invalid_left={diff_left_screen:.1f}_right={diff_right_screen:.1f}'
-
-
-        # 左右の距離の比率チェック（対称性）
-        if symmetry_filter_enabled and symmetry_threshold is not None:
-            # ユーザー指定: 左右の比率が閾値を超えたらスキップ
-            if abs(diff_left_screen / diff_right_screen - 1) >= symmetry_threshold:
-                ratio = abs(diff_left_screen / diff_right_screen - 1)
-                return 'skipped', f'symmetry_ratio_{ratio:.3f}>={symmetry_threshold:.3f}'
-
-        # y差チェック（頬の高さ差）
-        if y_diff_filter_enabled and y_diff_threshold is not None:
-            y_diff_ratio = abs(ry - ly) / h
-            if y_diff_ratio >= y_diff_threshold:
-                return 'skipped', f'y_diff_{y_diff_ratio:.4f}>={y_diff_threshold:.4f}'
-        
-        # ピッチチェック（顔の向き - 前傾後傾のみ）
-        if pitch_filter_enabled and face.pose is not None and pitch_threshold is not None:
-            pitch, yaw, roll = face.pose
-            # グローバル閾値を使用（パーセンタイルベース）
-            if abs(pitch) > pitch_threshold:
-                return 'skipped', f'pitch_{abs(pitch):.1f}>{pitch_threshold:.1f}'
-
-        # フィルタを通過した画像をコピー（メタデータ不要なのでcopyfileで高速化）
-        shutil.copyfile(src_path, dst_path)
-        return 'saved', None
-
-    except Exception as e:
-        return 'error', str(e)
-
-def process_folder(src_dir, dst_dir, pitch_th, symmetry_th, y_diff_th, pitch_pct, symmetry_pct, y_diff_pct):
-    """
-    フォルダを再帰的に処理し、フィルタリング後の画像を保存する。
-    並列処理を使用。
-    """
-    os.makedirs(dst_dir, exist_ok=True)
+    logger.info(f"Scanning {src_root}...")
+    files = []
+    for root, dirs, filenames in os.walk(src_root):
+        for f in filenames:
+            if f.lower().endswith(('.jpg', '.png', '.jpeg', '.bmp')):
+                rel = os.path.relpath(root, src_root)
+                label = rel.split(os.sep)[0]
+                if label == '.': label = 'root'
+                files.append((os.path.join(root, f), label))
     
-    logger.info(f"Scanning files in {src_dir}...")
+    total = len(files)
     
-    tasks = []
+    # Caching Logic
+    import pickle
+    import hashlib
     
-    # 1. Collect all tasks first
-    for root, _, files in os.walk(src_dir):
-        if root == src_dir:
-            continue
-
-        rel_path = os.path.relpath(root, src_dir)
-        label_name = rel_path.split(os.sep)[0]
-        dst_label_path = os.path.join(dst_dir, label_name)
-        os.makedirs(dst_label_path, exist_ok=True)
-
-        for fn in files:
-            if not fn.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
-                continue
-            
-            src_path = os.path.join(root, fn)
-            dst_path = os.path.join(dst_label_path, fn)
-            tasks.append((src_path, dst_path, None))  # thresh_ratio は未使用
-
-    total = len(tasks)
-    logger.info(f"Found {total} images. Starting parallel processing...")
-
-    saved = 0
-    skipped = 0
-    errors = 0
-
-    # 2. Execute in parallel
-    # Adjust max_workers based on CPU cores or GPU memory constraints
-    # Since InsightFace uses GPU/CPU, too many workers might OOM if using GPU.
-    # If running on CPU, more workers is fine.
-    # Let's default to a safe number like 4 or os.cpu_count() // 2
+    # Calculate hash based on file paths and modification times (simple consistency check)
+    # Using simple length + first/last file name for speed, or just simple param.
+    # To be safe, let's use src_root name and total count.
+    # Ideally we should hash all filenames, but that's slow.
+    # Let's assume if file count is same, it's the same dataset for optimization loop context.
+    cache_dir = os.path.join("outputs", "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Include face_pos_filter arg in cache key because it affects analysis result (valid bit)
+    cache_key = f"{os.path.basename(src_root)}_{total}_fp={args.face_pos_filter}"
+    cache_file = os.path.join(cache_dir, f"metrics_{hashlib.md5(cache_key.encode()).hexdigest()}.pkl")
+    
+    results = []
+    
+    # Adjust workers safely
     max_workers = max(1, os.cpu_count() // 2)
-    
-    # Pass thresholds and percentiles to worker initializer
-    with concurrent.futures.ProcessPoolExecutor(
-        max_workers=max_workers, 
-        initializer=init_worker,
-        initargs=(pitch_th, symmetry_th, y_diff_th, pitch_pct, symmetry_pct, y_diff_pct)
-    ) as executor:
-        # Map returns results in order
-        results = executor.map(process_single_image, tasks)
-        
-        for i, (status, reason) in enumerate(results):
-            if status == 'saved':
-                saved += 1
-            elif status == 'skipped':
-                skipped += 1
-                # スキップ理由をログに出力（最初の10件または特定のエラーのみ詳細表示など調整可能）
-                # ここでは全て出すと多すぎるかもしれないが、デバッグのため出す
-                src_file = tasks[i][0]
-                logger.info(f"Skipped {os.path.basename(src_file)}: {reason}")
-            else:
-                errors += 1
-                src_file = tasks[i][0]
-                logger.error(f"Error {os.path.basename(src_file)}: {reason}")
-            
-            if (i + 1) % 100 == 0:
-                logger.info(f"Processed {i + 1}/{total} images...")
 
-    logger.info(f"Processing complete for {src_dir}: Total={total}, Saved={saved}, Skipped={skipped}, Errors={errors}")
-    return total, saved, skipped
+    if os.path.exists(cache_file):
+        logger.info(f"Loading analysis results from cache: {cache_file}")
+        try:
+            with open(cache_file, 'rb') as f:
+                results = pickle.load(f)
+            logger.info("Cache loaded successfully.")
+        except Exception as e:
+            logger.warning(f"Failed to load cache: {e}. Re-analyzing...")
+            results = []
+            
+    if not results:
+        logger.info(f"Analyzing {total} images...")
+        
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=(args.face_pos_filter,)) as executor:
+            for r in executor.map(analyze_single_image, files):
+                results.append(r)
+                if len(results) % 100 == 0:
+                    logger.debug(f"Analyzed {len(results)}/{total}")
+        
+        # Save cache
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(results, f)
+            logger.info(f"Saved analysis cache to {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save cache: {e}")
+
+    valid_items = [r for r in results if r['valid']]
+    logger.info(f"Valid faces detected: {len(valid_items)}/{total}")
+    
+    if not valid_items:
+        return total, 0, total # All skipped
+
+    # --- Global Threshold Calculation ---
+    def get_th(key, pct):
+        vals = [r['metrics'][key] for r in valid_items]
+        if not vals: return 0
+        return np.percentile(vals, 100 - pct)
+    
+    th_pitch = get_th('pitch', args.pitch_percentile)
+    th_sym = get_th('symmetry', args.symmetry_percentile)
+    th_y = get_th('y_diff', args.y_diff_percentile)
+    th_mouth = get_th('mouth_open', args.mouth_open_percentile)
+    
+    # Sharpness threshold (lower bound - filter blurry images)
+    th_sharpness_low = 0
+    if args.sharpness_percentile_low > 0:
+        sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
+        th_sharpness_low = np.percentile(sharp_vals, args.sharpness_percentile_low)
+    
+    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness<={th_sharpness_low:.1f}")
+    
+    # --- Filtering & Grouping ---
+    grouped = defaultdict(list)
+    for r in valid_items:
+        grouped[r['label']].append(r)
+        
+    final_copy_tasks = []
+    skipped_count = 0
+    skip_reasons = defaultdict(int)
+    
+    for label, items in grouped.items():
+        # Personal Thresholds for Eyebrow-Eye Dist
+        eb_vals = [r['metrics']['eb_eye_dist'] for r in items]
+        th_eb_high = 999.0
+        th_eb_low = -1.0
+        
+        if eb_vals:
+            if args.eyebrow_eye_percentile_high > 0:
+                th_eb_high = np.percentile(eb_vals, 100 - args.eyebrow_eye_percentile_high)
+            if args.eyebrow_eye_percentile_low > 0:
+                th_eb_low = np.percentile(eb_vals, args.eyebrow_eye_percentile_low)
+        
+        for item in items:
+            m = item['metrics']
+            reason = None
+            
+            # Global Checks
+            if args.pitch_percentile > 0 and m['pitch'] > th_pitch: reason = 'pitch_global'
+            elif args.symmetry_percentile > 0 and m['symmetry'] > th_sym: reason = 'symmetry_global'
+            elif args.y_diff_percentile > 0 and m['y_diff'] > th_y: reason = 'y_diff_global'
+            elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth: reason = 'mouth_open_global'
+            elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low: reason = 'sharpness_low_global'
+            
+            # Personal Check
+            elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high): reason = 'eb_eye_high_personal'
+            elif (args.eyebrow_eye_percentile_low > 0 and m['eb_eye_dist'] < th_eb_low): reason = 'eb_eye_low_personal'
+            
+            if reason:
+                skipped_count += 1
+                skip_reasons[reason] += 1
+            else:
+                src = item['path']
+                # Flatten hierarchy: dst_root/label/person_filename.jpg
+                # rel is likely "label/person/filename.jpg"
+                rel = os.path.relpath(src, src_root)
+                parts = rel.split(os.sep)
+                if len(parts) >= 2:
+                    # parts[0] is label, parts[1] is person (maybe), parts[-1] is filename
+                    # We want to keep unique filenames.
+                    # Simplest robust way: join all parts except first (label) with underscore
+                    new_filename = "_".join(parts[1:])
+                    dst = os.path.join(dst_root, parts[0], new_filename)
+                else:
+                    # Fallback
+                    dst = os.path.join(dst_root, rel)
+                
+                final_copy_tasks.append((src, dst))
+
+    # Add invalid/read_error counts to skipped
+    skipped_count += (total - len(valid_items))
+    saved_count = len(final_copy_tasks)
+    
+    logger.info(f"Copying {saved_count} images...")
+    
+    # --- Execute Copy ---
+    # Using ThreadPool is sufficient for file copy usually, but ProcessPool is fine too.
+    # We can reuse ProcessPoolExecutor (lighter init) or just ThreadPool.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers*2) as executor:
+        list(executor.map(copy_worker, final_copy_tasks))
+
+    logger.info(f"Processed {src_root}: Total={total}, Saved={saved_count}, Skipped={skipped_count}")
+    if skip_reasons:
+        logger.info(f"Skip Reasons: {dict(skip_reasons)}")
+    return total, saved_count, skipped_count
 
 def main():
     parser = argparse.ArgumentParser(description="Multitask Preprocessing with Face Filtering")
     parser.add_argument("--train_dir", default=DEFAULT_TRAIN_DIR, help="Source training directory")
     parser.add_argument("--val_dir", default=DEFAULT_VALIDATION_DIR, help="Source validation directory")
+    parser.add_argument("--test_dir", default=DEFAULT_TEST_DIR, help="Source test directory")
     parser.add_argument("--out_dir", default=DEFAULT_PREPRO_DIR, help="Output directory")
-    parser.add_argument("--thresh", type=float, default=DEFAULT_THRESH_RATIO, help="Threshold ratio for filtering")
+    
+    # Original Args
+    parser.add_argument("--thresh", type=float, default=DEFAULT_THRESH_RATIO, help="Threshold ratio (unused in new logic but kept for compat)")
     parser.add_argument("--pitch_percentile", type=int, default=PITCH_FILTER_PERCENTILE, help="Pitch filter percentile (0-100)")
     parser.add_argument("--symmetry_percentile", type=int, default=SYMMETRY_FILTER_PERCENTILE, help="Symmetry filter percentile (0-100)")
     parser.add_argument("--y_diff_percentile", type=int, default=Y_DIFF_FILTER_PERCENTILE, help="Y-diff filter percentile (0-100)")
+    parser.add_argument("--mouth_open_percentile", type=int, default=MOUTH_OPEN_FILTER_PERCENTILE, help="Mouth open filter percentile (0-100)")
+    parser.add_argument("--face_position_filter", type=str, default=str(FACE_POSITION_FILTER_ENABLED), help="Enable face position filter (True/False)")
+    
+    # New Args
+    parser.add_argument("--eyebrow_eye_percentile_high", type=int, default=EYEBROW_EYE_PERCENTILE_HIGH, help="Filter top X% of eyebrow-eye distance")
+    parser.add_argument("--eyebrow_eye_percentile_low", type=int, default=EYEBROW_EYE_PERCENTILE_LOW, help="Filter bottom X% of eyebrow-eye distance")
+    parser.add_argument("--sharpness_percentile_low", type=int, default=SHARPNESS_PERCENTILE_LOW, help="Filter bottom X% by sharpness (blurry images)")
     
     args = parser.parse_args()
-
-    # Use args (which default to constants if not provided)
-    train_dir = args.train_dir
-    val_dir = args.val_dir
-    prepro_dir = args.out_dir
-    thresh = args.thresh
     
+    # Parse boolean
+    args.face_pos_filter = (args.face_position_filter.lower() == 'true')
+    
+    prepro_dir = args.out_dir
     prepro_train = os.path.join(prepro_dir, "train")
     prepro_valid = os.path.join(prepro_dir, "validation")
+    prepro_test = os.path.join(prepro_dir, "test")
 
     try:
         if os.path.exists(prepro_dir):
@@ -389,38 +358,26 @@ def main():
             shutil.rmtree(prepro_dir)
             logger.info(f"Deleted '{prepro_dir}' folder.")
 
-        logger.info(f"Starting preprocessing with threshold={thresh}...")
-        
-        # Calculate pose thresholds by sampling the training dataset
         logger.info("=" * 60)
-        logger.info("Filtering configuration:")
-        logger.info(f"  Pitch filter: Top {args.pitch_percentile}% will be filtered")
-        logger.info(f"  Symmetry filter: Top {args.symmetry_percentile}% will be filtered")
-        logger.info(f"  Y-diff filter: Top {args.y_diff_percentile}% will be filtered")
+        logger.info("Starting preprocessing (New Logic)...")
+        logger.info(f"  Pitch Pct: {args.pitch_percentile}")
+        logger.info(f"  Sym Pct: {args.symmetry_percentile}")
+        logger.info(f"  Y-Diff Pct: {args.y_diff_percentile}")
+        logger.info(f"  Mouth Pct: {args.mouth_open_percentile}")
+        logger.info(f"  Eb-Eye Pct (High/Low): {args.eyebrow_eye_percentile_high} / {args.eyebrow_eye_percentile_low} (PER PERSON)")
+        logger.info(f"  Sharpness Pct Low: {args.sharpness_percentile_low}")
         logger.info("=" * 60)
         
-        pitch_th, symmetry_th, y_diff_th = calculate_thresholds(
-            train_dir, 
-            sample_size=SAMPLE_SIZE,
-            pitch_percentile=args.pitch_percentile,
-            symmetry_percentile=args.symmetry_percentile,
-            y_diff_percentile=args.y_diff_percentile
-        )
-        
-        logger.info("=" * 60)
-        logger.info(f"Train Source: {train_dir} -> {prepro_train}")
-        logger.info(f"Val Source:   {val_dir} -> {prepro_valid}")
-
-        process_folder(train_dir, prepro_train, pitch_th, symmetry_th, y_diff_th, 
-                       args.pitch_percentile, args.symmetry_percentile, args.y_diff_percentile)
-        process_folder(val_dir, prepro_valid, pitch_th, symmetry_th, y_diff_th,
-                       args.pitch_percentile, args.symmetry_percentile, args.y_diff_percentile)
+        process_dataset(args.train_dir, prepro_train, args)
+        process_dataset(args.val_dir, prepro_valid, args)
+        if os.path.exists(args.test_dir):
+            process_dataset(args.test_dir, prepro_test, args)
         
         logger.info("All processing complete.")
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    # Windows specific fix for multiprocessing
-    # multiprocessing.freeze_support() # Not strictly needed for script execution but good practice
+    # Windows specific fix
+    # multiprocessing.freeze_support() 
     main()

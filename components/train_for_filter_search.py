@@ -56,6 +56,7 @@ def calculate_class_weights_as_tables(directory):
         label_path = os.path.join(directory, label_name)
         if os.path.isdir(label_path):
             count = len([f for f in os.listdir(label_path) if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))])
+            logger.info(f"Label {label_name}: {count} images")
             if count > 0:
                 multi_label_counts[label_name] = count
                 total_images += count
@@ -132,14 +133,16 @@ def main():
     
     weight_tables = calculate_class_weights_as_tables(TRAIN_DIR)
     if weight_tables is None:
-        print("Error: No training data found.")
+        print(f"Error: No training data found in {os.path.abspath(TRAIN_DIR)}")
         return
 
     val_weight_tables = calculate_class_weights_as_tables(VALIDATION_DIR)
 
     train_ds = create_dataset(TRAIN_DIR, ALL_TASK_LABELS, weight_tables=weight_tables)\
+        .cache()\
         .shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
     val_ds = create_dataset(VALIDATION_DIR, ALL_TASK_LABELS, weight_tables=val_weight_tables)\
+        .cache()\
         .batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
     # 固定モデル構築 (EfficientNetV2B0)
