@@ -74,14 +74,12 @@ def scrape_google_images(keyword, max_num, output_dir):
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Regex to find image URLs (thumbnails often encoded in base64 or simpler http links in script tags)
-        # Google often stores images in AF_initDataCallback
-        # This is a heuristic approach for "fast" scraping of initial results
-        
         # Method A: Look for direct image sources (thumbnails)
         img_tags = soup.find_all("img")
         
         count = 0
+        skipped_low_quality = 0
+        
         for img in img_tags:
             if count >= max_num:
                 break
@@ -99,18 +97,33 @@ def scrape_google_images(keyword, max_num, output_dir):
 
             try:
                 img_data = requests.get(src, timeout=5).content
+                
+                # 1. File size check (Skip < 5KB)
+                if len(img_data) < 5 * 1024:
+                    skipped_low_quality += 1
+                    continue
+                
+                # 2. Resolution check using OpenCV (Decode in memory)
+                nparr = np.frombuffer(img_data, np.uint8)
+                image_check = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if image_check is None:
+                    continue
+                
+                h, w = image_check.shape[:2]
+                # Skip if either dimension is too small (thumbnails often < 150px)
+                if h < 150 or w < 150:
+                    skipped_low_quality += 1
+                    continue
+
                 file_path = os.path.join(output_dir, f"google_{count:04d}.jpg")
                 with open(file_path, 'wb') as f:
                     f.write(img_data)
                 count += 1
             except Exception as e:
                 pass
-                
-        # Method B: Regex for larger images in scripts (more fragile but better quality if works)
-        # matches = re.findall(r'\"(https?://[^\"]+?\.jpg)\"', response.text)
-        # ... skipped for stability per user request for "fast/simple" ...
         
-        logger.info(f"Google scrape finished. Downloaded: {count} images.")
+        logger.info(f"Google scrape finished. Downloaded: {count} images. Skipped low quality: {skipped_low_quality}")
         
     except Exception as e:
         logger.error(f"Google scrape failed for {keyword}: {e}")
