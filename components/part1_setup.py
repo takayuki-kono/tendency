@@ -242,9 +242,9 @@ def detect_and_crop_faces(input_dir):
                     pad_r / crop_w if crop_w > 0 else 0
                 )
 
-                if max_pad_ratio > 0.05:
-                    logger.info(f"Skipped (excessive padding): {current_face_base_name}")
-                    continue
+                # if max_pad_ratio > 0.05:
+                #     logger.info(f"Skipped (excessive padding): {current_face_base_name}")
+                #     continue
                 
                 final_img_padded = cv2.copyMakeBorder(bbox_rotated_img, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_CONSTANT, value=(0,0,0))
                 rx_min += pad_l; rx_max += pad_l
