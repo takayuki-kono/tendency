@@ -10,6 +10,9 @@
 **入力:** 生画像（キーワードに基づいてダウンロード）
 **処理内容:**
 1.  **ダウンロード:** 指定キーワード（例: "奈緒"）の画像を収集。
+    -   **Bing Image Search:** `icrawler` を使用。
+    -   **キーワード拡張:** "正面", "笑顔", "ドラマ", 英語表記など多角的に収集し量を確保。
+    -   ※ Google画像検索機能は廃止されました。
 2.  **Part 1 (`components/part1_setup.py`):**
     -   **顔検出:** InsightFaceを使用して顔を検出。
     -   **回転補正:** 顔の向きを正立に補正。
@@ -147,3 +150,6 @@ root/
   pipeline_specs.md       # 本仕様書
   scripts_overview.md     # スクリプト一覧
 ```
+
+## Author
+Gemini (Updated 2025-12-28)

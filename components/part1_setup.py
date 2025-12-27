@@ -4,23 +4,25 @@ import cv2
 import numpy as np
 import logging
 import shutil
-from icrawler.builtin import BingImageCrawler, GoogleImageCrawler
+from icrawler.builtin import BingImageCrawler
 from insightface.app import FaceAnalysis
 import sys
 
 # --- Globals ---
-MAX_NUM = 100
+MAX_NUM = 300 # Increased from 100 to gather more data
 IMG_SIZE = 224
 LOG_DIR = "outputs/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # --- Logging Setup ---
 logging.basicConfig(
-    filename=os.path.join(LOG_DIR, 'log_part1.txt'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    filemode='w',
-    encoding='utf-8'
+    encoding='utf-8',
+    handlers=[
+        logging.FileHandler(os.path.join(LOG_DIR, "log_part1_v2.txt"), mode='w', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -53,119 +55,45 @@ def imwrite_safe(path, img):
 def setup_crawler(storage_dir):
     return BingImageCrawler(storage={'root_dir': storage_dir}, downloader_threads=4)
 
-# --- Google Scraping Helper ---
-import requests
-from bs4 import BeautifulSoup
-import re
-import base64
-
-def scrape_google_images(keyword, max_num, output_dir):
-    logger.info(f"Starting Google scrape for: {keyword}, target: {max_num}")
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.114 Safari/537.36"
-    }
-    
-    url = f"https://www.google.com/search?q={keyword}&tbm=isch"
-    
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Method A: Look for direct image sources (thumbnails)
-        img_tags = soup.find_all("img")
-        
-        count = 0
-        skipped_low_quality = 0
-        
-        for img in img_tags:
-            if count >= max_num:
-                break
-                
-            src = img.get('src')
-            if not src:
-                src = img.get('data-src')
-                
-            if not src or not src.startswith('http'):
-                continue
-                
-            # Skip google logos
-            if 'google' in src and 'logo' in src:
-                continue
-
-            try:
-                img_data = requests.get(src, timeout=5).content
-                
-                # 1. File size check (Skip < 5KB)
-                if len(img_data) < 5 * 1024:
-                    skipped_low_quality += 1
-                    continue
-                
-                # 2. Resolution check using OpenCV (Decode in memory)
-                nparr = np.frombuffer(img_data, np.uint8)
-                image_check = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if image_check is None:
-                    continue
-                
-                h, w = image_check.shape[:2]
-                # Skip if either dimension is too small (thumbnails often < 150px)
-                if h < 150 or w < 150:
-                    skipped_low_quality += 1
-                    continue
-
-                file_path = os.path.join(output_dir, f"google_{count:04d}.jpg")
-                with open(file_path, 'wb') as f:
-                    f.write(img_data)
-                count += 1
-            except Exception as e:
-                pass
-        
-        logger.info(f"Google scrape finished. Downloaded: {count} images. Skipped low quality: {skipped_low_quality}")
-        
-    except Exception as e:
-        logger.error(f"Google scrape failed for {keyword}: {e}")
-
 def download_images(keyword, max_num):
+    # Expanded search terms to compensate for removing Google
+    # Bing is more reliable but needs varied keywords
     search_terms = [
         (keyword, keyword),
         (f"{keyword} 正面", f"{keyword}_正面"),
         (f"{keyword} 顔", f"{keyword}_顔"),
-        (f"{keyword} 昔", f"{keyword}_昔"),
-        (f"{keyword} 現在", f"{keyword}_現在"),
+        (f"{keyword} 笑顔", f"{keyword}_笑顔"),
+        (f"{keyword} 真顔", f"{keyword}_真顔"),
+        (f"{keyword} 横顔", f"{keyword}_横顔"),
+        (f"{keyword} 高画質", f"{keyword}_高画質"),
         (f"{keyword} ドラマ", f"{keyword}_ドラマ"),
+        (f"{keyword} 映画", f"{keyword}_映画"),
         (f"{keyword} CM", f"{keyword}_CM"),
         (f"{keyword} インタビュー", f"{keyword}_インタビュー"),
-        (f"{keyword} 高画質", f"{keyword}_高画質")
+        (f"{keyword} 衣装", f"{keyword}_衣装"),
+        (f"{keyword} 髪型", f"{keyword}_髪型"),
+        (f"{keyword} 雑誌", f"{keyword}_雑誌"),
+        (f"{keyword} イベント", f"{keyword}_イベント"),
+        (f"{keyword} 昔", f"{keyword}_昔"),
+        (f"{keyword} 現在", f"{keyword}_現在"),
+        # English variations for broader coverage
+        (f"{keyword} actress", f"{keyword}_actress"),
+        (f"{keyword} japanese", f"{keyword}_japanese"),
+        (f"{keyword} portrait", f"{keyword}_portrait"),
     ]
     
     for search_keyword, storage_dir in search_terms:
-        if os.path.exists(storage_dir):
-            shutil.rmtree(storage_dir)
+        # Ensure we don't delete existing data
         os.makedirs(storage_dir, exist_ok=True)
         
-        logger.info(f"Starting download for: {search_keyword}, storage: {storage_dir}")
+        logger.info(f"Starting Bing download for: {search_keyword}, storage: {storage_dir}")
         
-        # 1. Bing Download (Original)
         try:
             crawler = setup_crawler(storage_dir)
             crawler.crawl(keyword=search_keyword, max_num=max_num)
             logger.info(f"Bing finished for {search_keyword}")
         except Exception as e:
             logger.error(f"Bing Crawler failed for {search_keyword}: {e}")
-
-        # 2. Google Download (New)
-        # Save to the same folder, consolidate_files handles renaming/moving anyway
-        try:
-            # Create a subfolder to avoid filename collisions temporarily? 
-            # consolidate_files flattens subdirs so we can just download here with unique prefix
-            # BUT icrawler uses 000001.jpg etc.
-            # My google scraper uses google_0000.jpg. Safe to mix.
-            scrape_google_images(search_keyword, max_num, storage_dir)
-        except Exception as e:
-            logger.error(f"Google Scraper failed for {search_keyword}: {e}")
 
 def consolidate_files(keyword, output_dir):
     if os.path.exists(output_dir):
