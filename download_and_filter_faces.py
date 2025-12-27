@@ -1,80 +1,75 @@
-import subprocess
-import sys
 import os
-import argparse
-import datetime
+import sys
+import shutil
+import logging
 
-# --- Configuration ---
-# Default list of keywords to process if no CLI arguments are provided
-DEFAULT_KEYWORDS = ["ゴミ箱"]
+# Setup output directories
+LOG_DIR = "outputs/logs"
+os.makedirs(LOG_DIR, exist_ok=True)
 
-# --- Main Orchestrator ---
+# Setup Logging
+logging.basicConfig(
+    filename=os.path.join(LOG_DIR, 'log_pipeline.txt'),
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='w',
+    encoding='utf-8'
+)
+logger = logging.getLogger(__name__)
+
+# Configuration
+KEYWORDS = [
+    "奈緒"
+    # , "黒谷友香", "比嘉愛美", "石野真子", "戸田恵梨香", "菅野美穂", "宮沢りえ", "中山美穂", 
+    # "髙橋ひかる", "桜井日奈子", "松本まりか", "松下由樹", "市川由衣", "新川優愛", "堀田真由", 
+    # "国仲涼子", "黒島結菜", "大塚寧々", "鈴木京香", "森口瑤子", "中村アン", "大島優子", 
+    # "上白石萌歌", "賀来千香子", "葵わかな", "薬師丸ひろ子", "門脇麦", "秋田汐梨", "武井咲", 
+    # "吉高由里子", "川栄李奈", "中条あやみ", "観月ありさ", "杏", "木村文乃", "清原果耶", 
+    # "稲森いずみ", "西野七瀬", "土屋太鳳", "石原さとみ", "多部未華子", "伊藤沙莉", "今井美樹", 
+    # "和久井映見", "本田翼", "片桐はいり", "仲里依紗", "高橋メアリージュン", "内田理央", 
+    # "大原櫻子", "小雪", "安藤玉恵", "石井杏奈", "安田成美", "橋本愛"
+] 
+BASE_OUTPUT_DIR = "master_data"
+
+def run_script(script_path, args):
+    """Runs a python script with arguments."""
+    command = f"python {script_path} {' '.join(args)}"
+    logger.info(f"Running command: {command}")
+    ret = os.system(command)
+    if ret != 0:
+        logger.error(f"Command failed: {command}")
+        return False
+    return True
+
 def main():
-    parser = argparse.ArgumentParser(description="Image Processing Pipeline Orchestrator")
-    parser.add_argument("keywords", nargs="*", help="Keywords to process. If empty, uses the internal DEFAULT_KEYWORDS list.")
-    args = parser.parse_args()
-
-    # Hybrid approach: Use CLI args if provided, otherwise fallback to internal list
-    keywords_to_process = args.keywords if args.keywords else DEFAULT_KEYWORDS
-
-    print("--- Starting Image Processing Pipeline ---")
-    print(f"Target Keywords: {keywords_to_process}")
+    sys.path.append(os.getcwd())
     
-    python_executable = sys.executable
+    # Scripts
+    part1_script = os.path.join("components", "part1_setup.py")
+    part2a_script = os.path.join("components", "part2a_similarity.py")
+    part2b_script = os.path.join("components", "part2b_filter.py")
 
-    for keyword in keywords_to_process:
-        print(f"\n{'='*20}\nProcessing keyword: {keyword}\n{'='*20}")
+    for keyword in KEYWORDS:
+        logger.info(f"Processing keyword: {keyword}")
+        output_dir = os.path.join(BASE_OUTPUT_DIR, keyword)
         
-        # Generate a deterministic directory name based on keyword and timestamp
-        # Format: output_<keyword>_<YYYYMMDD>
-        # Sanitizing keyword to be safe for directory names
-        safe_keyword = "".join(c for c in keyword if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
-        timestamp = datetime.datetime.now().strftime("%Y%m%d")
-        output_dir = f"output_{safe_keyword}_{timestamp}"
-        
-        # Ensure unique output dir if multiple runs happen on same day (optional, but good for safety)
-        # If you prefer strictly one folder per day per keyword, you can remove this check or handle it differently.
-        # For now, let's keep it simple: if it exists, we use it (scripts inside should handle overwrite/append if needed)
-        # or we can append a counter if we want fresh runs. 
-        # Let's stick to the simple deterministic name for now as requested.
-        
-        print(f"Output will be in directory: {output_dir}")
-
-        # Define the sequence of scripts to run for this keyword
-        scripts_to_run = [
-            ("part1_setup.py", [keyword, output_dir]),
-            ("part2a_similarity.py", [output_dir]),
-            ("part2b_filter.py", [output_dir])
-        ]
-
-        for i, (script_name, args) in enumerate(scripts_to_run, 1):
-            print(f"\n[Step {i}/{len(scripts_to_run)}] Running {script_name} for '{keyword}'...")
+        # Step 1: Run Part 1 (Download, Detect, Crop)
+        # Part 1 creates: output_dir/rotated/
+        if not run_script(part1_script, [keyword, output_dir]):
+            logger.error("Part 1 failed.")
+            continue
             
-            try:
-                command = [python_executable, script_name] + args
-                process = subprocess.run(
-                    command,
-                    capture_output=True, text=True, check=False, encoding='utf-8', errors='ignore'
-                )
-                
-                # Show output only if there's an error, to keep the main log clean
-                if process.returncode != 0:
-                    print(f"--- {script_name} STDOUT ---\n" + process.stdout)
-                    print(f"--- {script_name} STDERR ---\n" + process.stderr, file=sys.stderr)
-                    print(f"\nError: {script_name} failed for keyword '{keyword}'. Halting pipeline.", file=sys.stderr)
-                    sys.exit(1)
-                else:
-                    # Optionally print a snippet of the log for confirmation
-                    print(f"{script_name} completed successfully.")
+        # Part 1 output is now: output_dir/rotated/
+        rotated_dir = os.path.join(output_dir, "rotated")
 
-            except FileNotFoundError:
-                print(f"Error: Could not find the script '{script_name}'.", file=sys.stderr)
-                sys.exit(1)
-            except Exception as e:
-                print(f"An unexpected error occurred while running {script_name}: {e}", file=sys.stderr)
-                sys.exit(1)
-
-    print("\n--- All keywords processed. Image Processing Pipeline Finished ---")
+        # Step 2: Run Part 2a & 2b for 'rotated'
+        logger.info(f"--- Processing rotated pipeline ---")
+        if not run_script(part2a_script, [rotated_dir]):
+            logger.error("Part 2a failed.")
+        if not run_script(part2b_script, [rotated_dir]):
+            logger.error("Part 2b failed.")
+        
+        logger.info(f"Pipeline finished for {keyword}")
 
 if __name__ == "__main__":
     main()

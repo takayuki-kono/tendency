@@ -10,9 +10,14 @@ import sys
 sys.path.append('/mnt/d/tendency/.venv_new/lib/python3.12/site-packages')
 from insightface.app import FaceAnalysis
 
+# --- Globals ---
+PHYSICAL_DELETE = True  # True: 物理削除, False: deleted フォルダへ移動
+LOG_DIR = "outputs/logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # --- Logging Setup ---
 logging.basicConfig(
-    filename='log_part2b.txt',
+    filename=os.path.join(LOG_DIR, 'log_part2b.txt'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     filemode='w',
@@ -20,18 +25,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Safe I/O ---
+def imread_safe(path):
+    try:
+        with open(path, "rb") as f:
+            bytes_data = bytearray(f.read())
+            numpy_array = np.asarray(bytes_data, dtype=np.uint8)
+            img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception as e:
+        logger.warning(f"Failed to read image {path}: {e}")
+        return None
+
 # --- Functions ---
 def filter_by_main_person_insightface(input_dir):
     logger.info("Starting person filtering with InsightFace...")
     app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     app.prepare(ctx_id=0, det_size=(320, 320))
 
-    rotated_dir = os.path.join(input_dir, "rotated")
-    if not os.path.exists(rotated_dir) or not os.listdir(rotated_dir):
-        logger.warning(f"'rotated' directory not found or is empty. Skipping.")
+    # input_dir をそのまま処理対象として使用
+    if not os.path.exists(input_dir) or not os.listdir(input_dir):
+        logger.warning(f"Input directory not found or is empty: {input_dir}. Skipping.")
         return
 
-    image_files = [f for f in os.listdir(rotated_dir) if os.path.isfile(os.path.join(rotated_dir, f))]
+    image_files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
     encodings = []
     image_path_list = []
 
@@ -40,15 +57,16 @@ def filter_by_main_person_insightface(input_dir):
     skipped_resolution = 0
 
     for filename in image_files:
-        img_path = os.path.join(rotated_dir, filename)
+        img_path = os.path.join(input_dir, filename)
         try:
-            bgr_image = cv2.imread(img_path)
+            bgr_image = imread_safe(img_path)
             if bgr_image is None: continue
 
             img_h, img_w = bgr_image.shape[:2]
             faces = app.get(bgr_image)
 
             if faces:
+                # Assuming one face per cropped image, or take largest
                 face = faces[0]
                 x1, y1, x2, y2 = face.bbox
 
@@ -101,35 +119,56 @@ def filter_by_main_person_insightface(input_dir):
         if label == main_cluster_label:
             images_to_keep.append(image_path_list[i])
 
-    deleted_dir = os.path.join(input_dir, "deleted")
-    if not os.path.exists(deleted_dir):
+    # deleted ディレクトリは親ディレクトリに作成（論理削除の場合のみ）
+    parent_dir = os.path.dirname(input_dir)
+    deleted_dir = os.path.join(parent_dir, "deleted")
+    if not PHYSICAL_DELETE and not os.path.exists(deleted_dir):
         os.makedirs(deleted_dir)
 
-    all_rotated_images = [os.path.join(rotated_dir, f) for f in os.listdir(rotated_dir)]
-    for path in all_rotated_images:
+    all_images = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+    for path in all_images:
         if path not in images_to_keep:
-            shutil.move(path, os.path.join(deleted_dir, os.path.basename(path)))
-            logger.info(f"Moved non-main person file: {path}")
+            try:
+                if PHYSICAL_DELETE:
+                    os.remove(path)
+                    logger.info(f"Deleted non-main person file: {path}")
+                else:
+                    dst = os.path.join(deleted_dir, os.path.basename(path))
+                    if os.path.exists(dst): os.remove(dst)
+                    shutil.move(path, dst)
+                    logger.info(f"Moved non-main person file: {path}")
+            except Exception as e:
+                logger.error(f"Error removing {path}: {e}")
 
 def cleanup_directories(input_dir):
+    """
+    フィルタリング後の整理:
+    - input_dir (rotated) 内の残り画像を親ディレクトリに移動
+    - 空になった rotated フォルダを削除
+    """
     logger.info("Starting final cleanup.")
-    dirs_to_delete = ["processed", "bbox_cropped", "bbox_rotated"]
-    for dir_name in dirs_to_delete:
-        dir_path = os.path.join(input_dir, dir_name)
-        try:
-            if os.path.exists(dir_path):
-                shutil.rmtree(dir_path)
-        except Exception as e:
-            logger.error(f"Error deleting directory {dir_path}: {e}")
+    parent_dir = os.path.dirname(input_dir)
     
-    logger.info(f"Cleaning up leftover files in {input_dir}")
+    # rotated 内の画像を親ディレクトリに移動
     for item_name in os.listdir(input_dir):
         item_path = os.path.join(input_dir, item_name)
         if os.path.isfile(item_path):
             try:
-                os.remove(item_path)
+                dst = os.path.join(parent_dir, item_name)
+                if os.path.exists(dst):
+                    os.remove(dst)
+                shutil.move(item_path, dst)
+                logger.info(f"Moved to parent: {item_name}")
             except Exception as e:
-                logger.error(f"Error deleting file {item_path}: {e}")
+                logger.error(f"Error moving {item_path}: {e}")
+    
+    # 空になった rotated フォルダを削除
+    try:
+        if os.path.exists(input_dir) and not os.listdir(input_dir):
+            shutil.rmtree(input_dir)
+            logger.info(f"Removed empty directory: {input_dir}")
+    except Exception as e:
+        logger.error(f"Error removing directory {input_dir}: {e}")
 
 def main():
     if len(sys.argv) != 2:

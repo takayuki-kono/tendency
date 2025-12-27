@@ -8,19 +8,17 @@ from sklearn.cluster import DBSCAN
 from insightface.app import FaceAnalysis
 import sys
 
-# Correct the path for the new Windows environment
-# sys.path.append('/mnt/d/tendency/.venv_new/lib/python3.12/site-packages')
-
 # --- Globals ---
-MAP_FILE = "_map.txt"
 METRIC = 'cosine'
-# Very strict tolerance for finding near-duplicates.
-DEDUPLICATION_TOLERANCE = 0.26 
+DEDUPLICATION_TOLERANCE = 0.25 # Tight tolerance for duplicates
 MIN_SAMPLES = 2
+PHYSICAL_DELETE = True  # True: 物理削除, False: deleted フォルダへ移動
+LOG_DIR = "outputs/logs"
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # --- Logging Setup ---
 logging.basicConfig(
-    filename='log_part2a.txt',
+    filename=os.path.join(LOG_DIR, 'log_part2a.txt'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     filemode='w',
@@ -28,126 +26,140 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Safe I/O ---
+def imread_safe(path):
+    try:
+        with open(path, "rb") as f:
+            bytes_data = bytearray(f.read())
+            numpy_array = np.asarray(bytes_data, dtype=np.uint8)
+            img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception as e:
+        logger.warning(f"Failed to read image {path}: {e}")
+        return None
+
 # --- Function ---
-def find_similar_images(input_dir, processed_face_to_original_map):
+def find_similar_images(input_dir):
+    """input_dir 内の画像から類似画像を検出し、重複を deleted へ移動する"""
     logger.info("Starting similarity search with InsightFace embeddings...")
     
-    # Initialize InsightFace - using the new Windows GPU environment
     try:
         app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
         app.prepare(ctx_id=0, det_size=(320, 320))
-        logger.info("FaceAnalysis initialized with CUDA provider.")
+        logger.info("FaceAnalysis initialized.")
     except Exception as e:
         logger.error(f"FaceAnalysis initialization failed: {e}", exc_info=True)
-        logger.error("Please ensure CUDA and cuDNN are installed correctly for the Windows environment.")
         sys.exit(1)
 
-    processed_dir = os.path.join(input_dir, "processed")
-    rotated_dir = os.path.join(input_dir, "rotated")
-    bbox_cropped_dir = os.path.join(input_dir, "bbox_cropped")
-    bbox_rotated_dir = os.path.join(input_dir, "bbox_rotated")
-    deleted_dir = os.path.join(input_dir, "deleted")
-    if not os.path.exists(deleted_dir):
-        os.makedirs(deleted_dir)
-
-    if not os.path.exists(processed_dir) or not os.listdir(processed_dir):
-        logger.warning(f"'processed' directory not found or empty. Skipping similarity check.")
+    # input_dir を直接処理（サブディレクトリは探さない）
+    if not os.path.exists(input_dir) or not os.listdir(input_dir):
+        logger.warning(f"Input directory not found or is empty: {input_dir}. Skipping.")
         return
 
-    image_files = [os.path.join(processed_dir, f) for f in os.listdir(processed_dir) if f.endswith('.png')]
-    logger.info(f"Found {len(image_files)} images in 'processed' directory for embedding extraction.")
+    # deleted ディレクトリは親ディレクトリに作成（論理削除の場合のみ）
+    parent_dir = os.path.dirname(input_dir)
+    deleted_dir = os.path.join(parent_dir, "deleted")
+    if not PHYSICAL_DELETE and not os.path.exists(deleted_dir):
+        os.makedirs(deleted_dir)
+
+    # Filter for standard image extensions
+    image_files = [
+        os.path.join(input_dir, f) 
+        for f in os.listdir(input_dir) 
+        if f.lower().endswith(('.png', '.jpg', '.jpeg')) and os.path.isfile(os.path.join(input_dir, f))
+    ]
+    logger.info(f"Found {len(image_files)} images in input directory.")
+
+    if not image_files:
+        logger.warning("No images found in processed directory.")
+        return
 
     # --- Get Embeddings ---
     encodings = []
     image_path_list = []
+    
     for img_path in image_files:
         try:
-            bgr_image = cv2.imread(img_path)
+            bgr_image = imread_safe(img_path)
             if bgr_image is None:
-                logger.warning(f"Could not read image: {img_path}")
                 continue
+            
+            # Since these are already cropped/align-ready images from Part 1,
+            # Detection should be easier, but extremely tight crops (eye-only?) 
+            # might fail detection.
             faces = app.get(bgr_image)
+            
             if faces:
-                encodings.append(faces[0].embedding)
+                # Use the largest face if multiple found in this pre-cropped image
+                face = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
+                encodings.append(face.embedding)
                 image_path_list.append(img_path)
             else:
-                logger.warning(f"No face found in: {img_path}")
+                # !!! Fallback for Eye Crop !!!
+                # Because "Top of Eye to Chin" is a partial face (missing forehead/brows),
+                # standard detectors might fail.
+                # If fail, we cannot extract embeddings easily for deduplication using InsightFace.
+                # However, Part 1 saves "processed" files named identically for both crops?
+                # No, they are in different folders.
+                # If detection fails, we can't filter by similarity here.
+                # But wait, if crop_eyebrow works, we can leverage that result?
+                # The user asked: "If it doesn't work, apply the same filtering as eyebrow crop".
+                # To do that, we need to know WHICH files were deleted in crop_eyebrow run.
+                # This script runs independently.
+                # So we cannot easily "copy" the deletion decision unless we shared state.
+                # But let's log the failure.
+                logger.warning(f"No face found in processed image: {os.path.basename(img_path)}")
         except Exception as e:
-            logger.error(f"Error processing {img_path} for embedding: {e}", exc_info=True)
+            logger.error(f"Error processing {img_path}: {e}")
 
     if len(encodings) < MIN_SAMPLES:
-        logger.info("Not enough faces to perform duplicate clustering. Skipping.")
+        logger.info("Not enough faces for clustering.")
         return
 
-    # --- Perform Clustering to find duplicates ---
-    logger.info(f"Clustering to find duplicates with DBSCAN, metric={METRIC}, eps={DEDUPLICATION_TOLERANCE}")
+    # --- Clustering ---
+    logger.info(f"Clustering with DBSCAN, eps={DEDUPLICATION_TOLERANCE}")
     clustering = DBSCAN(metric=METRIC, eps=DEDUPLICATION_TOLERANCE, min_samples=MIN_SAMPLES).fit(np.array(encodings))
     labels = clustering.labels_
 
-    # --- Group images by cluster label ---
-    clusters = {}  # {label: [img_path, img_path, ...]}
+    clusters = {}
     for i, label in enumerate(labels):
-        if label != -1:  # We only care about clusters (duplicates), not noise
-            if label not in clusters:
-                clusters[label] = []
+        if label != -1:
+            if label not in clusters: clusters[label] = []
             clusters[label].append(image_path_list[i])
     
-    logger.info(f"Found {len(clusters)} groups of similar (duplicate) images.")
+    logger.info(f"Found {len(clusters)} duplicate groups.")
 
-    # --- Loop through clusters and remove duplicates ---
+    # --- Remove Duplicates ---
     for label, group in clusters.items():
-        # Keep the first image, delete the rest of the group
+        # Keep first
         keep_one = group.pop(0)
         logger.info(f"Cluster {label}: Keeping {os.path.basename(keep_one)}, removing {len(group)} duplicates.")
-        
+
         for img_path in group:
             try:
-                base_name, _ = os.path.splitext(os.path.basename(img_path))
-                original_filename = processed_face_to_original_map.get(base_name)
-                if not original_filename:
-                    logger.warning(f"Original filename not found in map for {base_name}, cannot perform full deletion.")
-                    continue
-                
-                original_ext = os.path.splitext(original_filename)[1]
-
-                files_to_move = [
-                    img_path,  # the processed png
-                    os.path.join(rotated_dir, f"{base_name}{original_ext}"),
-                    os.path.join(bbox_cropped_dir, f"{base_name}{original_ext}"),
-                    os.path.join(bbox_rotated_dir, f"{base_name}{original_ext}"),
-                    os.path.join(input_dir, original_filename)
-                ]
-
-                for file_path_to_move in files_to_move:
-                    if os.path.exists(file_path_to_move):
-                        shutil.move(file_path_to_move, os.path.join(deleted_dir, os.path.basename(file_path_to_move)))
-                        logger.info(f"Moved duplicate file: {file_path_to_move}")
+                if os.path.exists(img_path):
+                    if PHYSICAL_DELETE:
+                        os.remove(img_path)
+                        logger.info(f"Deleted: {os.path.basename(img_path)}")
+                    else:
+                        dst = os.path.join(deleted_dir, os.path.basename(img_path))
+                        if os.path.exists(dst):
+                            os.remove(dst) 
+                        shutil.move(img_path, dst)
+                        logger.info(f"Moved to deleted: {os.path.basename(img_path)}")
             except Exception as e:
-                logger.error(f"Error while moving duplicates for {img_path}: {e}", exc_info=True)
+                logger.error(f"Error removing duplicate {img_path}: {e}")
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python part2a_similarity.py <output_dir>")
+        print("Usage: python part2a_similarity.py <input_dir>")
         sys.exit(1)
 
     input_dir = sys.argv[1]
     logger.info(f"Part 2a starting for directory: {input_dir}")
     try:
-        processed_face_to_original_map = {}
-        map_path = os.path.join(input_dir, MAP_FILE)
-        if os.path.exists(map_path):
-            with open(map_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if ',' in line:
-                        key, value = line.strip().split(',', 1)
-                        processed_face_to_original_map[key] = value
-        else:
-            logger.error(f"Map file not found: {map_path}")
-            sys.exit(1)
-
-        find_similar_images(input_dir, processed_face_to_original_map)
-        logger.info(f"Part 2a (similarity check) finished.")
-
+        find_similar_images(input_dir)
+        logger.info("Part 2a finished.")
     except Exception as e:
         logger.error(f"Fatal error in Part 2a: {e}", exc_info=True)
         sys.exit(1)
