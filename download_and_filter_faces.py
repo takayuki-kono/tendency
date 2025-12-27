@@ -9,11 +9,13 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # Setup Logging
 logging.basicConfig(
-    filename=os.path.join(LOG_DIR, 'log_pipeline.txt'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    filemode='w',
-    encoding='utf-8'
+    encoding='utf-8',
+    handlers=[
+        logging.FileHandler(os.path.join(LOG_DIR, "log_pipeline_v2.txt"), mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -30,16 +32,26 @@ KEYWORDS = [
     # "大原櫻子", "小雪", "安藤玉恵", "石井杏奈", "安田成美", "橋本愛"
 ] 
 BASE_OUTPUT_DIR = "master_data"
+PHYSICAL_DELETE = False # True: Permanently delete, False: Move to 'deleted' folder
+
+import subprocess
 
 def run_script(script_path, args):
-    """Runs a python script with arguments."""
-    command = f"python {script_path} {' '.join(args)}"
-    logger.info(f"Running command: {command}")
-    ret = os.system(command)
-    if ret != 0:
-        logger.error(f"Command failed: {command}")
+    """Runs a python script with arguments using the current python interpreter."""
+    # Use sys.executable to ensure we use the same python environment (e.g. venv)
+    command = [sys.executable, script_path] + args
+    
+    logger.info(f"Running command: {' '.join(command)}")
+    try:
+        # subprocess.run is safer and allows capturing output if needed
+        result = subprocess.run(command, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Command failed with return code {e.returncode}: {' '.join(command)}")
         return False
-    return True
+    except Exception as e:
+        logger.error(f"Execution failed: {e}")
+        return False
 
 def main():
     sys.path.append(os.getcwd())
@@ -64,9 +76,15 @@ def main():
 
         # Step 2: Run Part 2a & 2b for 'rotated'
         logger.info(f"--- Processing rotated pipeline ---")
-        if not run_script(part2a_script, [rotated_dir]):
+        
+        # Prepare arguments for deletion mode
+        delete_args = [rotated_dir]
+        if PHYSICAL_DELETE:
+            delete_args.append("--physical_delete")
+
+        if not run_script(part2a_script, delete_args):
             logger.error("Part 2a failed.")
-        if not run_script(part2b_script, [rotated_dir]):
+        if not run_script(part2b_script, delete_args):
             logger.error("Part 2b failed.")
         
         logger.info(f"Pipeline finished for {keyword}")

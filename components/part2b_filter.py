@@ -8,10 +8,10 @@ from sklearn.cluster import DBSCAN
 import sys
 
 sys.path.append('/mnt/d/tendency/.venv_new/lib/python3.12/site-packages')
+import argparse
 from insightface.app import FaceAnalysis
 
 # --- Globals ---
-PHYSICAL_DELETE = True  # True: 物理削除, False: deleted フォルダへ移動
 LOG_DIR = "outputs/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -38,7 +38,7 @@ def imread_safe(path):
         return None
 
 # --- Functions ---
-def filter_by_main_person_insightface(input_dir):
+def filter_by_main_person_insightface(input_dir, physical_delete):
     logger.info("Starting person filtering with InsightFace...")
     app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     app.prepare(ctx_id=0, det_size=(320, 320))
@@ -122,14 +122,14 @@ def filter_by_main_person_insightface(input_dir):
     # deleted ディレクトリは親ディレクトリに作成（論理削除の場合のみ）
     parent_dir = os.path.dirname(input_dir)
     deleted_dir = os.path.join(parent_dir, "deleted")
-    if not PHYSICAL_DELETE and not os.path.exists(deleted_dir):
+    if not physical_delete and not os.path.exists(deleted_dir):
         os.makedirs(deleted_dir)
 
     all_images = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
     for path in all_images:
         if path not in images_to_keep:
             try:
-                if PHYSICAL_DELETE:
+                if physical_delete:
                     os.remove(path)
                     logger.info(f"Deleted non-main person file: {path}")
                 else:
@@ -171,14 +171,15 @@ def cleanup_directories(input_dir):
         logger.error(f"Error removing directory {input_dir}: {e}")
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python part2b_filter.py <output_dir>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Part 2b: Filtering")
+    parser.add_argument("input_dir", type=str, help="Input directory")
+    parser.add_argument("--physical_delete", action="store_true", help="Enable physical deletion")
+    args = parser.parse_args()
 
-    input_dir = sys.argv[1]
-    logger.info(f"Part 2b starting for directory: {input_dir}")
+    input_dir = args.input_dir
+    logger.info(f"Part 2b starting for directory: {input_dir}, physical_delete: {args.physical_delete}")
     try:
-        filter_by_main_person_insightface(input_dir)
+        filter_by_main_person_insightface(input_dir, args.physical_delete)
         cleanup_directories(input_dir)
         logger.info(f"Part 2b finished for directory: {input_dir}")
     except Exception as e:

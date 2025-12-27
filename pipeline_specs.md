@@ -128,9 +128,9 @@
     -   用途: 低解像度からアップスケールされた画像や、圧縮劣化した画像を除外
 
 ### 削除モード設定
--   `part2a_similarity.py` / `part2b_filter.py` 内の `PHYSICAL_DELETE` 定数で切替
+-   `download_and_filter_faces.py` 内の定数 `PHYSICAL_DELETE` で一括設定
     -   `True`: 不要画像を完全削除
-    -   `False`: `deleted/` フォルダへ移動（論理削除）
+    -   `False`: `deleted/` フォルダへ移動（論理削除） **← 現在のデフォルト**
 
 ### その他設定
 -   **日本語パス対応:** 独自の `imread_safe` 関数を全スクリプトで使用。バイナリモードで読み込み `cv2.imdecode` する方式。

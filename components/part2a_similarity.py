@@ -8,11 +8,12 @@ from sklearn.cluster import DBSCAN
 from insightface.app import FaceAnalysis
 import sys
 
+import argparse
+
 # --- Globals ---
 METRIC = 'cosine'
 DEDUPLICATION_TOLERANCE = 0.25 # Tight tolerance for duplicates
 MIN_SAMPLES = 2
-PHYSICAL_DELETE = True  # True: 物理削除, False: deleted フォルダへ移動
 LOG_DIR = "outputs/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -39,7 +40,7 @@ def imread_safe(path):
         return None
 
 # --- Function ---
-def find_similar_images(input_dir):
+def find_similar_images(input_dir, physical_delete):
     """input_dir 内の画像から類似画像を検出し、重複を deleted へ移動する"""
     logger.info("Starting similarity search with InsightFace embeddings...")
     
@@ -59,7 +60,7 @@ def find_similar_images(input_dir):
     # deleted ディレクトリは親ディレクトリに作成（論理削除の場合のみ）
     parent_dir = os.path.dirname(input_dir)
     deleted_dir = os.path.join(parent_dir, "deleted")
-    if not PHYSICAL_DELETE and not os.path.exists(deleted_dir):
+    if not physical_delete and not os.path.exists(deleted_dir):
         os.makedirs(deleted_dir)
 
     # Filter for standard image extensions
@@ -95,19 +96,6 @@ def find_similar_images(input_dir):
                 encodings.append(face.embedding)
                 image_path_list.append(img_path)
             else:
-                # !!! Fallback for Eye Crop !!!
-                # Because "Top of Eye to Chin" is a partial face (missing forehead/brows),
-                # standard detectors might fail.
-                # If fail, we cannot extract embeddings easily for deduplication using InsightFace.
-                # However, Part 1 saves "processed" files named identically for both crops?
-                # No, they are in different folders.
-                # If detection fails, we can't filter by similarity here.
-                # But wait, if crop_eyebrow works, we can leverage that result?
-                # The user asked: "If it doesn't work, apply the same filtering as eyebrow crop".
-                # To do that, we need to know WHICH files were deleted in crop_eyebrow run.
-                # This script runs independently.
-                # So we cannot easily "copy" the deletion decision unless we shared state.
-                # But let's log the failure.
                 logger.warning(f"No face found in processed image: {os.path.basename(img_path)}")
         except Exception as e:
             logger.error(f"Error processing {img_path}: {e}")
@@ -138,7 +126,7 @@ def find_similar_images(input_dir):
         for img_path in group:
             try:
                 if os.path.exists(img_path):
-                    if PHYSICAL_DELETE:
+                    if physical_delete:
                         os.remove(img_path)
                         logger.info(f"Deleted: {os.path.basename(img_path)}")
                     else:
@@ -151,14 +139,14 @@ def find_similar_images(input_dir):
                 logger.error(f"Error removing duplicate {img_path}: {e}")
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python part2a_similarity.py <input_dir>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Part 2a: Deduplication")
+    parser.add_argument("input_dir", type=str, help="Input directory")
+    parser.add_argument("--physical_delete", action="store_true", help="Enable physical deletion (default: False)")
+    args = parser.parse_args()
 
-    input_dir = sys.argv[1]
-    logger.info(f"Part 2a starting for directory: {input_dir}")
+    logger.info(f"Part 2a starting for directory: {args.input_dir}, physical_delete: {args.physical_delete}")
     try:
-        find_similar_images(input_dir)
+        find_similar_images(args.input_dir, args.physical_delete)
         logger.info("Part 2a finished.")
     except Exception as e:
         logger.error(f"Fatal error in Part 2a: {e}", exc_info=True)
