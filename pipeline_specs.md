@@ -130,7 +130,9 @@
 ### 削除モード設定
 -   `download_and_filter_faces.py` 内の定数 `PHYSICAL_DELETE` で一括設定
     -   `True`: 不要画像を完全削除
-    -   `False`: `deleted/` フォルダへ移動（論理削除） **← 現在のデフォルト**
+    -   `False`: 以下のフォルダへ移動（論理削除） **← 現在のデフォルト**
+        -   **Part 2a (重複):** `deleted_duplicates/`
+        -   **Part 2b (別人):** `deleted_outliers/`
 
 ### その他設定
 -   **日本語パス対応:** 独自の `imread_safe` 関数を全スクリプトで使用。バイナリモードで読み込み `cv2.imdecode` する方式。

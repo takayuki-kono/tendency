@@ -121,7 +121,7 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
 
     # deleted ディレクトリは親ディレクトリに作成（論理削除の場合のみ）
     parent_dir = os.path.dirname(input_dir)
-    deleted_dir = os.path.join(parent_dir, "deleted")
+    deleted_dir = os.path.join(parent_dir, "deleted_outliers")
     if not physical_delete and not os.path.exists(deleted_dir):
         os.makedirs(deleted_dir)
 
