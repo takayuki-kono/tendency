@@ -29,7 +29,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     encoding='utf-8',
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "log_part1_v3.txt"), mode='w', encoding='utf-8'),
+        logging.FileHandler(os.path.join(LOG_DIR, "log_part1_v4.txt"), mode='w', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -44,7 +44,8 @@ def imread_safe(path):
             numpy_array = np.asarray(bytes_data, dtype=np.uint8)
             img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
         return img
-    except:
+    except Exception as e:
+        logger.warning(f"Failed to read image {path}: {e}")
         return None
 
 def imwrite_safe(path, img):
@@ -56,7 +57,8 @@ def imwrite_safe(path, img):
                 n.tofile(f)
             return True
         return False
-    except:
+    except Exception as e:
+        logger.warning(f"Failed to write image {path}: {e}")
         return False
 
 def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
@@ -66,10 +68,13 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
 
     try:
         faces = face_app.get(img)
-    except:
+    except Exception as e:
+        logger.error(f"Face detection failed for {img_path}: {e}")
         return 0
 
-    if not faces: return 0
+    if not faces:
+        # logger.debug(f"No faces found in {img_path}")
+        return 0
 
     saved_count = 0
     for face_idx, face in enumerate(faces):
@@ -92,14 +97,21 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
             target_face = max(new_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
             new_lmk = target_face.landmark_2d_106
             
-            # 3. Eyebrow-to-Chin Crop
+            # 3. Eyebrow-to-Chin Crop (Chin at bottom)
+            # Reverted to Landmark 0 for chin based on user feedback
+            ry_chin = new_lmk[0][1]
+
             ry_top_brow = min(new_lmk[49][1], new_lmk[104][1])
-            ry_bottom = new_lmk[0][1] # Chin
-            rx_center = new_lmk[86][0]
-            r_size = max(ry_bottom - ry_top_brow, rotated_img.shape[1] // 4)
             
+            r_size = ry_chin - ry_top_brow
+            # Ensure minimal size constraint if needed, but prioritize chin alignment
+            if r_size < 10: r_size = 10 
+            
+            rx_center = new_lmk[86][0]
+            
+            # Square crop, anchored at the bottom (Chin)
             rx_min, rx_max = int(rx_center - r_size // 2), int(rx_center + r_size // 2)
-            ry_min, ry_max = int(ry_top_brow), int(ry_top_brow + r_size)
+            ry_min, ry_max = int(ry_chin - r_size), int(ry_chin)
 
             # Padding (Allow all padding)
             rh, rw = rotated_img.shape[:2]
@@ -123,7 +135,8 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
             
             if imwrite_safe(dest_path, final_resized):
                 saved_count += 1
-        except:
+        except Exception as e:
+            logger.error(f"Error processing face {face_idx} in {img_path}: {e}")
             continue
     return saved_count
 

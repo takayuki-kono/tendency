@@ -64,6 +64,14 @@ def main():
     for keyword in KEYWORDS:
         logger.info(f"Processing keyword: {keyword}")
         output_dir = os.path.join(BASE_OUTPUT_DIR, keyword)
+
+        # "Refresh" - If directory exists, delete it for a clean start
+        if os.path.exists(output_dir):
+            logger.info(f"Removing existing directory for fresh start: {output_dir}")
+            try:
+                shutil.rmtree(output_dir)
+            except Exception as e:
+                logger.warning(f"Failed to remove {output_dir}: {e}")
         
         # Step 1: Run Part 1 (Download, Detect, Crop)
         # Part 1 creates: output_dir/rotated/
@@ -71,6 +79,13 @@ def main():
             logger.error("Part 1 failed.")
             continue
             
+        # Step 1.5: Process any remaining raw files in output_dir
+        # This catches files that might have been downloaded but not processed in previous runs
+        # or if they were manually placed there.
+        process_local_script = os.path.join("components", "process_local_raw.py")
+        logger.info(f"Processing any local raw files in {output_dir}")
+        run_script(process_local_script, [output_dir])
+
         # Part 1 output is now: output_dir/rotated/
         rotated_dir = os.path.join(output_dir, "rotated")
 
