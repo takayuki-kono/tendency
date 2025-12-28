@@ -143,7 +143,7 @@ def main():
     face_app.prepare(ctx_id=0, det_size=(640, 640))
 
     # Search Variations
-    search_keywords = [f"女優 {keyword}"]
+    search_keywords = [f"{keyword} 女優"]
 
     temp_root = os.path.abspath('temp_part1_raw')
     if os.path.exists(temp_root):
