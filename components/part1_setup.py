@@ -10,7 +10,7 @@ from imagedl import imagedl
 from insightface.app import FaceAnalysis
 
 # --- Globals ---
-TARGET_COUNT_PER_ENGINE = 1000
+TARGET_COUNT_PER_ENGINE = 800  # Slightly reduced from 1000 for stability
 IMG_SIZE = 224
 LOG_DIR = "outputs/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -160,7 +160,7 @@ def main():
                     image_source=engine_name,
                     init_image_client_cfg={'work_dir': temp_root, 'max_retries': 3},
                     search_limits=TARGET_COUNT_PER_ENGINE,
-                    num_threadings=15
+                    num_threadings=5
                 )
                 
                 image_infos = client.search(skey, filters={'size': 'large'})

@@ -9,8 +9,8 @@ from imagedl import imagedl
 from insightface.app import FaceAnalysis
 
 # --- Configuration ---
-KEYWORDS = ["女優 奈緒", "奈緒 女優", "奈緒 俳優"]
-TARGET_COUNT_PER_ENGINE = 400
+KEYWORDS = ["奈緒 女優"] # Simplified
+TARGET_COUNT_PER_ENGINE = 800 # Optimized for stability
 OUTPUT_BASE_DIR = "master_data"
 UNIFIED_NAME = "奈緒"
 IMG_SIZE = 224
@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Face Processing Logic (Integrated from part1_setup.py) ---
+# --- Face Processing Logic ---
 
 def imread_safe(path):
     try:
@@ -60,144 +60,94 @@ def imwrite_safe(path, img):
         return False
 
 def process_and_save_face(img_path, final_dir, face_app, engine_name):
-    """画像から顔を検出し、加工して保存する"""
     img = imread_safe(img_path)
     if img is None: return 0
-
     try:
         faces = face_app.get(img)
-    except:
-        return 0
-
+    except: return 0
     if not faces: return 0
 
     saved_count = 0
     for face_idx, face in enumerate(faces):
         try:
-            # 1. Rotation Alignment
             lmk = face.landmark_2d_106
             if lmk is None: continue
-            
             dx = lmk[86][0] - lmk[0][0]
             dy = lmk[86][1] - lmk[0][1]
             angle = np.arctan2(dx, -dy) * 180 / np.pi
-            
             center = (img.shape[1] / 2, img.shape[0] / 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
             rotated_img = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]))
             
-            # 2. Re-detect on rotated image for precise crop
             new_faces = face_app.get(rotated_img)
             if not new_faces: continue
             target_face = max(new_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
             new_lmk = target_face.landmark_2d_106
             
-            # 3. Eyebrow-to-Chin Crop
             ry_top_brow = min(new_lmk[49][1], new_lmk[104][1])
-            ry_bottom = new_lmk[0][1] # Chin
+            ry_bottom = new_lmk[0][1]
             rx_center = new_lmk[86][0]
             r_size = max(ry_bottom - ry_top_brow, rotated_img.shape[1] // 4)
-            
             rx_min, rx_max = int(rx_center - r_size // 2), int(rx_center + r_size // 2)
             ry_min, ry_max = int(ry_top_brow), int(ry_top_brow + r_size)
 
-            # Padding
             rh, rw = rotated_img.shape[:2]
             pad_t, pad_b = max(0, -ry_min), max(0, ry_max - rh)
             pad_l, pad_r = max(0, -rx_min), max(0, rx_max - rw)
-            
-            # No padding ratio filter as requested
             padded_img = cv2.copyMakeBorder(rotated_img, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_CONSTANT, value=(0,0,0))
-            rx_min += pad_l; rx_max += pad_l
-            ry_min += pad_t; ry_max += pad_t
+            rx_min += pad_l; rx_max += pad_l; ry_min += pad_t; ry_max += pad_t
 
             cropped = padded_img[ry_min:ry_max, rx_min:rx_max]
             if cropped.size == 0: continue
-            
-            # 4. Resize to 224x224
             final_resized = cv2.resize(cropped, (IMG_SIZE, IMG_SIZE))
-            
-            # 5. Save with size info in filename
             orig_w = cropped.shape[1]
             new_filename = f"{engine_name}_{uuid.uuid4().hex[:8]}_sz{orig_w}.jpg"
             dest_path = os.path.join(final_dir, new_filename)
-            
             if imwrite_safe(dest_path, final_resized):
                 saved_count += 1
-        except:
-            continue
+        except: continue
     return saved_count
-
-# --- Main Collection Logic ---
 
 def collect_images():
     final_dir = os.path.join(OUTPUT_BASE_DIR, UNIFIED_NAME)
     os.makedirs(final_dir, exist_ok=True)
-
-    # Initialize InsightFace
     logger.info("Initializing InsightFace...")
     face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     face_app.prepare(ctx_id=0, det_size=(640, 640))
 
     temp_root = os.path.abspath('temp_imagedl_raw')
-    if os.path.exists(temp_root):
-        shutil.rmtree(temp_root)
+    if os.path.exists(temp_root): shutil.rmtree(temp_root)
     os.makedirs(temp_root, exist_ok=True)
 
     total_faces_saved = 0
-
     for engine_name in ENGINES:
         logger.info(f"--- Running engine: {engine_name} ---")
-        
         for keyword in KEYWORDS:
-            logger.info(f"Searching for '{keyword}' on {engine_name}")
-            
             try:
+                # Reduced threading to 5 for stability against bot detection
                 client = imagedl.ImageClient(
                     image_source=engine_name,
                     init_image_client_cfg={'work_dir': temp_root, 'max_retries': 3},
                     search_limits=TARGET_COUNT_PER_ENGINE,
-                    num_threadings=10
+                    num_threadings=5
                 )
-                
-                filters = {'size': 'large'}
-                image_infos = client.search(keyword, filters=filters)
-                
-                if not image_infos:
-                    continue
-                
+                image_infos = client.search(keyword, filters={'size': 'large'})
+                if not image_infos: continue
                 downloaded_infos = client.download(image_infos)
-                
                 if downloaded_infos:
-                    logger.info(f"Processing {len(downloaded_infos)} images for faces...")
-                    engine_saved = 0
+                    logger.info(f"Processing {len(downloaded_infos)} images from {engine_name}")
                     for info in downloaded_infos:
                         src_path = info['file_path']
                         if os.path.exists(src_path):
-                            # ここで顔検出・クロップ・保存
-                            faces_in_img = process_and_save_face(src_path, final_dir, face_app, engine_name)
-                            engine_saved += faces_in_img
-                            # 元の生画像は不要なので削除してディスクを節約
+                            total_faces_saved += process_and_save_face(src_path, final_dir, face_app, engine_name)
                             os.remove(src_path)
-                    
-                    logger.info(f"Engine {engine_name} provided {engine_saved} face images.")
-                    total_faces_saved += engine_saved
-                
-                # Cleanup engine subfolder
                 if downloaded_infos:
-                    engine_work_dir = downloaded_infos[0]['work_dir']
-                    if os.path.exists(engine_work_dir) and engine_work_dir != temp_root:
-                        shutil.rmtree(engine_work_dir)
-
+                    shutil.rmtree(downloaded_infos[0]['work_dir'], ignore_errors=True)
             except Exception as e:
                 logger.error(f"Error with engine {engine_name}: {e}")
 
-    if os.path.exists(temp_root):
-        try: shutil.rmtree(temp_root)
-        except: pass
-
+    if os.path.exists(temp_root): shutil.rmtree(temp_root, ignore_errors=True)
     logger.info(f"=== Process Complete. Total face images saved: {total_faces_saved} ===")
-    logger.info(f"Output directory: {final_dir}")
 
 if __name__ == "__main__":
     collect_images()
