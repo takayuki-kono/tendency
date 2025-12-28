@@ -1,5 +1,27 @@
 # 機械学習パイプライン仕様書
 
+## 0. 環境構築と準備
+本パイプラインを実行する前に、以下のセットアップが必要です。
+
+### 必須ライブラリのインストール
+主要な収集・加工エンジンを動作させるため、以下のコマンドを実行してください。
+```bash
+# 画像収集エンジン
+pip install pyimagedl
+
+# 顔検出・解析エンジン
+pip install insightface onnxruntime-gpu
+
+# その他依存関係
+pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalidate
+```
+
+### 外部リポジトリ・モデル
+- **pyimagedl**: `pip install pyimagedl` でインストールされますが、最新版の仕様確認が必要な場合は [CharlesPikachu/imagedl](https://github.com/CharlesPikachu/imagedl) を参照してください。
+- **InsightFace**: 初回実行時に自動的にモデルがダウンロードされます。
+
+---
+
 ## 1. 概要
 本パイプラインは、生画像から高品質な顔データセットを生成し、フィルタリングパラメータを最適化し、分類モデルを学習するために設計されています。
 
