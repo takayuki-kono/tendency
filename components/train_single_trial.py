@@ -115,17 +115,63 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
         else:
             return image, output_labels
 
+    def to_one_hot(image, labels_dict, weights=None):
+        # Convert sparse dict labels to one-hot dict
+        new_labels = {}
+        for k, v in labels_dict.items():
+             # Find matching task index to get num_classes
+             # Key format: 'task_a_output'
+             char_code = k.split('_')[1] # 'a'
+             idx = ord(char_code) - ord('a')
+             num_classes = len(task_labels[idx])
+             new_labels[k] = tf.one_hot(tf.cast(v, tf.int32), num_classes)
+        if weights is not None:
+            return image, new_labels, weights
+        return image, new_labels
+
+    def mixup(entry1, entry2):
+        # unpack
+        img1, lab1 = entry1[:2]
+        img2, lab2 = entry2[:2]
+        w1 = entry1[2] if len(entry1) > 2 else None
+        w2 = entry2[2] if len(entry2) > 2 else None
+        
+        alpha = augment_params['mixup_alpha']
+        l = tf.random.gamma([], alpha, 1.0)
+        l = tf.math.reduce_max([l, 1-l]) # force > 0.5 to keep dominant label if we were using it, but for soft mix it's symmetric
+        # Beta distribution is better: np.random.beta(alpha, alpha)
+        # But tf doesn't have beta easily accessible without tfp. 
+        # Approx with uniform if alpha=1, or just 1.0 if placeholder.
+        # Let's use simple linear blend with random ratio
+        ratio = tf.random.uniform([], 0, 1)
+
+        img_mix = ratio * img1 + (1 - ratio) * img2
+        
+        lab_mix = {}
+        for k in lab1:
+            lab_mix[k] = ratio * lab1[k] + (1 - ratio) * lab2[k]
+            
+        if w1 is not None and w2 is not None:
+             w_mix = tuple(ratio * w1[i] + (1 - ratio) * w2[i] for i in range(len(w1)))
+             return img_mix, lab_mix, w_mix
+        return img_mix, lab_mix
+
     AUTOTUNE = tf.data.AUTOTUNE
     list_ds = tf.data.Dataset.list_files(f'{directory}/*/*.jpg', shuffle=True, seed=42)
     ds = list_ds.map(parse_path, num_parallel_calls=AUTOTUNE)
-    
-    # Cache here to avoid re-reading/decoding images
-    ds = ds.cache()
-
-    # データ拡張 (GPUで行うためモデル内ではなくここでやるか、モデル内に入れるか。train_with_bayesianはモデル内)
-    # ここではモデル内に任せるため、ここでは何もしない
-    
+    ds = ds.cache() # Cache raw images before weights/mixup
     ds = ds.map(apply_weights, num_parallel_calls=AUTOTUNE)
+
+    # Mixup Logic
+    if augment_params and augment_params.get('mixup_alpha', 0.0) > 0.0:
+        # Convert to one-hot first
+        ds = ds.map(to_one_hot, num_parallel_calls=AUTOTUNE)
+        
+        # Create shuffle pair
+        ds_shuffled = ds.shuffle(1000)
+        ds = tf.data.Dataset.zip((ds, ds_shuffled))
+        ds = ds.map(mixup, num_parallel_calls=AUTOTUNE)
+
     return ds
 
 def get_preprocessing_function(model_name):
@@ -145,6 +191,10 @@ class BalancedSparseCategoricalAccuracy(tf.keras.metrics.Metric):
         self.total_count = self.add_weight(name='tc', shape=(num_classes,), initializer='zeros')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
+        # Handle One-hot inputs (Mixup)
+        if len(y_true.shape) > 1 and y_true.shape[-1] > 1:
+            y_true = tf.argmax(y_true, axis=-1)
+            
         y_true = tf.cast(y_true, tf.int32)
         y_pred = tf.argmax(y_pred, axis=-1)
         y_pred = tf.cast(y_pred, tf.int32)
@@ -185,6 +235,7 @@ class BalancedSparseCategoricalAccuracy(tf.keras.metrics.Metric):
 def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params):
     model_map = {
         'EfficientNetV2B0': EfficientNetV2B0,
+        'EfficientNetV2S': EfficientNetV2S,
         'ResNet50V2': ResNet50V2,
         'Xception': Xception,
         'DenseNet121': DenseNet121
@@ -230,8 +281,13 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         outputs.append(layers.Activation('softmax', dtype='float32', name=name)(x_out))
 
     model = models.Model(inputs=inputs, outputs=outputs)
+    
+    # Loss switching for Mixup
+    loss_fn = 'sparse_categorical_crossentropy'
+    if augment_params.get('mixup_alpha', 0.0) > 0.0:
+        loss_fn = 'categorical_crossentropy'
 
-    loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
+    loss_dict = {name: loss_fn for name in output_names}
     loss_weights_dict = {name: 1.0 / len(ALL_TASK_LABELS) for name in output_names}
     
     # メトリクス定義 (Balanced Accuracyを追加)

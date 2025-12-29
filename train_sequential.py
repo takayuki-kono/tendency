@@ -160,9 +160,14 @@ def main():
         'height_shift_range': 0.0,
         'zoom_range': 0.0,
         'horizontal_flip': 'False',
+        'mixup_alpha': 0.0,
         'fine_tune': 'False'
     }
     
+    # --- Step 0: Model Architecture ---
+    best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
+    current_params['model_name'] = best_model
+
     # --- Step 1: Learning Rate ---
     best_lr, _ = optimize_param('learning_rate', [1e-3, 5e-4, 1e-4], current_params)
     current_params['learning_rate'] = best_lr
@@ -181,6 +186,11 @@ def main():
     current_params['dropout'] = best_dropout
 
     # --- Step 3: Data Augmentation ---
+    # Mixup (0.0=Off, 0.2=On)
+    # Mixupは強力な正則化なので、最初に決めるのが良い場合もあるが、他のAugmentationとの兼ね合いもある
+    best_mixup, _ = optimize_param('mixup_alpha', [0.0, 0.2], current_params)
+    current_params['mixup_alpha'] = best_mixup
+
     # Rotation (0.0 - 0.2)
     best_rot, _ = optimize_param('rotation_range', [0.0, 0.1, 0.2], current_params)
     current_params['rotation_range'] = best_rot
