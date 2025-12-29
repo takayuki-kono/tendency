@@ -188,13 +188,31 @@ def main():
         verbose=1
     )
 
-    # 最終評価
-    results = model.evaluate(val_ds, return_dict=True)
+    # 最終評価 (Balanced Accuracy を計算)
+    print("Calculating Balanced Accuracy...")
+    y_true_all = []
+    y_pred_all = []
     
-    # 全タスクの平均精度を計算
-    # Task A の精度を使用
-    final_score = results.get('task_a_output_accuracy', 0.0)
-    print(f"FINAL_SCORE: {final_score}") # この出力を optimize_with_optuna.py で拾う
+    # バリデーションデータから全予測を取得
+    for batch_images, batch_labels_dict, *_ in val_ds: # 重みがある場合は *_ で吸収
+        batch_preds = model.predict(batch_images, verbose=0)
+        
+        # Task A (index 0) に注目
+        # batch_preds は [task_a_pred, task_b_pred, ...] のリスト
+        task_a_pred_probs = batch_preds[0] 
+        task_a_preds = np.argmax(task_a_pred_probs, axis=1)
+        
+        # 正解ラベル (Batchごとの辞書から取得)
+        task_a_true = batch_labels_dict['task_a_output_accuracy' if 'task_a_output_accuracy' in batch_labels_dict else 'task_a_output'].numpy()
+
+        y_true_all.extend(task_a_true)
+        y_pred_all.extend(task_a_preds)
+        
+    # 混同行列作成
+    from sklearn.metrics import balanced_accuracy_score
+    final_score = balanced_accuracy_score(y_true_all, y_pred_all)
+    
+    print(f"FINAL_SCORE: {final_score}") # Balanced Accuracyを出力
 
 if __name__ == "__main__":
     main()
