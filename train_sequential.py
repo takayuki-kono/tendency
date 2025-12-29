@@ -161,6 +161,7 @@ def main():
         'zoom_range': 0.0,
         'horizontal_flip': 'False',
         'mixup_alpha': 0.0,
+        'label_smoothing': 0.0,
         'fine_tune': 'False'
     }
     
@@ -185,7 +186,11 @@ def main():
     best_dropout, _ = optimize_param('dropout', [0.3, 0.5], current_params)
     current_params['dropout'] = best_dropout
 
-    # --- Step 3: Data Augmentation ---
+    # --- Step 3: Data Augmentation & Regularization ---
+    # Label Smoothing (0.0=Off, 0.1=On)
+    best_smoothing, _ = optimize_param('label_smoothing', [0.0, 0.1], current_params)
+    current_params['label_smoothing'] = best_smoothing
+
     # Mixup (0.0=Off, 0.2=On)
     # Mixupは強力な正則化なので、最初に決めるのが良い場合もあるが、他のAugmentationとの兼ね合いもある
     best_mixup, _ = optimize_param('mixup_alpha', [0.0, 0.2], current_params)

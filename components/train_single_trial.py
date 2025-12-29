@@ -162,15 +162,17 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
     ds = ds.cache() # Cache raw images before weights/mixup
     ds = ds.map(apply_weights, num_parallel_calls=AUTOTUNE)
 
-    # Mixup Logic
-    if augment_params and augment_params.get('mixup_alpha', 0.0) > 0.0:
-        # Convert to one-hot first
+    # Mixup / Smoothing Logic
+    if augment_params and (augment_params.get('mixup_alpha', 0.0) > 0.0 or augment_params.get('label_smoothing', 0.0) > 0.0):
+        # Convert to one-hot first (Required for both Mixup and Label Smoothing)
         ds = ds.map(to_one_hot, num_parallel_calls=AUTOTUNE)
         
-        # Create shuffle pair
-        ds_shuffled = ds.shuffle(1000)
-        ds = tf.data.Dataset.zip((ds, ds_shuffled))
-        ds = ds.map(mixup, num_parallel_calls=AUTOTUNE)
+        # Mixup (Only if alpha > 0)
+        if augment_params.get('mixup_alpha', 0.0) > 0.0:
+            # Create shuffle pair
+            ds_shuffled = ds.shuffle(1000)
+            ds = tf.data.Dataset.zip((ds, ds_shuffled))
+            ds = ds.map(mixup, num_parallel_calls=AUTOTUNE)
 
     return ds
 
@@ -282,10 +284,14 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
 
     model = models.Model(inputs=inputs, outputs=outputs)
     
-    # Loss switching for Mixup
-    loss_fn = 'sparse_categorical_crossentropy'
-    if augment_params.get('mixup_alpha', 0.0) > 0.0:
-        loss_fn = 'categorical_crossentropy'
+    # Loss switching for Mixup/Smoothing
+    label_smoothing = augment_params.get('label_smoothing', 0.0)
+    use_categorical = augment_params.get('mixup_alpha', 0.0) > 0.0 or label_smoothing > 0.0
+    
+    if use_categorical:
+        loss_fn = tf.keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing)
+    else:
+        loss_fn = 'sparse_categorical_crossentropy'
 
     loss_dict = {name: loss_fn for name in output_names}
     loss_weights_dict = {name: 1.0 / len(ALL_TASK_LABELS) for name in output_names}
@@ -293,10 +299,12 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
     # メトリクス定義 (Balanced Accuracyを追加)
     metrics_dict = {}
     for name, labels in zip(output_names, ALL_TASK_LABELS):
-        metrics_dict[name] = [
-            'accuracy', 
-            BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy')
-        ]
+        metrics_list = ['accuracy'] 
+        if use_categorical:
+            metrics_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')]
+        
+        metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
+        metrics_dict[name] = metrics_list
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
@@ -417,9 +425,27 @@ def main():
                 layer.trainable = False
             
             output_names = [f'task_{chr(97+i)}_output' for i in range(len(ALL_TASK_LABELS))]
-            loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
+            
+            # Loss switching based on Mixup/Smoothing
+            label_smoothing = augment_params.get('label_smoothing', 0.0)
+            use_categorical = augment_params.get('mixup_alpha', 0.0) > 0.0 or label_smoothing > 0.0
+            
+            if use_categorical:
+                loss_dict = {name: tf.keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing) for name in output_names}
+            else:
+                loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
+
             loss_weights_dict = {name: 1.0 / len(ALL_TASK_LABELS) for name in output_names}
-            metrics_dict = {name: 'accuracy' for name in output_names}
+            
+            # Update metrics to match loss type (though BalancedAcc handles one-hot, 'accuracy' needs to match)
+            metrics_dict = {}
+            for name, labels in zip(output_names, ALL_TASK_LABELS):
+                metrics_list = ['accuracy'] 
+                if use_categorical:
+                    metrics_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')] # Explicit categorical acc
+                
+                metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
+                metrics_dict[name] = metrics_list
             
             # 再コンパイル (学習率をさらに下げる: 1/10 -> 1/100)
             model.compile(
