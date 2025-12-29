@@ -136,6 +136,51 @@ def get_preprocessing_function(model_name):
     }
     return preprocess_map[model_name]
 
+class BalancedSparseCategoricalAccuracy(tf.keras.metrics.Metric):
+    def __init__(self, num_classes, name='balanced_accuracy', **kwargs):
+        super(BalancedSparseCategoricalAccuracy, self).__init__(name=name, **kwargs)
+        self.num_classes = num_classes
+        self.true_positives = self.add_weight(name='tp', shape=(num_classes,), initializer='zeros')
+        self.total_count = self.add_weight(name='tc', shape=(num_classes,), initializer='zeros')
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(y_true, tf.int32)
+        y_pred = tf.argmax(y_pred, axis=-1)
+        y_pred = tf.cast(y_pred, tf.int32)
+        
+        # Flatten
+        y_true = tf.reshape(y_true, [-1])
+        y_pred = tf.reshape(y_pred, [-1])
+
+        if sample_weight is not None:
+             sample_weight = tf.cast(sample_weight, tf.float32)
+             sample_weight = tf.reshape(sample_weight, [-1])
+
+        for i in range(self.num_classes):
+             is_class = tf.equal(y_true, i)
+             is_class = tf.cast(is_class, tf.float32)
+             
+             if sample_weight is not None:
+                 is_class = is_class * sample_weight
+
+             self.total_count[i].assign_add(tf.reduce_sum(is_class))
+             
+             is_correct = tf.logical_and(tf.equal(y_true, i), tf.equal(y_pred, i))
+             is_correct = tf.cast(is_correct, tf.float32)
+             
+             if sample_weight is not None:
+                 is_correct = is_correct * sample_weight
+                 
+             self.true_positives[i].assign_add(tf.reduce_sum(is_correct))
+
+    def result(self):
+        per_class_acc = tf.math.divide_no_nan(self.true_positives, self.total_count)
+        return tf.reduce_mean(per_class_acc)
+
+    def reset_state(self):
+        self.true_positives.assign(tf.zeros(self.num_classes))
+        self.total_count.assign(tf.zeros(self.num_classes))
+
 def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params):
     model_map = {
         'EfficientNetV2B0': EfficientNetV2B0,
@@ -187,7 +232,14 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
 
     loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
     loss_weights_dict = {name: 1.0 / len(ALL_TASK_LABELS) for name in output_names}
-    metrics_dict = {name: 'accuracy' for name in output_names}
+    
+    # メトリクス定義 (Balanced Accuracyを追加)
+    metrics_dict = {}
+    for name, labels in zip(output_names, ALL_TASK_LABELS):
+        metrics_dict[name] = [
+            'accuracy', 
+            BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy')
+        ]
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
@@ -249,11 +301,11 @@ def main():
         augment_params
     )
 
-    # コールバック生成関数
+    # コールバック生成関数 (Balanced Accuracyを監視)
     def create_callbacks():
         return [
-            EarlyStopping(monitor='val_task_a_output_accuracy', patience=5, restore_best_weights=True, verbose=1),
-            ReduceLROnPlateau(monitor='val_task_a_output_accuracy', factor=0.5, patience=3, min_lr=1e-7, verbose=1)
+            EarlyStopping(monitor='val_task_a_output_balanced_accuracy', patience=5, restore_best_weights=True, verbose=1, mode='max'),
+            ReduceLROnPlateau(monitor='val_task_a_output_balanced_accuracy', factor=0.5, patience=3, min_lr=1e-7, verbose=1, mode='max')
         ]
 
     # --- Phase 1: 初期学習 (Headのみ) ---
