@@ -49,8 +49,8 @@ SHARPNESS_PERCENTILE_LOW = 5   # Filter bottom X% by sharpness (Laplacian varian
 FACE_POSITION_FILTER_ENABLED = True
 
 # Landmarks (InsightFace 106)
-LEFT_CHEEK_IDX = 28
-RIGHT_CHEEK_IDX = 12
+LEFT_INNER_EYE_IDX = 89
+RIGHT_INNER_EYE_IDX = 39
 UPPER_LIP_CENTER_IDX = 62
 LOWER_LIP_CENTER_IDX = 60
 
@@ -97,8 +97,8 @@ def analyze_single_image(args):
         pitch = abs(face.pose[0])
     
     # Symmetry
-    lx, ly = lmk[LEFT_CHEEK_IDX]
-    rx, ry = lmk[RIGHT_CHEEK_IDX]
+    lx, ly = lmk[LEFT_INNER_EYE_IDX]
+    rx, ry = lmk[RIGHT_INNER_EYE_IDX]
     center_x = w / 2.0
     d_left = lx - center_x
     d_right = center_x - rx
