@@ -4,8 +4,9 @@ import random
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler
 from tensorflow.keras import mixed_precision
+
 from tensorflow.keras.applications import EfficientNetV2B0, ResNet50V2, Xception, DenseNet121
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as efficientnet_preprocess
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
@@ -301,11 +302,16 @@ def main():
         augment_params
     )
 
-    # コールバック生成関数 (Balanced Accuracyを監視)
-    def create_callbacks():
+    # コールバック生成関数 (Balanced Accuracyを監視 + Cosine Decay)
+    def create_callbacks(total_epochs, initial_lr):
+        def cosine_decay(epoch):
+            if total_epochs == 0: return initial_lr
+            # Cosine Decay: 0.5 * (1 + cos(pi * epoch / total_epochs)) * initial_lr
+            return initial_lr * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
+
         return [
             EarlyStopping(monitor='val_task_a_output_balanced_accuracy', patience=5, restore_best_weights=True, verbose=1, mode='max'),
-            ReduceLROnPlateau(monitor='val_task_a_output_balanced_accuracy', factor=0.5, patience=3, min_lr=1e-7, verbose=1, mode='max')
+            LearningRateScheduler(cosine_decay, verbose=1)
         ]
 
     # --- Phase 1: 初期学習 (Headのみ) ---
@@ -314,13 +320,13 @@ def main():
     if args.fine_tune.lower() == 'true':
         logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
     else:
-        logger.info(f"--- Training (Head only, {phase1_epochs} epochs) ---") # fine_tune=Falseならこれが本番
+        logger.info(f"--- Training (Head only, {phase1_epochs} epochs) ---")
 
     history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=phase1_epochs,
-        callbacks=create_callbacks(),
+        callbacks=create_callbacks(phase1_epochs, args.learning_rate),
         verbose=2
     )
     
@@ -373,7 +379,7 @@ def main():
                 train_ds,
                 validation_data=val_ds,
                 epochs=args.epochs,
-                callbacks=create_callbacks(),
+                callbacks=create_callbacks(args.epochs, args.learning_rate / 100),
                 verbose=2
             )
             
