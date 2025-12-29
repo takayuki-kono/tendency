@@ -256,6 +256,12 @@ def process_dataset(src_root, dst_root, args):
     final_copy_tasks = []
     skipped_count = 0
     skip_reasons = defaultdict(int)
+
+    # --- Undersampling Logic ---
+    # Calculate target count per label (using Mean)
+    counts = [len(items) for items in grouped.values()]
+    target_count = int(np.mean(counts)) if counts else 0
+    logger.info(f"Undersampling target count (mean): {target_count}")
     
     for label, items in grouped.items():
         # Personal Thresholds for Eyebrow-Eye Dist
@@ -269,6 +275,8 @@ def process_dataset(src_root, dst_root, args):
             if args.eyebrow_eye_percentile_low > 0:
                 th_eb_low = np.percentile(eb_vals, args.eyebrow_eye_percentile_low)
         
+        # Filter valid items first
+        label_valid_tasks = []
         for item in items:
             m = item['metrics']
             reason = None
@@ -288,22 +296,31 @@ def process_dataset(src_root, dst_root, args):
                 skipped_count += 1
                 skip_reasons[reason] += 1
             else:
-                src = item['path']
-                # Flatten hierarchy: dst_root/label/person_filename.jpg
-                # rel is likely "label/person/filename.jpg"
-                rel = os.path.relpath(src, src_root)
-                parts = rel.split(os.sep)
-                if len(parts) >= 2:
-                    # parts[0] is label, parts[1] is person (maybe), parts[-1] is filename
-                    # We want to keep unique filenames.
-                    # Simplest robust way: join all parts except first (label) with underscore
-                    new_filename = "_".join(parts[1:])
-                    dst = os.path.join(dst_root, parts[0], new_filename)
-                else:
-                    # Fallback
-                    dst = os.path.join(dst_root, rel)
-                
-                final_copy_tasks.append((src, dst))
+                label_valid_tasks.append(item)
+
+        # Apply Undersampling Limitation
+        import random
+        random.shuffle(label_valid_tasks) # Randomize for bias reduction
+        
+        count_before_cut = len(label_valid_tasks)
+        if count_before_cut > target_count:
+            # Cut down to target
+            label_valid_tasks = label_valid_tasks[:target_count]
+            skipped_count += (count_before_cut - target_count)
+            skip_reasons['undersampling'] += (count_before_cut - target_count)
+
+        # Create copy tasks
+        for item in label_valid_tasks:
+            src = item['path']
+            rel = os.path.relpath(src, src_root)
+            parts = rel.split(os.sep)
+            if len(parts) >= 2:
+                new_filename = "_".join(parts[1:])
+                dst = os.path.join(dst_root, parts[0], new_filename)
+            else:
+                dst = os.path.join(dst_root, rel)
+            
+            final_copy_tasks.append((src, dst))
 
     # Add invalid/read_error counts to skipped
     skipped_count += (total - len(valid_items))
