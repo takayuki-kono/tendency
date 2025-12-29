@@ -109,15 +109,15 @@ def analyze_single_image(args):
         
     symmetry = abs(d_left / d_right - 1)
     
-    # Y Diff
-    y_diff = abs(ly - ry) / h
+    # Y Diff (Raw Pixel)
+    y_diff = abs(ly - ry)
     
-    # Mouth Open
+    # Mouth Open (Raw Pixel)
     ul_y = lmk[UPPER_LIP_CENTER_IDX][1]
     ll_y = lmk[LOWER_LIP_CENTER_IDX][1]
-    mouth_open = abs(ll_y - ul_y) / h
+    mouth_open = abs(ll_y - ul_y)
     
-    # Eyebrow Eye Dist
+    # Eyebrow Eye Dist (Raw Pixel Average)
     # R: 49(brow) - 40(eye)
     # L: 104(brow) - 94(eye)
     rb_y = lmk[RIGHT_EYEBROW_IDX][1]
@@ -127,7 +127,7 @@ def analyze_single_image(args):
     
     dist_r = abs(rb_y - re_y)
     dist_l = abs(lb_y - le_y)
-    eb_eye_dist = (dist_r + dist_l) / 2.0 / h
+    eb_eye_dist = (dist_r + dist_l) / 2.0
     
     # Sharpness (Laplacian Variance) - higher = sharper
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
