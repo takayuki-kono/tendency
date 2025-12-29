@@ -7,7 +7,7 @@ from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler
 from tensorflow.keras import mixed_precision
 
-from tensorflow.keras.applications import EfficientNetV2B0, ResNet50V2, Xception, DenseNet121
+from tensorflow.keras.applications import EfficientNetV2B0, EfficientNetV2S, ResNet50V2, Xception, DenseNet121
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as efficientnet_preprocess
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
 from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
@@ -269,7 +269,6 @@ def main():
     parser.add_argument('--horizontal_flip', type=str, default='False')
     
     # Mode
-    parser.add_argument('--fine_tune', type=str, default='False')
     parser.add_argument('--epochs', type=int, default=10)
     
     args = parser.parse_args()
@@ -279,7 +278,8 @@ def main():
         'width_shift_range': args.width_shift_range,
         'height_shift_range': args.height_shift_range,
         'zoom_range': args.zoom_range,
-        'horizontal_flip': args.horizontal_flip.lower() == 'true'
+        'horizontal_flip': args.horizontal_flip.lower() == 'true',
+        'mixup_alpha': 0.0 # Placeholder for now, to be implemented properly next step
     }
     
     logger.info(f"Starting trial with params: {args}")
