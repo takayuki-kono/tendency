@@ -306,8 +306,17 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
         metrics_dict[name] = metrics_list
 
+    wd = augment_params.get('weight_decay', 0.0)
+    if wd > 0:
+        try:
+            optimizer = tf.keras.optimizers.AdamW(learning_rate=learning_rate, weight_decay=wd)
+        except AttributeError:
+             optimizer = tf.keras.optimizers.experimental.AdamW(learning_rate=learning_rate, weight_decay=wd)
+    else:
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=optimizer,
         loss=loss_dict,
         loss_weights=loss_weights_dict,
         metrics=metrics_dict,
@@ -324,6 +333,8 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--head_dropout', type=float, default=0.3)
     parser.add_argument('--learning_rate', type=float, default=1e-3)
+    parser.add_argument('--label_smoothing', type=float, default=0.0)
+    parser.add_argument('--weight_decay', type=float, default=0.0)
     
     # Augmentation Params
     parser.add_argument('--rotation_range', type=float, default=0.0) # 0.0-1.0 (fraction of 2pi)
@@ -331,8 +342,10 @@ def main():
     parser.add_argument('--height_shift_range', type=float, default=0.0)
     parser.add_argument('--zoom_range', type=float, default=0.0)
     parser.add_argument('--horizontal_flip', type=str, default='False')
+    parser.add_argument('--mixup_alpha', type=float, default=0.0)
     
     # Mode
+    parser.add_argument('--fine_tune', type=str, default='False')
     parser.add_argument('--epochs', type=int, default=10)
     
     args = parser.parse_args()
@@ -343,7 +356,9 @@ def main():
         'height_shift_range': args.height_shift_range,
         'zoom_range': args.zoom_range,
         'horizontal_flip': args.horizontal_flip.lower() == 'true',
-        'mixup_alpha': 0.0 # Placeholder for now, to be implemented properly next step
+        'mixup_alpha': args.mixup_alpha,
+        'label_smoothing': args.label_smoothing,
+        'weight_decay': args.weight_decay
     }
     
     logger.info(f"Starting trial with params: {args}")
@@ -448,8 +463,17 @@ def main():
                 metrics_dict[name] = metrics_list
             
             # 再コンパイル (学習率をさらに下げる: 1/10 -> 1/100)
+            wd = augment_params.get('weight_decay', 0.0)
+            if wd > 0:
+                try:
+                    optimizer = tf.keras.optimizers.AdamW(learning_rate=args.learning_rate / 100, weight_decay=wd)
+                except AttributeError:
+                    optimizer = tf.keras.optimizers.experimental.AdamW(learning_rate=args.learning_rate / 100, weight_decay=wd)
+            else:
+                optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate / 100)
+
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=args.learning_rate / 100),
+                optimizer=optimizer,
                 loss=loss_dict,
                 loss_weights=loss_weights_dict,
                 metrics=metrics_dict,

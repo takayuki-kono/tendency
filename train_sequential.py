@@ -162,6 +162,7 @@ def main():
         'horizontal_flip': 'False',
         'mixup_alpha': 0.0,
         'label_smoothing': 0.0,
+        'weight_decay': 0.0,
         'fine_tune': 'False'
     }
     
@@ -172,6 +173,11 @@ def main():
     # --- Step 1: Learning Rate ---
     best_lr, _ = optimize_param('learning_rate', [1e-3, 5e-4, 1e-4], current_params)
     current_params['learning_rate'] = best_lr
+    
+    # --- Step 1.5: Weight Decay (Optimizer Selection) ---
+    # 0.0=Adam, >0=AdamW
+    best_wd, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params)
+    current_params['weight_decay'] = best_wd
     
     # --- Step 2: Model Structure ---
     # Layers
