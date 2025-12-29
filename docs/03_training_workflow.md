@@ -22,7 +22,7 @@ Optuna等の外部ライブラリは使用せず（または補助的に使用�
 1. **ベースライン計測**: 全フィルタOFF状態で学習し、基準スコアを取得。
 2. **パラメータ順次固定**:
    - リストアップされたパラメータ（Pitch, Symmetry, Sharpness等）を1つずつ最適化。
-   - 各パラメータで `[0, 5, 50]` などの候補値を試し、最も検証スコアが良い値を採用・固定して次へ進む。
+   - 各パラメータで `[0, 25, 50]` などの候補値を試し、最も検証スコアが良い値を採用・固定して次へ進む。
    - 必要に応じて二分探索で微調整。
 3. **高速学習 (`components/train_for_filter_search.py`)**:
    - 探索時はエポック数を減らした軽量な学習ループを使用し、時間を短縮。
@@ -46,8 +46,13 @@ Optuna等の外部ライブラリは使用せず（または補助的に使用�
     - **Warmup**: Head層のみを数エポック学習。
     - **Fine-tuning**: 全層（または一部）を解凍し、低学習率で再学習。
 - **Data Augmentation**:
-    - RandomFlip, RandomRotation
-    - Mixup / CutMix (オプション)
+    - RandomFlip, RandomRotation, Zoom, Shift
+    - **Mixup**: Alpha値を最適化。
+    - **Label Smoothing**: Soft label化係数を最適化。
+- **最適化パラメータ**:
+    - **Model**: EfficientNetV2B0 vs EfficientNetV2S
+    - **Optimizer**: Adam vs AdamW (Weight Decayの有無で自動選択)
+    - **Learning Rate / Scheduler**: Base LRの探索 + Cosine Decayの適用
 
 ### 出力
 - `outputs/models/best_model_task_*.h5` (またはkeras形式)
