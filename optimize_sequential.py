@@ -199,31 +199,31 @@ def main():
     # Using [0, 5, 50] for reasonable range
     
     # 1. Pitch
-    val, _ = optimize_single_param('pitch', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('pitch', current_params, points=[0, 25, 50, 75])
     current_params['pitch'] = val
     
     # 2. Symmetry
-    val, _ = optimize_single_param('sym', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('sym', current_params, points=[0, 25, 50, 75])
     current_params['sym'] = val
     
     # 3. Y-Diff
-    val, _ = optimize_single_param('y_diff', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('y_diff', current_params, points=[0, 25, 50, 75])
     current_params['y_diff'] = val
     
     # 4. Mouth Open
-    val, _ = optimize_single_param('mouth_open', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('mouth_open', current_params, points=[0, 25, 50, 75])
     current_params['mouth_open'] = val
     
     # 5. Eyebrow-Eye High (Top X% cut)
-    val, _ = optimize_single_param('eb_eye_high', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('eb_eye_high', current_params, points=[0, 25, 50, 75])
     current_params['eb_eye_high'] = val
 
     # 6. Eyebrow-Eye Low (Bottom X% cut)
-    val, _ = optimize_single_param('eb_eye_low', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('eb_eye_low', current_params, points=[0, 25, 50, 75])
     current_params['eb_eye_low'] = val
     
     # 7. Sharpness Low (Bottom X% cut - blurry images)
-    val, _ = optimize_single_param('sharpness_low', current_params, points=[0, 5, 50])
+    val, _ = optimize_single_param('sharpness_low', current_params, points=[0, 25, 50, 75])
     current_params['sharpness_low'] = val
     
     # 8. Face Position
@@ -241,6 +241,22 @@ def main():
     logger.info("OPTIMIZATION COMPLETE")
     logger.info(f"Final Best Params: {current_params}")
     logger.info(f"Final Score: {final_score}")
+    logger.info("="*50)
+
+    # Generate and print the final preprocessing command
+    final_cmd = (
+        f"{PYTHON_PREPROCESS} preprocess_multitask.py --out_dir preprocessed_multitask "
+        f"--pitch_percentile {current_params['pitch']} "
+        f"--symmetry_percentile {current_params['sym']} "
+        f"--y_diff_percentile {current_params['y_diff']} "
+        f"--mouth_open_percentile {current_params['mouth_open']} "
+        f"--eyebrow_eye_percentile_high {current_params['eb_eye_high']} "
+        f"--eyebrow_eye_percentile_low {current_params['eb_eye_low']} "
+        f"--sharpness_percentile_low {current_params['sharpness_low']} "
+        f"--face_position_filter {current_params['face_pos']}"
+    )
+    logger.info("\nRun this command to apply the best filters:")
+    logger.info(final_cmd)
     logger.info("="*50)
 
 if __name__ == "__main__":
