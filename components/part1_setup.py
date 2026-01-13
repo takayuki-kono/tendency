@@ -4,6 +4,7 @@ import sys
 import shutil
 import logging
 import uuid
+import socket
 import cv2
 import numpy as np
 from imagedl import imagedl
@@ -141,6 +142,9 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
     return saved_count
 
 def main():
+    # ダウンロード時の無限ハングを防ぐため、20秒でタイムアウト
+    socket.setdefaulttimeout(20.0)
+    
     if len(sys.argv) != 3:
         print("Usage: python part1_setup.py <keyword> <output_dir>")
         sys.exit(1)
