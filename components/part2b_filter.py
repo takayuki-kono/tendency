@@ -38,6 +38,10 @@ def imread_safe(path):
         return None
 
 # --- Functions ---
+# InsightFace 106 Landmarks for face position check
+LEFT_INNER_EYE_IDX = 89
+RIGHT_INNER_EYE_IDX = 39
+
 def filter_by_main_person_insightface(input_dir, physical_delete):
     logger.info("Starting person filtering with InsightFace...")
     app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
@@ -55,6 +59,7 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
     logger.info("Extracting face embeddings with InsightFace...")
     skipped_aspect = 0
     skipped_resolution = 0
+    skipped_face_position = 0
 
     for filename in image_files:
         img_path = os.path.join(input_dir, filename)
@@ -80,6 +85,20 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
                     skipped_aspect += 1
                     continue
 
+                # 顔位置フィルター (Face Position Filter)
+                lmk = face.landmark_2d_106
+                if lmk is not None:
+                    lx, ly = lmk[LEFT_INNER_EYE_IDX]
+                    rx, ry = lmk[RIGHT_INNER_EYE_IDX]
+                    center_x = img_w / 2.0
+                    d_left = lx - center_x
+                    d_right = center_x - rx
+                    
+                    if d_left <= 0 or d_right <= 0:
+                        logger.info(f"Skipped (face_pos_invalid d_left={d_left:.1f} d_right={d_right:.1f}): {img_path}")
+                        skipped_face_position += 1
+                        continue
+
                 # 全チェック通過
                 embedding = face.embedding
                 encodings.append(embedding)
@@ -89,7 +108,7 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
         except Exception as e:
             logger.error(f"Error during InsightFace processing for {img_path}: {e}", exc_info=True)
 
-    logger.info(f"Filtering summary: skipped {skipped_aspect} (aspect), {skipped_resolution} (resolution)")
+    logger.info(f"Filtering summary: skipped {skipped_aspect} (aspect), {skipped_resolution} (resolution), {skipped_face_position} (face_position)")
 
     if len(encodings) < 2: 
         logger.info("Fewer than 2 images to cluster. Skipping filtering.")
