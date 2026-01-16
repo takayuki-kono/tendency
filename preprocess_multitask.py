@@ -39,14 +39,12 @@ DEFAULT_THRESH_RATIO = 0.03
 
 # Default Filters
 PITCH_FILTER_PERCENTILE = 0
-SYMMETRY_FILTER_PERCENTILE = 0
+SYMMETRY_FILTER_PERCENTILE = 50
 Y_DIFF_FILTER_PERCENTILE = 0
 MOUTH_OPEN_FILTER_PERCENTILE = 0
 EYEBROW_EYE_PERCENTILE_HIGH = 0 
 EYEBROW_EYE_PERCENTILE_LOW = 0  
-SHARPNESS_PERCENTILE_LOW = 5   # Filter bottom X% by sharpness (Laplacian variance)
-
-FACE_POSITION_FILTER_ENABLED = True
+SHARPNESS_PERCENTILE_LOW = 0   # Filter bottom X% by sharpness (Laplacian variance)
 
 # Landmarks (InsightFace 106)
 LEFT_INNER_EYE_IDX = 89
@@ -62,17 +60,17 @@ LEFT_EYE_IDX = 94
 
 # Global for Worker
 face_app = None
-face_pos_enabled = True
 
-def init_worker(fpe):
-    global face_app, face_pos_enabled
-    face_pos_enabled = fpe
+def init_worker():
+    global face_app
     face_app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     face_app.prepare(ctx_id=0, det_size=(320, 320))
 
 def analyze_single_image(args):
     path, label = args
     res = {'path': path, 'label': label, 'valid': False, 'metrics': {}, 'reason': ''}
+    
+    # ... logic continues ...
     
     img = imread_safe(path)
     if img is None:
@@ -96,18 +94,17 @@ def analyze_single_image(args):
     if face.pose is not None:
         pitch = abs(face.pose[0])
     
-    # Symmetry
+    # Symmetry (Face Center Offset)
     lx, ly = lmk[LEFT_INNER_EYE_IDX]
     rx, ry = lmk[RIGHT_INNER_EYE_IDX]
     center_x = w / 2.0
-    d_left = lx - center_x
-    d_right = center_x - rx
     
-    if face_pos_enabled and (d_left <= 0 or d_right <= 0):
-        res['reason'] = f'face_pos_invalid'
-        return res
-        
-    symmetry = abs(d_left / d_right - 1)
+    # Calculate offset of face center (midpoint of eyes) from image center
+    face_center_x = (lx + rx) / 2.0
+    symmetry = abs(face_center_x - center_x)
+    
+    # Face Position filter removed as requested.
+    # Symmetry now acts as center offset filter.
     
     # Y Diff (Raw Pixel)
     y_diff = abs(ly - ry)
@@ -132,6 +129,12 @@ def analyze_single_image(args):
     # Sharpness (Laplacian Variance) - higher = sharper
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+    # Aspect Ratio (Height / Width)
+    box = face.bbox
+    box_w = box[2] - box[0]
+    box_h = box[3] - box[1]
+    aspect_ratio = box_h / (box_w + 1e-6)
     
     res['valid'] = True
     res['metrics'] = {
@@ -140,15 +143,30 @@ def analyze_single_image(args):
         'y_diff': y_diff,
         'mouth_open': mouth_open,
         'eb_eye_dist': eb_eye_dist,
-        'sharpness': sharpness
+        'sharpness': sharpness,
+        'aspect_ratio': aspect_ratio
     }
     return res
 
 def copy_worker(args):
-    src, dst = args
+    src, dst, grayscale = args
     try:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(src, dst)
+        if grayscale:
+            img = imread_safe(src)
+            if img is not None:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                # 日本語パス対応: cv2.imwriteの代わりにimencodeとtofileを使用
+                ext = os.path.splitext(dst)[1]
+                result, encoded = cv2.imencode(ext, gray)
+                if result:
+                    encoded.tofile(dst)
+                else:
+                    return False
+            else:
+                return False
+        else:
+            shutil.copyfile(src, dst)
         return True
     except Exception:
         return False
@@ -158,7 +176,7 @@ def calculate_thresholds(*args, **kwargs):
     logger.warning("calculate_thresholds is deprecated and does nothing.")
     return 0,0,0,0
 
-def process_dataset(src_root, dst_root, args):
+def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     if not os.path.exists(src_root):
         logger.warning(f"Source dir not found: {src_root}")
         return 0, 0, 0
@@ -188,7 +206,7 @@ def process_dataset(src_root, dst_root, args):
     os.makedirs(cache_dir, exist_ok=True)
     
     # Include face_pos_filter arg in cache key because it affects analysis result (valid bit)
-    cache_key = f"{os.path.basename(src_root)}_{total}_fp={args.face_pos_filter}"
+    cache_key = f"{os.path.basename(src_root)}_{total}"
     cache_file = os.path.join(cache_dir, f"metrics_{hashlib.md5(cache_key.encode()).hexdigest()}.pkl")
     
     results = []
@@ -209,7 +227,7 @@ def process_dataset(src_root, dst_root, args):
     if not results:
         logger.info(f"Analyzing {total} images...")
         
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=(args.face_pos_filter,)) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker) as executor:
             for r in executor.map(analyze_single_image, files):
                 results.append(r)
                 if len(results) % 100 == 0:
@@ -245,8 +263,17 @@ def process_dataset(src_root, dst_root, args):
     if args.sharpness_percentile_low > 0:
         sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
         th_sharpness_low = np.percentile(sharp_vals, args.sharpness_percentile_low)
+        
+    # Aspect Ratio threshold (Two-sided)
+    th_ar_low = 0
+    th_ar_high = 999
+    if args.aspect_ratio_cutoff > 0:
+        ar_vals = [r['metrics']['aspect_ratio'] for r in valid_items if 'aspect_ratio' in r['metrics']]
+        if ar_vals:
+            th_ar_low = np.percentile(ar_vals, args.aspect_ratio_cutoff)
+            th_ar_high = np.percentile(ar_vals, 100 - args.aspect_ratio_cutoff)
     
-    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness<={th_sharpness_low:.1f}")
+    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness<={th_sharpness_low:.1f}, AR<={th_ar_low:.3f}|>={th_ar_high:.3f}")
     
     # --- Filtering & Grouping ---
     grouped = defaultdict(list)
@@ -287,6 +314,7 @@ def process_dataset(src_root, dst_root, args):
             elif args.y_diff_percentile > 0 and m['y_diff'] > th_y: reason = 'y_diff_global'
             elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth: reason = 'mouth_open_global'
             elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low: reason = 'sharpness_low_global'
+            elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high): reason = 'aspect_ratio_global'
             
             # Personal Check
             elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high): reason = 'eb_eye_high_personal'
@@ -298,12 +326,12 @@ def process_dataset(src_root, dst_root, args):
             else:
                 label_valid_tasks.append(item)
 
-        # Apply Undersampling Limitation
+        # Apply Undersampling Limitation (skip for validation)
         import random
         random.shuffle(label_valid_tasks) # Randomize for bias reduction
         
         count_before_cut = len(label_valid_tasks)
-        if count_before_cut > target_count:
+        if not skip_undersampling and count_before_cut > target_count:
             # Cut down to target
             label_valid_tasks = label_valid_tasks[:target_count]
             skipped_count += (count_before_cut - target_count)
@@ -320,7 +348,7 @@ def process_dataset(src_root, dst_root, args):
             else:
                 dst = os.path.join(dst_root, rel)
             
-            final_copy_tasks.append((src, dst))
+            final_copy_tasks.append((src, dst, args.grayscale))
 
     # Add invalid/read_error counts to skipped
     skipped_count += (total - len(valid_items))
@@ -352,17 +380,19 @@ def main():
     parser.add_argument("--symmetry_percentile", type=int, default=SYMMETRY_FILTER_PERCENTILE, help="Symmetry filter percentile (0-100)")
     parser.add_argument("--y_diff_percentile", type=int, default=Y_DIFF_FILTER_PERCENTILE, help="Y-diff filter percentile (0-100)")
     parser.add_argument("--mouth_open_percentile", type=int, default=MOUTH_OPEN_FILTER_PERCENTILE, help="Mouth open filter percentile (0-100)")
-    parser.add_argument("--face_position_filter", type=str, default=str(FACE_POSITION_FILTER_ENABLED), help="Enable face position filter (True/False)")
     
     # New Args
     parser.add_argument("--eyebrow_eye_percentile_high", type=int, default=EYEBROW_EYE_PERCENTILE_HIGH, help="Filter top X% of eyebrow-eye distance")
     parser.add_argument("--eyebrow_eye_percentile_low", type=int, default=EYEBROW_EYE_PERCENTILE_LOW, help="Filter bottom X% of eyebrow-eye distance")
     parser.add_argument("--sharpness_percentile_low", type=int, default=SHARPNESS_PERCENTILE_LOW, help="Filter bottom X% by sharpness (blurry images)")
     
-    args = parser.parse_args()
+    # Aspect Ratio
+    parser.add_argument("--aspect_ratio_cutoff", type=int, default=0, help="Filter both top/bottom X% outliers in aspect ratio")
     
-    # Parse boolean
-    args.face_pos_filter = (args.face_position_filter.lower() == 'true')
+    # Grayscale
+    parser.add_argument("--grayscale", action="store_true", help="Convert images to grayscale")
+    
+    args = parser.parse_args()
     
     prepro_dir = args.out_dir
     prepro_train = os.path.join(prepro_dir, "train")
@@ -383,6 +413,8 @@ def main():
         logger.info(f"  Mouth Pct: {args.mouth_open_percentile}")
         logger.info(f"  Eb-Eye Pct (High/Low): {args.eyebrow_eye_percentile_high} / {args.eyebrow_eye_percentile_low} (PER PERSON)")
         logger.info(f"  Sharpness Pct Low: {args.sharpness_percentile_low}")
+        logger.info(f"  Aspect Ratio Cutoff: {args.aspect_ratio_cutoff}")
+        logger.info(f"  Grayscale: {args.grayscale}")
         logger.info("=" * 60)
         
         process_dataset(args.train_dir, prepro_train, args)
