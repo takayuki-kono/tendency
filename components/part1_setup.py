@@ -24,6 +24,17 @@ ENGINES = [
     'GoogleImageClient'
 ]
 
+# Blocked Domains (Malwarebytes flagged)
+BLOCKED_DOMAINS = [
+    "clubberia.com",
+    "xxup.org",
+    "runwaylanderplace.com",
+    "trend-answer.com",
+    "www.517japan.com.w.kunlungr.com",
+    "go.go1go.sbs",
+    "p-content.securestudies.com"
+]
+
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
@@ -182,6 +193,40 @@ def main():
                 
                 image_infos = client.search(skey, filters={'size': 'large'})
                 if not image_infos: continue
+                
+                # --- Domain Filtering ---
+                if image_infos:
+                    # Attempt to identify the URL key dynamically
+                    url_key = None
+                    sample = image_infos[0]
+                    # Common keys for URL in crawlers
+                    candidates = ['link', 'image_link', 'file_url', 'original_link', 'source_link']
+                    for k in candidates:
+                        if k in sample:
+                            url_key = k
+                            break
+                    
+                    if url_key is None:
+                        # Fallback: look for http string values
+                        for k, v in sample.items():
+                            if isinstance(v, str) and v.startswith('http'):
+                                url_key = k
+                                break
+                    
+                    if url_key:
+                        logger.info(f"Applying domain filter using key: '{url_key}'")
+                        original_count = len(image_infos)
+                        filtered_infos = []
+                        for info in image_infos:
+                            url = info.get(url_key, "")
+                            if not any(blocked in url for blocked in BLOCKED_DOMAINS):
+                                filtered_infos.append(info)
+                        
+                        image_infos = filtered_infos
+                        if len(image_infos) < original_count:
+                            logger.info(f"Blocked {original_count - len(image_infos)} images from suspicious domains.")
+                    else:
+                        logger.warning("Could not determine URL key for filtering. Proceeding without domain filter.")
                 
                 downloaded = client.download(image_infos)
                 if downloaded:

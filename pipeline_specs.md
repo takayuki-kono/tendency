@@ -35,6 +35,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     -   **エンジン:** Yahoo, Bing, Baidu, Google (pyimagedl使用)
     -   **キーワード:** 「〇〇 女優」に固定。
     -   **枚数制限:** 各エンジン最大1000枚。
+    -   **ドメインフィルタリング:** Malwarebytes等で警告される不正ドメイン（clubberia, xxupなど）からのダウンロードをブロック。
 2.  **Part 1 (`components/part1_setup.py`):**
     -   **顔検出:** InsightFaceを使用して顔を検出。
     -   **回転補正:** 顔の向きを正立に補正。
@@ -46,7 +47,10 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     -   **重複排除:** 特徴量ベクトルを計算し、DBSCANを用いて「ほぼ同じ画像」を削除。
     -   **削除先:** `deleted_duplicates/`（論理削除モード時）
 4.  **Part 2b (`components/part2b_filter.py`):**
-    -   **外れ値除去:** クラスタリングを行い、主となる人物以外を除去。
+    -   **顔位置フィルター:** 内側目ランドマーク(89,39)を使用し、横向きの顔を検出・除外。
+    -   **3D頬幅フィルター:** 3Dランドマーク(3,13)の3Dユークリッド距離を使用し、頬幅比率0.7未満の横顔を除外。
+    -   **アスペクト比フィルター:** 0.9〜1.8の範囲外を除外。
+    -   **外れ値除去:** DBSCANクラスタリング(eps=0.35)を行い、主となる人物以外を除去。
     -   **削除先:** `deleted_outliers/`（論理削除モード時）
     -   **整理:** 処理後、`rotated/` から親ディレクトリへ画像を移動。
 
@@ -59,4 +63,5 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ... (以下、変更なし) ...
 
 ## Author
-Gemini (Updated 2025-12-28)
+Gemini (Updated 2026-01-20)
+
