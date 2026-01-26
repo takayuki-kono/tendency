@@ -21,18 +21,10 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 KEYWORDS = [
-    "奈緒"
-    # , "黒谷友香", "比嘉愛美", "石野真子", "戸田恵梨香", "菅野美穂", "宮沢りえ", "中山美穂", 
-    # "髙橋ひかる", "桜井日奈子", "松本まりか", "松下由樹", "市川由衣", "新川優愛", "堀田真由", 
-    # "国仲涼子", "黒島結菜", "大塚寧々", "鈴木京香", "森口瑤子", "中村アン", "大島優子", 
-    # "上白石萌歌", "賀来千香子", "葵わかな", "薬師丸ひろ子", "門脇麦", "秋田汐梨", "武井咲", 
-    # "吉高由里子", "川栄李奈", "中条あやみ", "観月ありさ", "杏", "木村文乃", "清原果耶", 
-    # "稲森いずみ", "西野七瀬", "土屋太鳳", "石原さとみ", "多部未華子", "伊藤沙莉", "今井美樹", 
-    # "和久井映見", "本田翼", "片桐はいり", "仲里依紗", "高橋メアリージュン", "内田理央", 
-    # "大原櫻子", "小雪", "安藤玉恵", "石井杏奈", "安田成美", "橋本愛"
+    "有村架純",
 ] 
 BASE_OUTPUT_DIR = "master_data"
-PHYSICAL_DELETE = False # True: Permanently delete, False: Move to 'deleted' folder
+PHYSICAL_DELETE = True # True: Permanently delete, False: Move to 'deleted' folder
 
 import subprocess
 

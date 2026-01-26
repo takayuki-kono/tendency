@@ -35,6 +35,8 @@ BLOCKED_DOMAINS = [
     "p-content.securestudies.com"
 ]
 
+SUSPICIOUS_EXTENSIONS = ('.exe', '.scr', '.bat', '.cmd', '.msi', '.vbs', '.js', '.ps1', '.zip', '.rar', '.7z', '.html', '.php')
+
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
@@ -49,12 +51,40 @@ logger = logging.getLogger(__name__)
 
 # --- Helper Functions ---
 
+def validate_image_header(data_bytes):
+    """Check against common image file headers."""
+    if len(data_bytes) < 12: return False
+    # JPEG
+    if data_bytes.startswith(b'\xff\xd8\xff'): return True
+    # PNG
+    if data_bytes.startswith(b'\x89\x50\x4e\x47\x0d\x0a\x1a\x0a'): return True
+    # BMP
+    if data_bytes.startswith(b'BM'): return True
+    # WEBP
+    if data_bytes.startswith(b'RIFF') and data_bytes[8:12] == b'WEBP': return True
+    return False
+
 def imread_safe(path):
     try:
+        # 1. File Size Check (Prevent DoS / excessive memory usage)
+        file_size = os.path.getsize(path)
+        if file_size > 20 * 1024 * 1024: # Limit to 20MB
+            logger.warning(f"File too large ({file_size} bytes): {path}")
+            return None
+        if file_size < 100: # Too small to be a valid image
+            return None
+
         with open(path, "rb") as f:
-            bytes_data = bytearray(f.read())
-            numpy_array = np.asarray(bytes_data, dtype=np.uint8)
-            img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
+            bytes_data = f.read()
+
+        # 2. Magic Number Check (Verify it's actually an image)
+        if not validate_image_header(bytes_data):
+            logger.warning(f"Invalid file header (not an image): {path}")
+            return None
+
+        # Convert to numpy array for OpenCV
+        numpy_array = np.frombuffer(bytes_data, dtype=np.uint8)
+        img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
         return img
     except Exception as e:
         logger.warning(f"Failed to read image {path}: {e}")
@@ -219,8 +249,15 @@ def main():
                         filtered_infos = []
                         for info in image_infos:
                             url = info.get(url_key, "")
-                            if not any(blocked in url for blocked in BLOCKED_DOMAINS):
-                                filtered_infos.append(info)
+                            if any(blocked in url for blocked in BLOCKED_DOMAINS):
+                                continue
+                            
+                            # Filter suspicious extensions
+                            url_clean = url.split('?')[0].lower()
+                            if url_clean.endswith(SUSPICIOUS_EXTENSIONS):
+                                continue
+                                
+                            filtered_infos.append(info)
                         
                         image_infos = filtered_infos
                         if len(image_infos) < original_count:
