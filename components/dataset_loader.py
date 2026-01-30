@@ -10,6 +10,8 @@ def get_class_names(directory):
     Returns sorted list of label names (adfh, aefh, etc.)
     """
     # Get direct subdirectories (labels)
+    if not os.path.exists(directory):
+        return []
     labels = [d for d in os.listdir(directory) 
               if os.path.isdir(os.path.join(directory, d))]
     return sorted(labels)

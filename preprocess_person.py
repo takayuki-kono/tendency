@@ -324,6 +324,10 @@ def main():
         if os.path.exists(prepro_dir):
             shutil.rmtree(prepro_dir)
 
+        # Ensure directories exist (even if empty)
+        os.makedirs(prepro_train, exist_ok=True)
+        os.makedirs(prepro_valid, exist_ok=True)
+
         logger.info("Starting Person Preprocessing...")
         process_dataset(args.train_dir, prepro_train, args)
         process_dataset(args.val_dir, prepro_valid, args, skip_undersampling=True) # Usually don't undersample validation
