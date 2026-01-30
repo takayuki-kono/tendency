@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 KEYWORDS = [
-    "有村架純",
+    "綾瀬はるか",
+    "木村多江",
+    "大塚寧々",
+    "国仲涼子"
 ] 
 BASE_OUTPUT_DIR = "master_data"
 PHYSICAL_DELETE = True # True: Permanently delete, False: Move to 'deleted' folder
