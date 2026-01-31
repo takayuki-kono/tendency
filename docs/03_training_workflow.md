@@ -133,7 +133,7 @@ del outputs\cache\filter_svm_opt_cache.json
 # ラベルフォルダへの整理 (master_data直下 -> master_data/ラベル/)
 .venv_windows_gpu\Scripts\python.exe util/reorganize_by_label.py
 
-# Train/Validation 分割 (master_data -> train/validation)
+# Train/Validation 分割 (画像数が多い順に上位50%をTrainへ)
 .venv_windows_gpu\Scripts\python.exe util/create_person_split.py
 ```
 

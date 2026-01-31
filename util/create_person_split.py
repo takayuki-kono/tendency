@@ -23,7 +23,7 @@ TRAIN_DIR = os.path.join(PROJECT_ROOT, "train")
 VAL_DIR = os.path.join(PROJECT_ROOT, "validation")
 
 def find_all_people():
-    """master_data内の全人物を検索し、(人物名, ラベル, フルパス)のリストを返す"""
+    """master_data内の全人物を検索し、(人物名, ラベル, フルパス, 画像数)のリストを返す"""
     people = []
     
     if not os.path.exists(MASTER_DATA_DIR):
@@ -42,10 +42,18 @@ def find_all_people():
             person_path = os.path.join(label_path, person_name)
             
             if os.path.isdir(person_path):
+                # 画像数をカウント
+                valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+                image_count = len([
+                    f for f in os.listdir(person_path) 
+                    if f.lower().endswith(valid_extensions)
+                ])
+                
                 people.append({
                     "name": person_name,
                     "label": label_dir,
-                    "path": person_path
+                    "path": person_path,
+                    "image_count": image_count
                 })
     
     return people
@@ -55,6 +63,7 @@ def copy_person(person_info, dest_root):
     src = person_info["path"]
     label = person_info["label"]
     name = person_info["name"]
+    count = person_info["image_count"]
     
     # コピー先: dest_root/label/person_name
     dest = os.path.join(dest_root, label, name)
@@ -68,11 +77,11 @@ def copy_person(person_info, dest_root):
     
     # コピー実行
     shutil.copytree(src, dest)
-    print(f"  コピー: {name} -> {dest}")
+    print(f"  コピー: {name} ({count}枚) -> {dest}")
 
 def create_split():
     print("=" * 50)
-    print("Train/Validation 分割スクリプト (ラベルごとの交互振り分け版)")
+    print("Train/Validation 分割スクリプト (画像数上位50% Train版)")
     print("=" * 50)
     print(f"プロジェクトルート: {PROJECT_ROOT}")
     print(f"データソース: {MASTER_DATA_DIR}")
@@ -100,17 +109,44 @@ def create_split():
     print("ラベルごとの振り分け:")
     
     for label, group in sorted(people_by_label.items()):
-        # 名前順でソートして順序を固定
-        group.sort(key=lambda x: x['name'])
-        print(f"  [{label}] Total: {len(group)}")
+        # 画像数が多い順にソート
+        group.sort(key=lambda x: x['image_count'], reverse=True)
         
-        for i, p in enumerate(group):
-            if i % 2 == 0:
-                train_group.append(p)
-                print(f"    - {p['name']} -> Train")
-            else:
-                val_group.append(p)
-                print(f"    - {p['name']} -> Validation")
+        total_people = len(group)
+        # 上位50%を計算（切り上げでTrainを多めにするか、ユーザー指定通りバッサリ50%か。
+        # 「上位50%」という言葉通りなら、全体の半分。
+        # 10人 -> 5人。11人 -> 5.5人 (5人 or 6人)
+        # ここでは math.ceil を使って「少なくとも半数はTrain」にするか、
+        # シンプルに半分で切るか。
+        # Pythonのスライス [:n] は n個要素を取る。
+        # n = total_people // 2 だと、11 // 2 = 5。残り6人がValidation。
+        # Trainが多いほうが一般的には嬉しいが、「上位50%」という表現には忠実。
+        # 今回は割り算(商)を使います。
+        split_idx = total_people // 2
+        
+        # もし1人しかいない場合はTrainに入れる (0になってしまうのを防ぐため例外処理する？)
+        # いや、1 // 2 = 0 なのでTrain 0人, Val 1人になってしまう。
+        # 1人しかいないならTrainに入れたいのが人情だが、「上位50%」なら0になる。
+        # ここは「最低1人はTrain」というロジックを入れるか、
+        # あるいは「上位50% (端数切り上げ)」で (total + 1) // 2 にするか。
+        # (11+1)//2 = 6 (Train 6, Val 5)
+        # (1+1)//2 = 1 (Train 1, Val 0)
+        # こっちのほうが安全そう。
+        
+        split_idx = (total_people + 1) // 2
+        
+        train_subset = group[:split_idx]
+        val_subset = group[split_idx:]
+        
+        print(f"  [{label}] Total: {total_people}")
+        
+        for p in train_subset:
+            train_group.append(p)
+            print(f"    - {p['name']} ({p['image_count']}枚) -> Train")
+            
+        for p in val_subset:
+            val_group.append(p)
+            print(f"    - {p['name']} ({p['image_count']}枚) -> Validation")
     print()
     
     print(f"Train グループ ({len(train_group)}人)")
