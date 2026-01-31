@@ -37,15 +37,23 @@ def count_files(directory):
     return count
 
 def load_cache():
+    current_file_count = count_files("train") + count_files("validation")
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                cache = json.load(f)
+            # ファイル数が変わっていたらキャッシュクリア
+            if cache.get('__file_count__') != current_file_count:
+                logger.info(f"Data changed ({cache.get('__file_count__')} -> {current_file_count}). Clearing cache.")
+                return {'__file_count__': current_file_count}
+            return cache
         except:
-            return {}
-    return {}
+            return {'__file_count__': current_file_count}
+    return {'__file_count__': current_file_count}
 
 def save_cache(cache):
+    # ファイル数も保存
+    cache['__file_count__'] = count_files("train") + count_files("validation")
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
@@ -121,24 +129,65 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         return 0.0
 
 def optimize_single_param(target_name, current_params, model_name, points=[0, 25, 50]):
+    """
+    1つのパラメータを最適化する。
+    Step 1: pointsで指定された点を評価
+    Step 2: 上位2点の中間を探索（2分探索的アプローチ）
+    """
     logger.info(f"\n>>> Optimizing {target_name} (Points: {points}) [Model: {model_name}] <<<")
     
-    # Independent Optimization: Baseline is all 0
-    test_params = {
-        'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
-        'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0
-    }
-    
-    scores = {}
-    for val in points:
+    best_val = current_params.get(target_name, 0)
+    best_score = -1.0
+    history = {}
+
+    def evaluate_wrapper(val):
+        if val in history: return history[val]
+        
+        # Independent Optimization: Always start from all-zero params
+        test_params = {
+            'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
+            'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0
+        }
         test_params[target_name] = val
+        
         score = run_trial(
             test_params['pitch'], test_params['sym'], test_params['y_diff'], test_params['mouth_open'],
             test_params['eb_eye_high'], test_params['eb_eye_low'],
             test_params['sharpness_low'], model_name=model_name
         )
-        scores[val] = score
+        history[val] = score
+        return score
+
+    # Step 1: Evaluate initial points
+    logger.info(f"Step 1: Evaluate points {points}")
+    scores = {}
+    for p in points:
+        scores[p] = evaluate_wrapper(p)
+    
+    # Step 2: Binary Search Refinement
+    logger.info("Step 2: Binary Search Refinement")
+    while True:
+        sorted_history = sorted(history.items(), key=lambda x: x[1], reverse=True)
+        if len(sorted_history) < 2: break
+            
+        best1_val, best1_score = sorted_history[0]
+        best2_val, best2_score = sorted_history[1]
         
+        mid_val = int((best1_val + best2_val) / 2)
+        
+        if mid_val in history:
+            logger.info(f"Refinement converged at {mid_val} (Already evaluated).")
+            # Safety fallback: Choose the lower value between the top 2
+            safer_val = min(best1_val, best2_val)
+            logger.info(f"Selecting lower value for reproducibility/safety: {safer_val}")
+            best_val = safer_val
+            best_score = history[safer_val]
+            logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
+            return best_val, best_score
+            
+        logger.info(f"Refining: Best1={best1_val}({best1_score:.4f}), Best2={best2_val}({best2_score:.4f}) -> Next: {mid_val}")
+        scores[mid_val] = evaluate_wrapper(mid_val)
+            
     best_val = max(scores, key=scores.get)
     best_score = scores[best_val]
     logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
@@ -197,15 +246,50 @@ def main():
     grayscale_best = False
     if score_gray > score_color:
         grayscale_best = True
-        logger.info("Grayscale selected.")
+        logger.info(f"Grayscale selected (Score: {score_gray} > {score_color})")
     else:
-        logger.info("Color selected.")
+        logger.info(f"Color selected (Score: {score_color} >= {score_gray})")
         
     current_params['grayscale'] = grayscale_best
+    
+    # Phase 2: Global Scaling Optimization
+    logger.info("\n>>> Phase 2: Global Scaling Optimization (x1.0, x0.5, x0.25) <<<")
+    
+    best_independent_params = current_params.copy()
+    scaling_factors = [1.0, 0.5, 0.25]
+    
+    best_scaling_score = -1.0
+    best_scaled_params = None
+    best_factor = 1.0
+    
+    for factor in scaling_factors:
+        scaled_params = {
+            k: int(v * factor) for k, v in best_independent_params.items() if k != 'grayscale'
+        }
+        scaled_params['grayscale'] = best_independent_params.get('grayscale', False)
+        logger.info(f"Testing Scaling Factor x{factor}: {scaled_params}")
+        
+        score = run_trial(
+            scaled_params['pitch'], scaled_params['sym'], scaled_params['y_diff'], scaled_params['mouth_open'],
+            scaled_params['eb_eye_high'], scaled_params['eb_eye_low'],
+            scaled_params['sharpness_low'], grayscale=scaled_params['grayscale'], model_name=best_model
+        )
+        
+        if score > best_scaling_score:
+            best_scaling_score = score
+            best_scaled_params = scaled_params
+            best_factor = factor
+            
+    logger.info(f"Phase 2 Complete. Best Factor: x{best_factor} (Score: {best_scaling_score})")
+    current_params = best_scaled_params
+    final_score = best_scaling_score
     
     logger.info("\n" + "="*50)
     logger.info("OPTIMIZATION COMPLETE")
     logger.info(f"Final Best Params: {current_params}")
+    logger.info(f"Final Best Model: {best_model}")
+    logger.info(f"Final Score: {final_score}")
+    logger.info("="*50)
     
     final_cmd = (
         f"{PYTHON_PREPROCESS} preprocess_person.py --out_dir preprocessed_person "
@@ -218,11 +302,12 @@ def main():
         f"--eyebrow_eye_percentile_low {current_params['eb_eye_low']} "
         f"--sharpness_percentile_low {current_params['sharpness_low']} "
     )
-    if grayscale_best:
+    if current_params.get('grayscale', False):
         final_cmd += "--grayscale "
         
     logger.info("\nRun this command to apply the best filters:")
     logger.info(final_cmd)
+    logger.info(f"\nRecommended Model for Training: {best_model}")
     logger.info("="*50)
 
 if __name__ == "__main__":
