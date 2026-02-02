@@ -35,8 +35,6 @@ BLOCKED_DOMAINS = [
     "p-content.securestudies.com"
 ]
 
-SUSPICIOUS_EXTENSIONS = ('.exe', '.scr', '.bat', '.cmd', '.msi', '.vbs', '.js', '.ps1', '.zip', '.rar', '.7z', '.html', '.php')
-
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
@@ -48,6 +46,28 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# --- Global Timeout Configuration ---
+socket.setdefaulttimeout(20.0)
+
+try:
+    import requests
+    # Monkeypatch requests to enforce timeout globally
+    # This ensures that even third-party libraries (like imagedl) that might ignore timeouts
+    # will still time out after 20 seconds.
+    _original_request = requests.Session.request
+    
+    def _patched_request(self, method, url, *args, **kwargs):
+        if 'timeout' not in kwargs or kwargs['timeout'] is None:
+            kwargs['timeout'] = 20
+        return _original_request(self, method, url, *args, **kwargs)
+    
+    requests.Session.request = _patched_request
+    logger.info("Applied global timeout patch to requests library (20s).")
+except ImportError:
+    logger.warning("requests library not found. Global HTTP timeout patch could not be applied.")
+
+SUSPICIOUS_EXTENSIONS = ('.exe', '.scr', '.bat', '.cmd', '.msi', '.vbs', '.js', '.ps1', '.zip', '.rar', '.7z', '.html', '.php')
 
 # --- Helper Functions ---
 
@@ -183,8 +203,8 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
     return saved_count
 
 def main():
-    # ダウンロード時の無限ハングを防ぐため、20秒でタイムアウト
-    socket.setdefaulttimeout(20.0)
+    # ダウンロード時の無限ハングを防ぐため、20秒でタイムアウト（グローバル設定に移動済み）
+
     
     if len(sys.argv) != 3:
         print("Usage: python part1_setup.py <keyword> <output_dir>")

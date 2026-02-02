@@ -6,7 +6,7 @@ from sklearn.cluster import DBSCAN
 
 # ====== 設定 ======
 image_dir = "input_images"  # 例: "./images"
-tolerance = 0.349 # 類似顔認識のしきい値
+tolerance = 0.325 # 類似顔認識のしきい値
 output_dir = "grouped_faces" # 分類済みフォルダ
 unclassified_dir = os.path.join(output_dir, "unclassified") # 未分類フォルダ
 

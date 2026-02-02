@@ -12,14 +12,6 @@ except Exception as e:
     print(f"MediaPipe initialization failed: {e}")
     exit(1)
 
-# ランドマークインデックス
-NOSE_TIP = 1  # 鼻の頂点
-LEFT_EYE_INNER = 133  # 左目の内側
-RIGHT_EYE_INNER = 362  # 右目の内側
-# ご指定の輪郭インデックス（左右に分割）
-LEFT_CONTOUR_INDICES = [10, 93]  # 左側輪郭
-RIGHT_CONTOUR_INDICES = [152, 323]  # 右側輪郭
-
 def process_image(image_path, output_dir):
     # 画像読み込み
     image = cv2.imread(image_path)
@@ -39,29 +31,11 @@ def process_image(image_path, output_dir):
         landmarks = mp_results.multi_face_landmarks[0].landmark
         mp_landmarks = []
         
-        # 鼻の頂点
-        nose_tip = landmarks[NOSE_TIP]
-        nose_x = nose_tip.x * image.shape[1]
-        nose_y = nose_tip.y * image.shape[0]
-        mp_landmarks.append((int(nose_x), int(nose_y)))
-        
-        # 左右の輪郭点から鼻の頂点にy座標が近い点（各1点）
-        left_contour_points = [(i, landmarks[i].x * image.shape[1], landmarks[i].y * image.shape[0]) for i in LEFT_CONTOUR_INDICES]
-        right_contour_points = [(i, landmarks[i].x * image.shape[1], landmarks[i].y * image.shape[0]) for i in RIGHT_CONTOUR_INDICES]
-        left_y_closest = min(left_contour_points, key=lambda p: abs(p[2] - nose_y))
-        right_y_closest = min(right_contour_points, key=lambda p: abs(p[2] - nose_y))
-        mp_landmarks.extend([(int(left_y_closest[1]), int(left_y_closest[2])), (int(right_y_closest[1]), int(right_y_closest[2]))])
-        
-        # 左右の輪郭点から鼻の頂点にx座標が近い点（各1点）
-        left_x_closest = min(left_contour_points, key=lambda p: abs(p[1] - nose_x))
-        right_x_closest = min(right_contour_points, key=lambda p: abs(p[1] - nose_x))
-        mp_landmarks.extend([(int(left_x_closest[1]), int(left_x_closest[2])), (int(right_x_closest[1]), int(right_x_closest[2]))])
-        
-        # 目の内側2点
-        left_eye_inner = landmarks[LEFT_EYE_INNER]
-        right_eye_inner = landmarks[RIGHT_EYE_INNER]
-        mp_landmarks.append((int(left_eye_inner.x * image.shape[1]), int(left_eye_inner.y * image.shape[0])))
-        mp_landmarks.append((int(right_eye_inner.x * image.shape[1]), int(right_eye_inner.y * image.shape[0])))
+        # 全ランドマークを取得
+        for landmark in landmarks:
+            x = int(landmark.x * image.shape[1])
+            y = int(landmark.y * image.shape[0])
+            mp_landmarks.append((x, y))
         
     except Exception as e:
         print(f"MediaPipe processing failed for {image_path}: {e}")
@@ -72,7 +46,7 @@ def process_image(image_path, output_dir):
         cv2.circle(image, point, 2, (0, 255, 0), -1)
     
     # ラベル追加
-    cv2.putText(image, 'MediaPipe (Selected Landmarks)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(image, 'MediaPipe (All Landmarks)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
     
     # 保存
     output_path = os.path.join(output_dir, f"result_{os.path.basename(image_path)}")

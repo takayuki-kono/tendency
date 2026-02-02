@@ -1,9 +1,9 @@
 """
-create_person_split.py
+create_single_split.py
 master_data内の人物フォルダをtrain/validationに振り分けるスクリプト
 
 使用方法:
-    python util/create_person_split.py
+    python util/create_single_split.py
 
 動作:
     1. master_data/ラベル/人物名 の構造をスキャン

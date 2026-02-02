@@ -1,14 +1,16 @@
 import cv2
 import numpy as np
-import face_alignment
+import torch
+from decalib.deca import DECA
+from decalib.utils import util
 import os
 import glob
 
-# 初期化（3Dランドマークを指定）
+# 初期化
 try:
-    fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.THREE_D, flip_input=False, device='cpu')
+    deca = DECA(device='cuda' if torch.cuda.is_available() else 'cpu')
 except Exception as e:
-    print(f"face-alignment initialization failed: {e}")
+    print(f"DECA initialization failed: {e}")
     exit(1)
 
 def process_image(image_path, output_dir):
@@ -20,24 +22,24 @@ def process_image(image_path, output_dir):
     
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     
-    # face-alignmentで3Dランドマーク取得
+    # DECAで3Dランドマーク取得
     try:
-        fa_landmarks = fa.get_landmarks(image_rgb)
-        if fa_landmarks is None or len(fa_landmarks) == 0:
-            print(f"No landmarks detected in {image_path}")
-            return
-        # 3Dランドマークから2D投影（x, yのみ使用）
-        fa_points = [(int(x), int(y)) for x, y, z in fa_landmarks[0]]
+        # DECAの入力形式に変換
+        image_tensor = util.load_image(image_path, deca)
+        codedict = deca.encode(image_tensor)
+        opdict = deca.decode(codedict)
+        landmarks = opdict['landmarks2d']  # 2D投影された3Dランドマーク
+        fa_points = [(int(x), int(y)) for x, y in landmarks[0].cpu().numpy()]
     except Exception as e:
-        print(f"face-alignment processing failed for {image_path}: {e}")
+        print(f"DECA processing failed for {image_path}: {e}")
         return
     
     # ランドマークを描画
     for point in fa_points:
-        cv2.circle(image, point, 2, (0, 0, 255), -1)
+        cv2.circle(image, point, 2, (255, 0, 0), -1)
     
     # ラベル追加
-    cv2.putText(image, 'face-alignment (3D)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    cv2.putText(image, 'DECA', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
     
     # 保存
     output_path = os.path.join(output_dir, f"result_{os.path.basename(image_path)}")
@@ -45,7 +47,7 @@ def process_image(image_path, output_dir):
 
 if __name__ == '__main__':
     input_dir = 'input_images'
-    output_dir = 'output_images_face_alignment'
+    output_dir = 'output_images_deca'
     os.makedirs(output_dir, exist_ok=True)
     
     image_paths = glob.glob(os.path.join(input_dir, '*.jpg')) + glob.glob(os.path.join(input_dir, '*.png'))

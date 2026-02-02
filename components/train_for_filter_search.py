@@ -36,7 +36,7 @@ TRAIN_DIR = 'preprocessed_multitask/train'
 VALIDATION_DIR = 'preprocessed_multitask/validation'
 
 # ラベル定義
-TASK_A_LABELS = ['a', 'b', 'c']
+TASK_A_LABELS = ['a', 'b']
 TASK_B_LABELS = ['d', 'e']
 TASK_C_LABELS = ['f', 'g']
 TASK_D_LABELS = ['h', 'i']

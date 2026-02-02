@@ -20,7 +20,7 @@ IMG_SIZE = 224
 BATCH_SIZE = 32
 
 # Task A ラベル
-TASK_A_LABELS = ['a', 'b', 'c']
+TASK_A_LABELS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']
 
 
 def load_validation_data():

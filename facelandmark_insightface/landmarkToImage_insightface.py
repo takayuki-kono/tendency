@@ -35,10 +35,12 @@ def process_image(image_path, output_dir):
             print(f"Insufficient landmarks in {image_path}")
             return
         
-        # すべてのランドマークを描画
-        for point in landmarks:
+        # すべてのランドマークを描画（インデックスを表示）
+        for idx, point in enumerate(landmarks):
             x, y = int(point[0]), int(point[1])
             cv2.circle(image, (x, y), 1, (0, 255, 0), -1)
+            # インデックスを表示
+            cv2.putText(image, str(idx), (x + 5, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         # ラベル追加
         cv2.putText(image, 'InsightFace (All 106 Landmarks)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
@@ -59,5 +61,5 @@ if __name__ == '__main__':
     image_paths = glob.glob(os.path.join(input_dir, '*.jpg')) + glob.glob(os.path.join(input_dir, '*.png'))
     
     for image_path in image_paths:
-        print(f"Processing {image_path}")
+        print(f"\nProcessing {image_path}")
         process_image(image_path, output_dir)

@@ -42,6 +42,13 @@ def imread_safe(path):
 LEFT_INNER_EYE_IDX = 89
 RIGHT_INNER_EYE_IDX = 39
 
+# InsightFace 68 Landmarks (3D) for cheek width check
+# Index 1: Right cheek contour (upper)
+# Index 15: Left cheek contour (upper)
+LEFT_CHEEK_3D_IDX = 15
+RIGHT_CHEEK_3D_IDX = 1
+CHEEK_WIDTH_3D_RATIO_MIN = 0.7  # 3D頬幅/顔高さ の最小比率
+
 def filter_by_main_person_insightface(input_dir, physical_delete):
     logger.info("Starting person filtering with InsightFace...")
     app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
@@ -60,6 +67,7 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
     skipped_aspect = 0
     skipped_resolution = 0
     skipped_face_position = 0
+    skipped_cheek_3d = 0
 
     for filename in image_files:
         img_path = os.path.join(input_dir, filename)
@@ -75,15 +83,15 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
                 face = faces[0]
                 x1, y1, x2, y2 = face.bbox
 
-                # 縮尺チェック1: アスペクト比（潰れすぎ/伸びすぎ）
+                # 縮尺チェック1: アスペクト比（潰れすぎ/伸びすぎ） - 無効化
                 face_width = x2 - x1
                 face_height = y2 - y1
-                aspect_ratio = face_height / face_width if face_width > 0 else 0
-
-                if aspect_ratio < 0.9 or aspect_ratio > 1.8:
-                    logger.info(f"Skipped (abnormal aspect ratio {aspect_ratio:.3f}): {img_path}")
-                    skipped_aspect += 1
-                    continue
+                # aspect_ratio = face_height / face_width if face_width > 0 else 0
+                #
+                # if aspect_ratio < 0.9 or aspect_ratio > 1.8:
+                #     logger.info(f"Skipped (abnormal aspect ratio {aspect_ratio:.3f}): {img_path}")
+                #     skipped_aspect += 1
+                #     continue
 
                 # 顔位置フィルター (Face Position Filter)
                 lmk = face.landmark_2d_106
@@ -98,6 +106,29 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
                         logger.info(f"Skipped (face_pos_invalid d_left={d_left:.1f} d_right={d_right:.1f}): {img_path}")
                         skipped_face_position += 1
                         continue
+
+                # 3D頬幅フィルター (3D Cheek Width Filter) - 無効化
+                # lmk3d = face.landmark_3d_68
+                # if lmk3d is not None:
+                #     left_cheek = lmk3d[LEFT_CHEEK_3D_IDX]
+                #     right_cheek = lmk3d[RIGHT_CHEEK_3D_IDX]
+                #     
+                #     # 3D Euclidean distance
+                #     cheek_dist_3d = np.sqrt(
+                #         (left_cheek[0] - right_cheek[0])**2 +
+                #         (left_cheek[1] - right_cheek[1])**2 +
+                #         (left_cheek[2] - right_cheek[2])**2
+                #     )
+                #     
+                #     # Normalize by face height
+                #     cheek_ratio_3d = cheek_dist_3d / face_height if face_height > 0 else 0
+                #     
+                #     if cheek_ratio_3d < CHEEK_WIDTH_3D_RATIO_MIN:
+                #         logger.info(f"Skipped (narrow 3D cheek ratio={cheek_ratio_3d:.3f}): {img_path}")
+                #         skipped_cheek_3d += 1
+                #         continue
+                # else:
+                #     logger.warning(f"No 3D landmarks for {img_path}, skipping 3D cheek filter.")
 
                 # 全チェック通過
                 embedding = face.embedding

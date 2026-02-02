@@ -135,21 +135,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.error(f"Error in trial: {e}")
         return 0.0
 
-def optimize_single_param(target_name, current_params, model_name, points=[0, 25, 50]):
+def optimize_single_param(target_name, current_params, model_name, points=[0, 5, 10, 20, 40, 50]):
     """
     1つのパラメータを最適化する。
-    Step 1: pointsで指定された点を評価
-    Step 2: 上位2点の中間を探索（2分探索的アプローチ）
+    順次評価し、精度が上がらなくなったら早期終了。
     """
-    logger.info(f"\n>>> Optimizing {target_name} (Points: {points}) [Model: {model_name}] <<<")
+    logger.info(f"\n>>> Optimizing {target_name} [Model: {model_name}] <<<")
     
-    best_val = current_params[target_name]
-    best_score = -1.0
-    history = {}
-
     def evaluate_wrapper(val):
-        if val in history: return history[val]
-        
         # Independent Optimization: Always start from all-zero params
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
@@ -162,42 +155,25 @@ def optimize_single_param(target_name, current_params, model_name, points=[0, 25
             test_params['eb_eye_high'], test_params['eb_eye_low'],
             test_params['sharpness_low'], model_name=model_name
         )
-        history[val] = score
         return score
 
-    # Step 1: Evaluate initial points
-    logger.info(f"Step 1: Evaluate points {points}")
-    scores = {}
-    for p in points:
-        scores[p] = evaluate_wrapper(p)
+    best_val = 0
+    best_score = -1.0
     
-    # Step 2: Refinement
-    logger.info("Step 2: Binary Search Refinement")
-    while True:
-        sorted_history = sorted(history.items(), key=lambda x: x[1], reverse=True)
-        if len(sorted_history) < 2: break
-            
-        best1_val, best1_score = sorted_history[0]
-        best2_val, best2_score = sorted_history[1]
+    for p in points:
+        logger.info(f"Testing {target_name}={p}...")
+        score = evaluate_wrapper(p)
+        logger.info(f"  {target_name}={p} -> Score: {score:.4f}")
         
-        mid_val = int((best1_val + best2_val) / 2)
-        
-        if mid_val in history:
-            logger.info(f"Refinement converged at {mid_val} (Already evaluated).")
-            # Safety fallback: Choose the lower value between the top 2
-            safer_val = min(best1_val, best2_val)
-            logger.info(f"Selecting lower value for reproducibility/safety: {safer_val}")
-            best_val = safer_val
-            best_score = history[safer_val]
-            logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
-            return best_val, best_score
-            
-        logger.info(f"Refining: Best1={best1_val}({best1_score:.4f}), Best2={best2_val}({best2_score:.4f}) -> Next: {mid_val}")
-        scores[mid_val] = evaluate_wrapper(mid_val)
-            
-    best_val = max(scores, key=scores.get)
-    best_score = scores[best_val]
-    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
+        if score > best_score:
+            best_score = score
+            best_val = p
+            logger.info(f"  [NEW BEST] {target_name}={p} (Score: {score:.4f})")
+        else:
+            logger.info(f"  No improvement. Stopping search.")
+            break
+    
+    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score:.4f})")
     return best_val, best_score
 
 def main():
@@ -228,31 +204,31 @@ def main():
     # Optimization Sequence using SELECTED MODEL
     
     # 1. Pitch
-    val, _ = optimize_single_param('pitch', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('pitch', current_params, best_model)
     current_params['pitch'] = val
     
     # 2. Symmetry
-    val, _ = optimize_single_param('sym', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('sym', current_params, best_model)
     current_params['sym'] = val
     
     # 3. Y-Diff
-    val, _ = optimize_single_param('y_diff', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('y_diff', current_params, best_model)
     current_params['y_diff'] = val
     
     # 4. Mouth Open
-    val, _ = optimize_single_param('mouth_open', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('mouth_open', current_params, best_model)
     current_params['mouth_open'] = val
     
     # 5. Eyebrow-Eye High (Top X% cut)
-    val, _ = optimize_single_param('eb_eye_high', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('eb_eye_high', current_params, best_model)
     current_params['eb_eye_high'] = val
 
     # 6. Eyebrow-Eye Low (Bottom X% cut)
-    val, _ = optimize_single_param('eb_eye_low', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('eb_eye_low', current_params, best_model)
     current_params['eb_eye_low'] = val
     
     # 7. Sharpness Low (Bottom X% cut - blurry images)
-    val, _ = optimize_single_param('sharpness_low', current_params, best_model, points=[0, 25, 50])
+    val, _ = optimize_single_param('sharpness_low', current_params, best_model)
     current_params['sharpness_low'] = val
     
     # 8. Grayscale (Boolean comparison)
