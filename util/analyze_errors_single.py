@@ -180,7 +180,7 @@ def collect_errors(image_paths, true_labels, predictions, class_names):
         error_type_dir = os.path.join(OUTPUT_DIR, "errors", error_type)
         os.makedirs(error_type_dir, exist_ok=True)
         
-        for path in paths[:20]: # Limit to 20 per error type to save space
+        for path in paths: # Unlimited
             dst = os.path.join(error_type_dir, os.path.basename(path))
             try:
                 shutil.copy2(path, dst)
@@ -205,7 +205,7 @@ def collect_correct(image_paths, true_labels, predictions, class_names):
         correct_dir = os.path.join(OUTPUT_DIR, "correct", label)
         os.makedirs(correct_dir, exist_ok=True)
         
-        for path in paths[:20]: # Limit to 20 per class
+        for path in paths: # Unlimited
             dst = os.path.join(correct_dir, os.path.basename(path))
             try:
                 shutil.copy2(path, dst)

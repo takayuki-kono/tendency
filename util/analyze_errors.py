@@ -11,7 +11,10 @@ import matplotlib.pyplot as plt
 # import seaborn as sns # 削除
 from collections import defaultdict
 import argparse
+import cv2
+import pickle
 import json
+# from insightface.app import FaceAnalysis # 削除: Protobuf Error回避のためキャッシュ利用
 
 # --- 設定 ---
 # 分析対象のモデル
@@ -20,10 +23,14 @@ DEFAULT_MODEL_PATH = 'best_sequential_model.keras'
 VALIDATION_DIR = 'preprocessed_multitask/validation'
 # 出力ディレクトリ
 OUTPUT_DIR = 'error_analysis'
+CACHE_DIR = 'outputs/cache'
 
 # 画像設定
 IMG_SIZE = 224
 BATCH_SIZE = 32
+
+# 指標計算用 (InsightFace定数は不要になったが、辞書キーとして使うので名前だけ残す意味はない)
+# FACE_APP = None # 削除
 
 # ラベル定義（train_for_filter_search.py と同じ）
 TASK_A_LABELS = ['a', 'b', 'c']
@@ -217,7 +224,7 @@ def collect_errors(image_paths, true_labels, predictions, task_idx, task_labels,
         error_type_dir = os.path.join(task_error_dir, error_type)
         os.makedirs(error_type_dir, exist_ok=True)
         
-        for path in paths[:50]:  # 最大50枚
+        for path in paths:  # 無制限
             dst = os.path.join(error_type_dir, os.path.basename(path))
             shutil.copy2(path, dst)
     
@@ -244,7 +251,7 @@ def collect_correct(image_paths, true_labels, predictions, task_idx, task_labels
         label_dir = os.path.join(task_correct_dir, label)
         os.makedirs(label_dir, exist_ok=True)
         
-        for path in paths[:20]:  # 最大20枚
+        for path in paths:  # 無制限
             try:
                 dst = os.path.join(label_dir, os.path.basename(path))
                 shutil.copy2(path, dst)
@@ -288,6 +295,112 @@ def analyze_per_combination(image_paths, true_labels, predictions):
     # 精度順にソート（昇順）
     sorted_results = dict(sorted(results.items(), key=lambda x: x[1]['accuracy']))
     return sorted_results
+
+
+GLOBAL_METRICS_CACHE = {}
+
+def load_metrics_cache():
+    """outputs/cache/*.pkl からメトリクスを読み込む"""
+    global GLOBAL_METRICS_CACHE
+    if GLOBAL_METRICS_CACHE: return
+
+    print(f"Loading metrics cache from {CACHE_DIR}...")
+    if not os.path.exists(CACHE_DIR):
+        print("Cache dir not found.")
+        return
+
+    loaded_files = 0
+    for fname in os.listdir(CACHE_DIR):
+        if fname.endswith(".pkl") and fname.startswith("metrics_"):
+            path = os.path.join(CACHE_DIR, fname)
+            try:
+                with open(path, "rb") as f:
+                    data = pickle.load(f)
+                    # data is list of dicts: {'path':..., 'metrics':...}
+                    for item in data:
+                        if 'metrics' in item and item['metrics']:
+                            # Key by filename
+                            basename = os.path.basename(item['path'])
+                            GLOBAL_METRICS_CACHE[basename] = item['metrics']
+                    loaded_files += 1
+            except Exception as e:
+                print(f"Failed to load {fname}: {e}")
+    
+    print(f"Loaded {loaded_files} cache files.")
+    print(f"Total metrics in cache: {len(GLOBAL_METRICS_CACHE)} images.")
+    # Debug: Print first 5 keys
+    if GLOBAL_METRICS_CACHE:
+        print("Sample cache keys:", list(GLOBAL_METRICS_CACHE.keys())[:5])
+
+def get_metrics(img_path):
+    """画像から指標を取得（キャッシュ優先）"""
+    load_metrics_cache()
+    
+    basename = os.path.basename(img_path)
+    
+    # 直接マッチを試行
+    if basename in GLOBAL_METRICS_CACHE:
+        return GLOBAL_METRICS_CACHE[basename]
+    
+    # 人物名プレフィックス除去を試行
+    # 例: 倉科カナ_BaiduImageClient_xxx.jpg → BaiduImageClient_xxx.jpg
+    parts = basename.split('_')
+    if len(parts) >= 4:
+        # 最初のパート（人物名）を除去
+        stripped_key = '_'.join(parts[1:])
+        if stripped_key in GLOBAL_METRICS_CACHE:
+            return GLOBAL_METRICS_CACHE[stripped_key]
+    
+    # Cache Miss: 簡易計算のみ
+    res = {
+        'pitch': 0.0, 'symmetry': 0.0, 'y_diff': 0.0,
+        'mouth_open': 0.0, 'eb_eye_dist': 0.0, 'sharpness': 0.0
+    }
+    
+    try:
+        # 日本語パス対策
+        with open(img_path, "rb") as f:
+            bytes_data = bytearray(f.read())
+            numpy_array = np.asarray(bytes_data, dtype=np.uint8)
+            img = cv2.imdecode(numpy_array, cv2.IMREAD_COLOR)
+            
+        if img is None: return res
+        
+        # Sharpness (InsightFace不要)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        res['sharpness'] = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+    except Exception as e:
+        print(f"Error analyzing {img_path}: {e}")
+        
+    return res
+
+def analyze_metrics_distribution(image_paths, label_prefix=""):
+    """画像リストの指標分布を集計"""
+    metrics_list = defaultdict(list)
+    
+    count = 0
+    total = len(image_paths)
+    print(f"  Calculating metrics for {total} images ({label_prefix})...")
+    
+    for path in image_paths:
+        m = get_metrics(path)
+        for k, v in m.items():
+            if v is not None:
+                metrics_list[k].append(v)
+        
+        count += 1
+        if count % 100 == 0:
+            print(f"    {count}/{total}")
+            
+    # 平均値を計算 (JSON serializable に float 変換)
+    summary = {}
+    for k, v in metrics_list.items():
+        if v:
+            summary[k] = float(np.mean(v))
+        else:
+            summary[k] = 0.0
+    return summary
 
 def main():
     parser = argparse.ArgumentParser(description="Error Analysis Script")
@@ -374,6 +487,56 @@ def main():
         correct_summary = {k: len(v) for k, v in correct.items()}
         print(f"Correct: {sum(correct_summary.values())} total")
         report[task_name]['correct'] = correct_summary
+        
+        # --- Metrics Analysis ---
+        print(f"\n  [Preprocess Metrics Analysis]")
+        
+        # エラー画像のパスを収集
+        error_paths = []
+        for paths in errors.values():
+            error_paths.extend(paths)
+            
+        # 正解画像のパスを収集 (ランダムサンプリングしても良いが、一応全部やるか、エラーと同数程度にする)
+        # 比較のため、エラー数が多い場合は正解も多く見るべきだが、時間がかかる。
+        # ここではエラー画像と同数程度（最大200枚）をランダムサンプリングして比較する
+        correct_paths = []
+        for paths in correct.values():
+            correct_paths.extend(paths)
+            
+        import random
+        random.seed(42)
+        if len(correct_paths) > len(error_paths) and len(error_paths) > 0:
+             # エラーがある程度あるなら、それと同じ数だけ正解を見る（比較の公平性）
+             # ただし少なすぎると意味がないので、Min 50 Max ErrorNum
+             sample_size = max(50, len(error_paths))
+             if len(correct_paths) > sample_size:
+                 correct_paths_sample = random.sample(correct_paths, sample_size)
+             else:
+                 correct_paths_sample = correct_paths
+        else:
+             # エラーが多い、または正解が少ない場合は全部使う
+             correct_paths_sample = correct_paths
+        
+        # 指標計算
+        error_metrics = analyze_metrics_distribution(error_paths, "Errors")
+        correct_metrics = analyze_metrics_distribution(correct_paths_sample, "Correct (Sampled)")
+        
+        # 結果表示
+        print(f"\n    {'Metric':<15} | {'Errors (Avg)':<15} | {'Correct (Avg)':<15} | {'Diff':<10}")
+        print(f"    {'-'*15}-+-{'-'*15}-+-{'-'*15}-+-{'-'*10}")
+        
+        for k in ['pitch', 'symmetry', 'y_diff', 'mouth_open', 'eb_eye_dist', 'sharpness']:
+            e_val = error_metrics.get(k, 0.0)
+            c_val = correct_metrics.get(k, 0.0)
+            diff = e_val - c_val
+            
+            # format
+            print(f"    {k:<15} | {e_val:>15.4f} | {c_val:>15.4f} | {diff:>+10.4f}")
+            
+        report[task_name]['metrics_comparison'] = {
+            'errors': error_metrics,
+            'correct': correct_metrics
+        }
     
     # マルチラベル組み合わせ単位の分析
     print("\n--- Per-Combination Accuracy (全タスク正解率) ---")
