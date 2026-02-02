@@ -210,7 +210,7 @@ def collect_errors(image_paths, true_labels, predictions, task_idx, task_labels,
             errors[key].append(path)
     
     # エラー画像をコピー
-    task_error_dir = os.path.join(OUTPUT_DIR, task_name.lower().replace(" ", "_"))
+    task_error_dir = os.path.join(OUTPUT_DIR, "errors", task_name.lower().replace(" ", "_"))
     os.makedirs(task_error_dir, exist_ok=True)
     
     for error_type, paths in errors.items():
@@ -222,6 +222,35 @@ def collect_errors(image_paths, true_labels, predictions, task_idx, task_labels,
             shutil.copy2(path, dst)
     
     return errors
+
+
+def collect_correct(image_paths, true_labels, predictions, task_idx, task_labels, task_name):
+    """正解画像を収集・整理"""
+    correct = defaultdict(list)
+    
+    for i, (path, true_label) in enumerate(zip(image_paths, true_labels)):
+        true_class = true_label[task_idx]
+        pred_class = predictions[task_idx][i]
+        
+        if true_class >= 0 and true_class == pred_class:
+            key = task_labels[true_class]
+            correct[key].append(path)
+    
+    # 正解画像をコピー
+    task_correct_dir = os.path.join(OUTPUT_DIR, "correct", task_name.lower().replace(" ", "_"))
+    os.makedirs(task_correct_dir, exist_ok=True)
+    
+    for label, paths in correct.items():
+        label_dir = os.path.join(task_correct_dir, label)
+        os.makedirs(label_dir, exist_ok=True)
+        
+        for path in paths[:20]:  # 最大20枚
+            try:
+                dst = os.path.join(label_dir, os.path.basename(path))
+                shutil.copy2(path, dst)
+            except: pass
+    
+    return correct
 
 
 def analyze_per_combination(image_paths, true_labels, predictions):
@@ -337,6 +366,14 @@ def main():
             'accuracy': accuracy,
             'errors': error_summary
         }
+        
+        # 正解収集
+        correct = collect_correct(
+            image_paths, true_labels, predictions, task_idx, task_labels, task_name
+        )
+        correct_summary = {k: len(v) for k, v in correct.items()}
+        print(f"Correct: {sum(correct_summary.values())} total")
+        report[task_name]['correct'] = correct_summary
     
     # マルチラベル組み合わせ単位の分析
     print("\n--- Per-Combination Accuracy (全タスク正解率) ---")
