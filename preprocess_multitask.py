@@ -39,13 +39,15 @@ DEFAULT_THRESH_RATIO = 0.03
 
 # Default Filters
 PITCH_FILTER_PERCENTILE = 0
-SYMMETRY_FILTER_PERCENTILE = 50
+SYMMETRY_FILTER_PERCENTILE = 0
 Y_DIFF_FILTER_PERCENTILE = 0
 MOUTH_OPEN_FILTER_PERCENTILE = 0
 EYEBROW_EYE_PERCENTILE_HIGH = 0 
 EYEBROW_EYE_PERCENTILE_LOW = 0  
-SHARPNESS_PERCENTILE_LOW = 0   # Filter bottom X% by sharpness (Laplacian variance)
-SHARPNESS_PERCENTILE_HIGH = 0  # Filter top X% by sharpness
+SHARPNESS_PERCENTILE_LOW = 0  # Filter bottom X% by sharpness (Laplacian variance)
+SHARPNESS_PERCENTILE_HIGH = 50  # Filter top X% by sharpness
+FACE_SIZE_PERCENTILE_LOW = 0   # Filter bottom X% by face size (small images)
+FACE_SIZE_PERCENTILE_HIGH = 0  # Filter top X% by face size (large images)
 
 # Landmarks (InsightFace 106)
 LEFT_INNER_EYE_IDX = 89
@@ -137,6 +139,12 @@ def analyze_single_image(args):
     box_h = box[3] - box[1]
     aspect_ratio = box_h / (box_w + 1e-6)
     
+    # Face Size from filename (e.g., xxx_sz150.jpg -> 150)
+    import re
+    filename = os.path.basename(path)
+    sz_match = re.search(r'_sz(\d+)', filename)
+    face_size = int(sz_match.group(1)) if sz_match else 0
+    
     res['valid'] = True
     res['metrics'] = {
         'pitch': pitch,
@@ -145,7 +153,8 @@ def analyze_single_image(args):
         'mouth_open': mouth_open,
         'eb_eye_dist': eb_eye_dist,
         'sharpness': sharpness,
-        'aspect_ratio': aspect_ratio
+        'aspect_ratio': aspect_ratio,
+        'face_size': face_size
     }
     return res
 
@@ -228,7 +237,15 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     if not results:
         logger.info(f"Analyzing {total} images...")
         
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker) as executor:
+        # WindowsのProcessPoolExecutor問題を回避するため、ThreadPoolExecutorに変更
+        # init_workerは不要になるので削除し、メインスレッドで初期化したface_appを共有する形にするか
+        # あるいは各スレッドで呼び出すか。
+        # ここではinit_workerでglobal face_appを作っているので、実はThreadPoolならメインのface_appをそのまま使える。
+        # ただしinit_workerはProcessPool用だったので、メインで一度初期化する必要がある。
+        
+        init_worker() # メインプロセスで初期化
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             for r in executor.map(analyze_single_image, files):
                 results.append(r)
                 if len(results) % 100 == 0:
@@ -271,6 +288,16 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         if 'sharp_vals' not in locals():
             sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
         th_sharpness_high = np.percentile(sharp_vals, 100 - args.sharpness_percentile_high)
+    
+    # Face Size threshold (from filename sz)
+    th_face_size_low = 0
+    th_face_size_high = 999999
+    face_size_vals = [r['metrics'].get('face_size', 0) for r in valid_items if r['metrics'].get('face_size', 0) > 0]
+    if face_size_vals:
+        if args.face_size_percentile_low > 0:
+            th_face_size_low = np.percentile(face_size_vals, args.face_size_percentile_low)
+        if args.face_size_percentile_high > 0:
+            th_face_size_high = np.percentile(face_size_vals, 100 - args.face_size_percentile_high)
         
     # Aspect Ratio threshold (Two-sided)
     th_ar_low = 0
@@ -323,6 +350,8 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth: reason = 'mouth_open_global'
             elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low: reason = 'sharpness_low_global'
             elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high: reason = 'sharpness_high_global'
+            elif args.face_size_percentile_low > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) < th_face_size_low: reason = 'face_size_low_global'
+            elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high: reason = 'face_size_high_global'
             elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high): reason = 'aspect_ratio_global'
             
             # Personal Check
@@ -395,6 +424,8 @@ def main():
     parser.add_argument("--eyebrow_eye_percentile_low", type=int, default=EYEBROW_EYE_PERCENTILE_LOW, help="Filter bottom X% of eyebrow-eye distance")
     parser.add_argument("--sharpness_percentile_low", type=int, default=SHARPNESS_PERCENTILE_LOW, help="Filter bottom X% by sharpness (blurry images)")
     parser.add_argument("--sharpness_percentile_high", type=int, default=SHARPNESS_PERCENTILE_HIGH, help="Filter top X% by sharpness")
+    parser.add_argument("--face_size_percentile_low", type=int, default=FACE_SIZE_PERCENTILE_LOW, help="Filter bottom X% by face size (small images)")
+    parser.add_argument("--face_size_percentile_high", type=int, default=FACE_SIZE_PERCENTILE_HIGH, help="Filter top X% by face size (large images)")
     
     # Aspect Ratio
     parser.add_argument("--aspect_ratio_cutoff", type=int, default=0, help="Filter both top/bottom X% outliers in aspect ratio")

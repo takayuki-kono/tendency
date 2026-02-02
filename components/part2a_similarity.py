@@ -119,9 +119,10 @@ def find_similar_images(input_dir, physical_delete):
 
     # --- Remove Duplicates ---
     for label, group in clusters.items():
-        # Keep first
+        # Keep the largest file (highest resolution/quality usually)
+        group.sort(key=lambda x: os.path.getsize(x), reverse=True)
         keep_one = group.pop(0)
-        logger.info(f"Cluster {label}: Keeping {os.path.basename(keep_one)}, removing {len(group)} duplicates.")
+        logger.info(f"Cluster {label}: Keeping {os.path.basename(keep_one)} (Size: {os.path.getsize(keep_one)}), removing {len(group)} duplicates.")
 
         for img_path in group:
             try:

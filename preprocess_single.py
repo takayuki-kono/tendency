@@ -45,7 +45,8 @@ Y_DIFF_FILTER_PERCENTILE = 0
 MOUTH_OPEN_FILTER_PERCENTILE = 0
 EYEBROW_EYE_PERCENTILE_HIGH = 0 
 EYEBROW_EYE_PERCENTILE_LOW = 0  
-SHARPNESS_PERCENTILE_LOW = 0   
+SHARPNESS_PERCENTILE_LOW = 0
+SHARPNESS_PERCENTILE_HIGH = 0   
 
 # Landmarks (InsightFace 106)
 LEFT_INNER_EYE_IDX = 89
@@ -219,6 +220,11 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         if not vals: return 0
         return np.percentile(vals, 100 - pct)
     
+    def get_th_low(key, pct):
+        vals = [r['metrics'][key] for r in valid_items]
+        if not vals: return 0
+        return np.percentile(vals, pct)
+    
     th_pitch = get_th('pitch', args.pitch_percentile)
     th_sym = get_th('symmetry', args.symmetry_percentile)
     th_y = get_th('y_diff', args.y_diff_percentile)
@@ -226,8 +232,11 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     
     th_sharpness_low = 0
     if args.sharpness_percentile_low > 0:
-        sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
-        th_sharpness_low = np.percentile(sharp_vals, args.sharpness_percentile_low)
+        th_sharpness_low = get_th_low('sharpness', args.sharpness_percentile_low)
+        
+    th_sharpness_high = 999999.0
+    if args.sharpness_percentile_high > 0:
+        th_sharpness_high = get_th('sharpness', args.sharpness_percentile_high)
 
     # --- Grouping by Person ---
     grouped = defaultdict(list)
@@ -263,6 +272,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             elif args.y_diff_percentile > 0 and m['y_diff'] > th_y: reason = 'y_diff_global'
             elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth: reason = 'mouth_open_global'
             elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low: reason = 'sharpness_low_global'
+            elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high: reason = 'sharpness_high_global'
             elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high): reason = 'eb_eye_high_personal'
             elif (args.eyebrow_eye_percentile_low > 0 and m['eb_eye_dist'] < th_eb_low): reason = 'eb_eye_low_personal'
             
@@ -312,9 +322,8 @@ def main():
     parser.add_argument("--eyebrow_eye_percentile_high", type=int, default=EYEBROW_EYE_PERCENTILE_HIGH)
     parser.add_argument("--eyebrow_eye_percentile_low", type=int, default=EYEBROW_EYE_PERCENTILE_LOW)
     parser.add_argument("--sharpness_percentile_low", type=int, default=SHARPNESS_PERCENTILE_LOW)
+    parser.add_argument("--sharpness_percentile_high", type=int, default=SHARPNESS_PERCENTILE_HIGH)
     parser.add_argument("--grayscale", action="store_true")
-    
-    args = parser.parse_args()
     
     prepro_dir = args.out_dir
     prepro_train = os.path.join(prepro_dir, "train")

@@ -79,7 +79,7 @@ def run_trial(params):
     logger.info(f"Cache Miss. Running process... (File Count: {file_count})")
     logger.info(f"{'='*50}")
 
-    cmd = [PYTHON_EXEC, "components/train_single_trial.py"]
+    cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
     for key, value in params.items():
         cmd.extend([f"--{key}", str(value)])
 

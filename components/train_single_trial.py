@@ -50,6 +50,7 @@ def main():
     # Training Params
     parser.add_argument('--fine_tune', type=str, default='False')
     parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--weight_decay', type=float, default=0.0)  # 0.0=Adam, >0=AdamW
     
     args = parser.parse_args()
     
