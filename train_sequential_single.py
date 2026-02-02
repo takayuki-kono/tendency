@@ -9,7 +9,7 @@ import hashlib
 # --- Settings ---
 # Adjust to your environment
 PYTHON_EXEC = r"d:\tendency\tendency.venv_tf210_gpu\Scripts\python.exe"
-DATA_SOURCE_DIR = "preprocessed_person/train" 
+DATA_SOURCE_DIR = "preprocessed_single/train" 
 
 # Directories
 LOG_DIR = "outputs/logs"
@@ -18,14 +18,14 @@ MODEL_DIR = "outputs/models"
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
-CACHE_FILE = os.path.join(CACHE_DIR, "train_opt_person_cache.json")
+CACHE_FILE = os.path.join(CACHE_DIR, "train_opt_single_cache.json")
 
 # Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, 'sequential_person_opt_log.txt'), mode='w', encoding='utf-8'),
+        logging.FileHandler(os.path.join(LOG_DIR, 'sequential_single_opt_log.txt'), mode='w', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -68,7 +68,7 @@ def run_trial(params):
 
     logger.info(f"Cache Miss. Running process... (File Count: {file_count})")
     
-    cmd = [PYTHON_EXEC, "components/train_person_trial.py"]
+    cmd = [PYTHON_EXEC, "components/train_single_trial.py"]
     for key, value in params.items():
         cmd.extend([f"--{key}", str(value)])
 
@@ -115,7 +115,7 @@ def optimize_param(target_name, candidates, current_params):
     return best_val, best_score
 
 def main():
-    logger.info("Starting Sequential Training Optimization (Person/Single Task)")
+    logger.info("Starting Sequential Training Optimization (Single Task)")
     
     current_params = {
         'model_name': 'EfficientNetV2B0',

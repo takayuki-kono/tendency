@@ -14,6 +14,9 @@ myenv/
 tendency.venv_tf210_gpu/
 kerastuner_dir/
 kerastuner_efficient/
+kerastuner_bayesian/
+outputs/cache/
+__pycache__/
 
 *.jpg
 *.png
@@ -26,3 +29,21 @@ kerastuner_efficient/
 *.h5
 *.txt
 *.log
+
+# Data Directories
+master_data/
+preprocessed*/
+faces/
+temp_*/
+imagedl_outputs/
+scraper_output/
+vis_output/
+suspicious_labels/
+grouped_faces_cnn_euclidean/
+error_analysis*/
+
+# Large/Binary Files
+*.db
+*.pkl
+*.zip
+*.csv

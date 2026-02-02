@@ -16,14 +16,14 @@ LOG_DIR = "outputs/logs"
 CACHE_DIR = "outputs/cache"
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
-CACHE_FILE = os.path.join(CACHE_DIR, "filter_opt_person_cache.json")
+CACHE_FILE = os.path.join(CACHE_DIR, "filter_opt_single_cache.json")
 
 # Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, 'sequential_person_filter_opt_log.txt'), mode='w', encoding='utf-8'),
+        logging.FileHandler(os.path.join(LOG_DIR, 'sequential_single_filter_opt_log.txt'), mode='w', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -73,8 +73,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         # Preprocess
         cmd_pre = [
             PYTHON_PREPROCESS,
-            "preprocess_person.py",
-            "--out_dir", "preprocessed_person",
+            "preprocess_single.py",
+            "--out_dir", "preprocessed_single",
             "--pitch_percentile", str(pitch),
             "--symmetry_percentile", str(sym),
             "--y_diff_percentile", str(y_diff),
@@ -99,7 +99,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             return 0.0
 
         # Train (Filter Search)
-        cmd_train = [PYTHON_TRAIN, "components/train_filter_person_trial.py", "--model_name", model_name]
+        cmd_train = [PYTHON_TRAIN, "components/train_filter_single_trial.py", "--model_name", model_name]
         logger.info(f"Running filter trial training with {model_name}...")
         ret_train = subprocess.run(cmd_train, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
@@ -128,21 +128,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.error(f"Error in trial: {e}")
         return 0.0
 
-def optimize_single_param(target_name, current_params, model_name, points=[0, 25, 50]):
+def optimize_single_param(target_name, current_params, model_name, points=[0, 5, 10, 20, 40, 50]):
     """
     1つのパラメータを最適化する。
-    Step 1: pointsで指定された点を評価
-    Step 2: 上位2点の中間を探索（2分探索的アプローチ）
+    順次評価し、精度が上がらなくなったら早期終了。
     """
-    logger.info(f"\n>>> Optimizing {target_name} (Points: {points}) [Model: {model_name}] <<<")
+    logger.info(f"\n>>> Optimizing {target_name} [Model: {model_name}] <<<")
     
-    best_val = current_params.get(target_name, 0)
-    best_score = -1.0
-    history = {}
-
     def evaluate_wrapper(val):
-        if val in history: return history[val]
-        
         # Independent Optimization: Always start from all-zero params
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
@@ -155,46 +148,29 @@ def optimize_single_param(target_name, current_params, model_name, points=[0, 25
             test_params['eb_eye_high'], test_params['eb_eye_low'],
             test_params['sharpness_low'], model_name=model_name
         )
-        history[val] = score
         return score
 
-    # Step 1: Evaluate initial points
-    logger.info(f"Step 1: Evaluate points {points}")
-    scores = {}
-    for p in points:
-        scores[p] = evaluate_wrapper(p)
+    best_val = 0
+    best_score = -1.0
     
-    # Step 2: Binary Search Refinement
-    logger.info("Step 2: Binary Search Refinement")
-    while True:
-        sorted_history = sorted(history.items(), key=lambda x: x[1], reverse=True)
-        if len(sorted_history) < 2: break
-            
-        best1_val, best1_score = sorted_history[0]
-        best2_val, best2_score = sorted_history[1]
+    for p in points:
+        logger.info(f"Testing {target_name}={p}...")
+        score = evaluate_wrapper(p)
+        logger.info(f"  {target_name}={p} -> Score: {score:.4f}")
         
-        mid_val = int((best1_val + best2_val) / 2)
-        
-        if mid_val in history:
-            logger.info(f"Refinement converged at {mid_val} (Already evaluated).")
-            # Safety fallback: Choose the lower value between the top 2
-            safer_val = min(best1_val, best2_val)
-            logger.info(f"Selecting lower value for reproducibility/safety: {safer_val}")
-            best_val = safer_val
-            best_score = history[safer_val]
-            logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
-            return best_val, best_score
-            
-        logger.info(f"Refining: Best1={best1_val}({best1_score:.4f}), Best2={best2_val}({best2_score:.4f}) -> Next: {mid_val}")
-        scores[mid_val] = evaluate_wrapper(mid_val)
-            
-    best_val = max(scores, key=scores.get)
-    best_score = scores[best_val]
-    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
+        if score > best_score:
+            best_score = score
+            best_val = p
+            logger.info(f"  [NEW BEST] {target_name}={p} (Score: {score:.4f})")
+        else:
+            logger.info(f"  No improvement. Stopping search.")
+            break
+    
+    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score:.4f})")
     return best_val, best_score
 
 def main():
-    logger.info("Starting Sequential Optimization (Person/Single Task)")
+    logger.info("Starting Sequential Optimization (Single Task)")
     
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
@@ -218,18 +194,25 @@ def main():
     
     # Optimization Sequence
     # 1. Pitch
-    current_params['pitch'], _ = optimize_single_param('pitch', current_params, best_model, points=[0, 25, 50])
+    current_params['pitch'], _ = optimize_single_param('pitch', current_params, best_model)
     
     # 2. Symmetry
-    current_params['sym'], _ = optimize_single_param('sym', current_params, best_model, points=[0, 25, 50])
+    current_params['sym'], _ = optimize_single_param('sym', current_params, best_model)
     
-    # ... (Adding other params as needed, keeping it simple for now as requested "componentize")
-    # Doing full sequence as originally planned
-    current_params['y_diff'], _ = optimize_single_param('y_diff', current_params, best_model, points=[0, 25, 50])
-    current_params['mouth_open'], _ = optimize_single_param('mouth_open', current_params, best_model, points=[0, 25, 50])
-    current_params['eb_eye_high'], _ = optimize_single_param('eb_eye_high', current_params, best_model, points=[0, 25, 50])
-    current_params['eb_eye_low'], _ = optimize_single_param('eb_eye_low', current_params, best_model, points=[0, 25, 50])
-    current_params['sharpness_low'], _ = optimize_single_param('sharpness_low', current_params, best_model, points=[0, 25, 50])
+    # 3. Y-Diff
+    current_params['y_diff'], _ = optimize_single_param('y_diff', current_params, best_model)
+    
+    # 4. Mouth Open
+    current_params['mouth_open'], _ = optimize_single_param('mouth_open', current_params, best_model)
+    
+    # 5. Eyebrow-Eye High
+    current_params['eb_eye_high'], _ = optimize_single_param('eb_eye_high', current_params, best_model)
+    
+    # 6. Eyebrow-Eye Low
+    current_params['eb_eye_low'], _ = optimize_single_param('eb_eye_low', current_params, best_model)
+    
+    # 7. Sharpness Low
+    current_params['sharpness_low'], _ = optimize_single_param('sharpness_low', current_params, best_model)
     
     # Grayscale
     score_color = run_trial(
@@ -292,7 +275,7 @@ def main():
     logger.info("="*50)
     
     final_cmd = (
-        f"{PYTHON_PREPROCESS} preprocess_person.py --out_dir preprocessed_person "
+        f"{PYTHON_PREPROCESS} preprocess_single.py --out_dir preprocessed_single "
         f"--train_dir train --val_dir validation "
         f"--pitch_percentile {current_params['pitch']} "
         f"--symmetry_percentile {current_params['sym']} "

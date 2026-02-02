@@ -35,7 +35,7 @@ def imread_safe(path):
 DEFAULT_TRAIN_DIR = "train"
 DEFAULT_VALIDATION_DIR = "validation"
 DEFAULT_TEST_DIR = "test"
-DEFAULT_PREPRO_DIR = "preprocessed_person" # Changed default
+DEFAULT_PREPRO_DIR = "preprocessed_single" # Changed default
 DEFAULT_THRESH_RATIO = 0.03
 
 # Default Filters

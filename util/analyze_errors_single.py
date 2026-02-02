@@ -1,5 +1,5 @@
 """
-Person (7-Class Label) エラー分析スクリプト
+Single Task エラー分析スクリプト
 """
 import os
 import shutil
@@ -13,9 +13,9 @@ import json
 from tensorflow.keras.utils import custom_object_scope
 
 # --- 設定 ---
-DEFAULT_MODEL_PATH = 'best_person_model.keras'
-VALIDATION_DIR = 'preprocessed_person/validation'
-OUTPUT_DIR = 'error_analysis_person'
+DEFAULT_MODEL_PATH = 'best_single_model.keras'
+VALIDATION_DIR = 'preprocessed_single/validation'
+OUTPUT_DIR = 'error_analysis_single'
 
 IMG_SIZE = 224
 BATCH_SIZE = 32
@@ -55,7 +55,7 @@ def analyze_data_distribution(image_paths, class_names):
         folder_counts[folder_name] += 1
     
     print("\n" + "=" * 60)
-    print("検証データのクラス分布 (Person/7-Class)")
+    print("検証データのクラス分布 (Single Task)")
     print("=" * 60)
     
     total = sum(folder_counts.values())
@@ -123,7 +123,7 @@ def create_confusion_matrix(true_labels, predictions, class_names):
     # 可視化
     plt.figure(figsize=(10, 8))
     plt.imshow(cm_percent, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=100)
-    plt.title('Person/7-Class Confusion Matrix (%)')
+    plt.title('Single Task Confusion Matrix (%)')
     plt.colorbar(label='%')
     tick_marks = np.arange(len(class_names))
     plt.xticks(tick_marks, class_names, rotation=45)
@@ -143,7 +143,7 @@ def create_confusion_matrix(true_labels, predictions, class_names):
     plt.ylabel('True label')
     plt.xlabel('Predicted label')
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, 'confusion_matrix_person.png'))
+    plt.savefig(os.path.join(OUTPUT_DIR, 'confusion_matrix_single.png'))
     plt.close()
     
     # 精度計算
@@ -177,7 +177,7 @@ def collect_errors(image_paths, true_labels, predictions, class_names):
     
     # エラー画像をコピー
     for error_type, paths in errors.items():
-        error_type_dir = os.path.join(OUTPUT_DIR, error_type)
+        error_type_dir = os.path.join(OUTPUT_DIR, "errors", error_type)
         os.makedirs(error_type_dir, exist_ok=True)
         
         for path in paths[:20]: # Limit to 20 per error type to save space
@@ -189,15 +189,40 @@ def collect_errors(image_paths, true_labels, predictions, class_names):
     return errors
 
 
+def collect_correct(image_paths, true_labels, predictions, class_names):
+    """正解画像を収集"""
+    correct = defaultdict(list)
+    
+    for i, (path, true_label) in enumerate(zip(image_paths, true_labels)):
+        pred_label = predictions[i]
+        
+        if true_label == pred_label:
+            key = class_names[true_label]
+            correct[key].append(path)
+    
+    # 正解画像をコピー
+    for label, paths in correct.items():
+        correct_dir = os.path.join(OUTPUT_DIR, "correct", label)
+        os.makedirs(correct_dir, exist_ok=True)
+        
+        for path in paths[:20]: # Limit to 20 per class
+            dst = os.path.join(correct_dir, os.path.basename(path))
+            try:
+                shutil.copy2(path, dst)
+            except: pass
+    
+    return correct
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Person (7-Class) Error Analysis")
+    parser = argparse.ArgumentParser(description="Single Task Error Analysis")
     parser.add_argument('--model', type=str, default=DEFAULT_MODEL_PATH)
     args = parser.parse_args()
     
     MODEL_PATH = args.model
     
     print("=" * 60)
-    print("Person (7-Class) Error Analysis Script")
+    print("Single Task Error Analysis Script")
     print("=" * 60)
     
     # 出力ディレクトリをクリーンアップ
@@ -271,18 +296,29 @@ def main():
     for error_type, count in sorted(error_summary.items(), key=lambda x: -x[1]):
         print(f"  {error_type}: {count}")
     
+    # 正解画像収集
+    correct = collect_correct(image_paths, true_labels, predictions, CLASS_NAMES)
+    
+    correct_summary = {k: len(v) for k, v in correct.items()}
+    print(f"\nCorrect: {sum(correct_summary.values())} total")
+    for label, count in sorted(correct_summary.items()):
+        print(f"  {label}: {count}")
+    
     # レポート保存
     report = {
         'accuracy': accuracy,
         'balanced_accuracy': balanced_accuracy,
         'per_class_accuracy': dict(zip(CLASS_NAMES, per_class_acc)),
-        'errors': error_summary
+        'errors': error_summary,
+        'correct': correct_summary
     }
     with open(os.path.join(OUTPUT_DIR, 'report.json'), 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     
     print("\n" + "=" * 60)
     print(f"Analysis complete! Results saved to: {OUTPUT_DIR}/")
+    print(f"  - errors/   : 誤分類画像")
+    print(f"  - correct/  : 正解画像")
     print("=" * 60)
 
 if __name__ == "__main__":
