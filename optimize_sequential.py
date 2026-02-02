@@ -64,15 +64,15 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, grayscale=False, model_name='EfficientNetV2B0'):
+def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, grayscale=False, model_name='EfficientNetV2B0'):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
     """
     logger.info(f"\n{'='*50}")
-    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp={sharpness_low}%, Grayscale={grayscale}")
+    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, Grayscale={grayscale}")
     
     file_count = count_files("train") + count_files("validation")
-    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_gray={grayscale}_cnt={file_count}"
+    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_gray={grayscale}_cnt={file_count}"
     
     cache = load_cache()
     if cache_key in cache:
@@ -91,7 +91,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             "--mouth_open_percentile", str(mouth_open),
             "--eyebrow_eye_percentile_high", str(eb_eye_high),
             "--eyebrow_eye_percentile_low", str(eb_eye_low),
-            "--sharpness_percentile_low", str(sharpness_low)
+            "--sharpness_percentile_low", str(sharpness_low),
+            "--sharpness_percentile_high", str(sharpness_high)
         ]
         if grayscale:
             cmd_pre.append("--grayscale")
@@ -146,14 +147,14 @@ def optimize_single_param(target_name, current_params, model_name, points=[0, 5,
         # Independent Optimization: Always start from all-zero params
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
-            'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0
+            'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0
         }
         test_params[target_name] = val
         
         score = run_trial(
             test_params['pitch'], test_params['sym'], test_params['y_diff'], test_params['mouth_open'],
             test_params['eb_eye_high'], test_params['eb_eye_low'],
-            test_params['sharpness_low'], model_name=model_name
+            test_params['sharpness_low'], test_params['sharpness_high'], model_name=model_name
         )
         return score
 
@@ -179,7 +180,7 @@ def main():
     # Initial Params
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
-        'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0
+        'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0
     }
     
     # --- Step 0: Model Architecture Selection ---
@@ -191,7 +192,7 @@ def main():
     for m in candidate_models:
         # Use baseline params (all 0) for model comparison
         logger.info(f"Testing Model: {m}")
-        score = run_trial(0, 0, 0, 0, 0, 0, 0, model_name=m)
+        score = run_trial(0, 0, 0, 0, 0, 0, 0, 0, model_name=m)
         if score > best_model_score:
             best_model_score = score
             best_model = m
@@ -227,17 +228,21 @@ def main():
     # 7. Sharpness Low (Bottom X% cut - blurry images)
     val, _ = optimize_single_param('sharpness_low', current_params, best_model)
     current_params['sharpness_low'] = val
+
+    # 8. Sharpness High (Top X% cut - noisy images)
+    val, _ = optimize_single_param('sharpness_high', current_params, best_model)
+    current_params['sharpness_high'] = val
     
     # 8. Grayscale (Boolean comparison)
     logger.info("\n>>> Optimizing Grayscale (True vs False) <<<")
     score_color = run_trial(
         current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
-        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'],
+        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'], current_params['sharpness_high'],
         grayscale=False, model_name=best_model
     )
     score_gray = run_trial(
         current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
-        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'],
+        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'], current_params['sharpness_high'],
         grayscale=True, model_name=best_model
     )
     if score_gray > score_color:
@@ -267,7 +272,7 @@ def main():
         score = run_trial(
             scaled_params['pitch'], scaled_params['sym'], scaled_params['y_diff'], scaled_params['mouth_open'],
             scaled_params['eb_eye_high'], scaled_params['eb_eye_low'],
-            scaled_params['sharpness_low'], grayscale=scaled_params['grayscale'], model_name=best_model
+            scaled_params['sharpness_low'], scaled_params['sharpness_high'], grayscale=scaled_params['grayscale'], model_name=best_model
         )
         
         if score > best_scaling_score:
@@ -296,6 +301,7 @@ def main():
         f"--eyebrow_eye_percentile_high {current_params['eb_eye_high']} "
         f"--eyebrow_eye_percentile_low {current_params['eb_eye_low']} "
         f"--sharpness_percentile_low {current_params['sharpness_low']} "
+        f"--sharpness_percentile_high {current_params['sharpness_high']} "
     )
     if current_params.get('grayscale', False):
         final_cmd += "--grayscale "

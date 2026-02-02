@@ -45,6 +45,7 @@ MOUTH_OPEN_FILTER_PERCENTILE = 0
 EYEBROW_EYE_PERCENTILE_HIGH = 0 
 EYEBROW_EYE_PERCENTILE_LOW = 0  
 SHARPNESS_PERCENTILE_LOW = 0   # Filter bottom X% by sharpness (Laplacian variance)
+SHARPNESS_PERCENTILE_HIGH = 0  # Filter top X% by sharpness
 
 # Landmarks (InsightFace 106)
 LEFT_INNER_EYE_IDX = 89
@@ -263,6 +264,13 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     if args.sharpness_percentile_low > 0:
         sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
         th_sharpness_low = np.percentile(sharp_vals, args.sharpness_percentile_low)
+
+    # Sharpness threshold (upper bound - filter noisy/too sharp images)
+    th_sharpness_high = 999999
+    if args.sharpness_percentile_high > 0:
+        if 'sharp_vals' not in locals():
+            sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
+        th_sharpness_high = np.percentile(sharp_vals, 100 - args.sharpness_percentile_high)
         
     # Aspect Ratio threshold (Two-sided)
     th_ar_low = 0
@@ -273,7 +281,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             th_ar_low = np.percentile(ar_vals, args.aspect_ratio_cutoff)
             th_ar_high = np.percentile(ar_vals, 100 - args.aspect_ratio_cutoff)
     
-    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness<={th_sharpness_low:.1f}, AR<={th_ar_low:.3f}|>={th_ar_high:.3f}")
+    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}, AR<={th_ar_low:.3f}|>={th_ar_high:.3f}")
     
     # --- Filtering & Grouping ---
     grouped = defaultdict(list)
@@ -314,6 +322,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             elif args.y_diff_percentile > 0 and m['y_diff'] > th_y: reason = 'y_diff_global'
             elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth: reason = 'mouth_open_global'
             elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low: reason = 'sharpness_low_global'
+            elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high: reason = 'sharpness_high_global'
             elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high): reason = 'aspect_ratio_global'
             
             # Personal Check
@@ -385,6 +394,7 @@ def main():
     parser.add_argument("--eyebrow_eye_percentile_high", type=int, default=EYEBROW_EYE_PERCENTILE_HIGH, help="Filter top X% of eyebrow-eye distance")
     parser.add_argument("--eyebrow_eye_percentile_low", type=int, default=EYEBROW_EYE_PERCENTILE_LOW, help="Filter bottom X% of eyebrow-eye distance")
     parser.add_argument("--sharpness_percentile_low", type=int, default=SHARPNESS_PERCENTILE_LOW, help="Filter bottom X% by sharpness (blurry images)")
+    parser.add_argument("--sharpness_percentile_high", type=int, default=SHARPNESS_PERCENTILE_HIGH, help="Filter top X% by sharpness")
     
     # Aspect Ratio
     parser.add_argument("--aspect_ratio_cutoff", type=int, default=0, help="Filter both top/bottom X% outliers in aspect ratio")
@@ -412,7 +422,7 @@ def main():
         logger.info(f"  Y-Diff Pct: {args.y_diff_percentile}")
         logger.info(f"  Mouth Pct: {args.mouth_open_percentile}")
         logger.info(f"  Eb-Eye Pct (High/Low): {args.eyebrow_eye_percentile_high} / {args.eyebrow_eye_percentile_low} (PER PERSON)")
-        logger.info(f"  Sharpness Pct Low: {args.sharpness_percentile_low}")
+        logger.info(f"  Sharpness Pct Low/High: {args.sharpness_percentile_low} / {args.sharpness_percentile_high}")
         logger.info(f"  Aspect Ratio Cutoff: {args.aspect_ratio_cutoff}")
         logger.info(f"  Grayscale: {args.grayscale}")
         logger.info("=" * 60)

@@ -25,6 +25,7 @@
 2.  **独立パラメータ探索 (Independent Optimization)**:
     - 各パラメータ（Pitch, Sym, Y-Diff等）を個別に変化させ、最適値を探索。
     - **探索点**: `[0, 25, 50]` (パーセンタイル: 上位N%をカット)。
+    - Sharpnessは **Low** (ボケ除去) と **High** (ノイズ除去) の2方向を探索。
     - **詳細探索 (Refinement)**: 最も良かった2点の中間値（二分探索）を追加評価し、極値を特定。
 3.  **全体スケーリング (Global Scaling)**:
     - 上記で得られた「各パラメータの比率」を保ったまま、強度を一律に調整。
@@ -54,7 +55,8 @@
 | **Y-Diff** | `--y_diff_percentile` | `abs(left_eye_y - right_eye_y)` | 顔の傾き (Roll)。首を傾げている画像を排除。 |
 | **Mouth Open** | `--mouth_open_percentile` | `abs(lower_lip_y - upper_lip_y)` | 口の開き具合。 |
 | **Eb-Eye Dist** | `--eyebrow_eye_...` | `(R_brow_eye + L_brow_eye) / 2` | 眉と目の距離。表情（驚き・険しさ）や骨格特徴。 |
-| **Sharpness** | `--sharpness_percentile_low` | `Laplacian(gray).var()` | 画像の鮮明度（ピンボケ判定）。 |
+| **Sharpness(L)**| `--sharpness_percentile_low` | `Laplacian(gray).var()` | 画像の鮮明度（下位カット）。ピンボケ画像を除外。 |
+| **Sharpness(H)**| `--sharpness_percentile_high`| `Laplacian(gray).var()` | 画像の鮮明度（上位カット）。高周波ノイズの強い画像を除外。 |
 | **Aspect Ratio** | `--aspect_ratio_cutoff` | `box_height / box_width` | 顔検出枠の縦横比。極端に細長い/潰れた誤検出を排除。 |
 
 ### フィルタリングロジック
