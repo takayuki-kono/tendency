@@ -29,6 +29,7 @@ __pycache__/
 *.h5
 *.txt
 *.log
+*.bmp
 
 # Data Directories
 master_data/
