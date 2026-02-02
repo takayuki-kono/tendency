@@ -135,7 +135,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.error(f"Error in trial: {e}")
         return 0.0
 
-def optimize_single_param(target_name, current_params, model_name, points=[0, 5, 10, 20, 40, 50]):
+def optimize_single_param(target_name, current_params, model_name, points=[0, 5, 25, 50]):
     """
     1つのパラメータを最適化する。
     順次評価し、精度が上がらなくなったら早期終了。
@@ -169,9 +169,6 @@ def optimize_single_param(target_name, current_params, model_name, points=[0, 5,
             best_score = score
             best_val = p
             logger.info(f"  [NEW BEST] {target_name}={p} (Score: {score:.4f})")
-        else:
-            logger.info(f"  No improvement. Stopping search.")
-            break
     
     logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score:.4f})")
     return best_val, best_score
