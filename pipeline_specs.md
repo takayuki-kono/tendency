@@ -62,6 +62,16 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 **スクリプト:** `preprocess_multitask.py`
 ... (以下、変更なし) ...
 
+### ユーティリティ
+#### データ集計
+**スクリプト:** `util/count_data.py`
+**処理内容:**
+1.  **集計対象:** `master_data`, `train`, `validation`, `preprocessed_multitask` 内の画像数をカウント。
+2.  **再帰探索:** 各ディレクトリ内を再帰的に探索し、ラベル（人物名の入れ子含む）ごとの集計を行う。
+3.  **分布表示:** タスク A, B, C, D ごとのクラス分布を統計的に表示。
+
+---
+
 ## Author
-Gemini (Updated 2026-01-20)
+Gemini (Updated 2026-02-05)
 
