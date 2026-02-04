@@ -338,9 +338,19 @@ def get_metrics(img_path):
     
     basename = os.path.basename(img_path)
     
+    # face_size をファイル名から抽出（キャッシュにない場合の保険）
+    import re
+    face_size = 0
+    sz_match = re.search(r'_sz(\d+)', basename)
+    if sz_match:
+        face_size = int(sz_match.group(1))
+    
     # 直接マッチを試行
     if basename in GLOBAL_METRICS_CACHE:
-        return GLOBAL_METRICS_CACHE[basename]
+        result = GLOBAL_METRICS_CACHE[basename].copy()
+        if 'face_size' not in result:
+            result['face_size'] = face_size
+        return result
     
     # 人物名プレフィックス除去を試行
     # 例: 倉科カナ_BaiduImageClient_xxx.jpg → BaiduImageClient_xxx.jpg
@@ -349,12 +359,16 @@ def get_metrics(img_path):
         # 最初のパート（人物名）を除去
         stripped_key = '_'.join(parts[1:])
         if stripped_key in GLOBAL_METRICS_CACHE:
-            return GLOBAL_METRICS_CACHE[stripped_key]
+            result = GLOBAL_METRICS_CACHE[stripped_key].copy()
+            if 'face_size' not in result:
+                result['face_size'] = face_size
+            return result
     
     # Cache Miss: 簡易計算のみ
     res = {
         'pitch': 0.0, 'symmetry': 0.0, 'y_diff': 0.0,
-        'mouth_open': 0.0, 'eb_eye_dist': 0.0, 'sharpness': 0.0
+        'mouth_open': 0.0, 'eb_eye_dist': 0.0, 'sharpness': 0.0,
+        'face_size': face_size  # 既に上で抽出済み
     }
     
     try:
@@ -525,7 +539,7 @@ def main():
         print(f"\n    {'Metric':<15} | {'Errors (Avg)':<15} | {'Correct (Avg)':<15} | {'Diff':<10}")
         print(f"    {'-'*15}-+-{'-'*15}-+-{'-'*15}-+-{'-'*10}")
         
-        for k in ['pitch', 'symmetry', 'y_diff', 'mouth_open', 'eb_eye_dist', 'sharpness']:
+        for k in ['pitch', 'symmetry', 'y_diff', 'mouth_open', 'eb_eye_dist', 'sharpness', 'face_size']:
             e_val = error_metrics.get(k, 0.0)
             c_val = correct_metrics.get(k, 0.0)
             diff = e_val - c_val
