@@ -6,6 +6,7 @@ import logging
 import time
 import json
 import hashlib
+import winsound
 
 # --- 設定 ---
 # Python実行環境のパス
@@ -19,6 +20,7 @@ CACHE_DIR = "outputs/cache"
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_FILE = os.path.join(CACHE_DIR, "filter_opt_cache.json")
+BEST_TRAIN_PARAMS_FILE = "outputs/best_train_params.json"
 
 # パスが存在しない場合はデフォルトを使用
 if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
@@ -57,6 +59,20 @@ def load_cache():
         except:
             return {'__file_count__': current_file_count}
     return {'__file_count__': current_file_count}
+
+def load_best_train_params():
+    """最適化された学習パラメータを読み込む"""
+    if os.path.exists(BEST_TRAIN_PARAMS_FILE):
+        try:
+            with open(BEST_TRAIN_PARAMS_FILE, 'r', encoding='utf-8') as f:
+                params = json.load(f)
+            logger.info(f"Loaded best training params: {params}")
+            return params
+        except Exception as e:
+            logger.warning(f"Failed to load best train params: {e}")
+    else:
+        logger.info("Best train params not found. Using defaults.")
+    return {}
 
 def save_cache(cache):
     # ファイル数も保存
@@ -110,8 +126,37 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             logger.error(f"Preprocessing failed with return code {ret_pre.returncode}")
             return 0.0
 
-        # Train with specific Model
-        cmd_train = [PYTHON_TRAIN, "components/train_for_filter_search.py", "--model_name", model_name]
+        if ret_pre.returncode != 0:
+            logger.error(f"Preprocessing failed with return code {ret_pre.returncode}")
+            return 0.0
+
+        # Train with specific Model and Optimized Params
+        train_script = "components/train_multitask_trial.py"
+        cmd_train = [PYTHON_TRAIN, train_script, "--model_name", model_name]
+        
+        # Load best params and append to command
+        best_params = load_best_train_params()
+        for k, v in best_params.items():
+            # model_nameは引数で指定されたもの（またはループで指定されたもの）を優先したいが、
+            # optimize_sequentialのmainでbest_modelが渡されるので、それを使う。
+            # 引数除外リスト: model_name, epochs (ここでは固定したい場合), fine_tune (Falseで評価したい)
+            if k not in ['model_name', 'fine_tune']:
+                cmd_train.extend([f"--{k}", str(v)])
+        
+        # 評価用なのでFine-tuningはOff、Epochsは短め（例えば5）にするか、best_paramsに従うか
+        # ここでは「フィルタの効果を見る」のが目的なので、FTなし・Epoch5程度で回すのが普通だが、
+        # ユーザーの意図として「最適パラメータで」ということなら、Epochも含めるべきか？
+        # 一般にフィルタ探索は高速に行いたいので、Epochは少なめに上書きする
+        if "--epochs" in cmd_train:
+             # 上書きする（削除して追加するのは面倒なので、引数解析の仕様に依存。通常は後勝ち）
+             cmd_train.extend(["--epochs", "5"])
+        else:
+             cmd_train.extend(["--epochs", "5"])
+             
+        cmd_train.extend(["--fine_tune", "False"])
+        
+
+
         logger.info(f"Running training with {model_name}...")
         ret_train = subprocess.run(cmd_train, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
@@ -119,8 +164,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             logger.error(f"Training failed: {ret_train.stderr}")
             return 0.0
 
-        # Extract Score
-        match = re.search(r"FINAL_SCORE:\s*([\d.]+)", ret_train.stdout)
+        # Extract Score (train_multitask_trial.py outputs FINAL_VAL_ACCURACY)
+        match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", ret_train.stdout)
         if match:
             score = float(match.group(1))
             logger.info(f"Result: Score = {score}")
@@ -332,3 +377,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # 処理完了通知音
+    winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)

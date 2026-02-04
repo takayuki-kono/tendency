@@ -5,6 +5,7 @@ import os
 import logging
 import json
 import hashlib
+import winsound
 
 # --- 設定 ---
 PYTHON_EXEC = r"d:\tendency\tendency.venv_tf210_gpu\Scripts\python.exe"
@@ -18,6 +19,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 CACHE_FILE = os.path.join(CACHE_DIR, "train_opt_cache.json")
+BEST_PARAMS_FILE = "outputs/best_train_params.json"
 
 if not os.path.exists(PYTHON_EXEC): PYTHON_EXEC = "python"
 
@@ -250,5 +252,12 @@ def main():
     logger.info(f"Final Fine-Tuned Score: {final_ft_score}")
     logger.info("="*50)
 
+    # Save Best Params
+    with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(current_params, f, indent=4)
+    logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")
+
 if __name__ == "__main__":
     main()
+    # 処理完了通知音
+    winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)
