@@ -22,6 +22,11 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_FILE = os.path.join(CACHE_DIR, "filter_opt_cache.json")
 BEST_TRAIN_PARAMS_FILE = "outputs/best_train_params.json"
 
+# 効率ベースの最適化設定
+# 効率 = 精度向上 / フィルタリング枚数
+# 効率が低いパラメータは自動的にスケールダウンまたは除外される
+MIN_EFFICIENCY_THRESHOLD = 0.00001  # 最小効率閾値（これ以下は除外候補）
+
 # パスが存在しない場合はデフォルトを使用
 if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
 if not os.path.exists(PYTHON_TRAIN): PYTHON_TRAIN = "python"
@@ -80,23 +85,40 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, grayscale=False, model_name='EfficientNetV2B0'):
+def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='EfficientNetV2B0'):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
+    
+    Returns:
+        tuple: (raw_score, total_images, filtered_count)
     """
     logger.info(f"\n{'='*50}")
-    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Grayscale={grayscale}")
+    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Grayscale={grayscale}")
     
     file_count = count_files("train") + count_files("validation")
-    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_gray={grayscale}_cnt={file_count}"
+    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}_cnt={file_count}"
     
     cache = load_cache()
     if cache_key in cache:
-        logger.info(f"Cache Hit! Score: {cache[cache_key]}")
-        return cache[cache_key]
+        cached = cache[cache_key]
+        # キャッシュには(raw_score, total_images, filtered_count)を保存
+        if isinstance(cached, (list, tuple)) and len(cached) >= 2:
+            if len(cached) == 3:
+                raw_score, total_images, filtered_count = cached
+            else:
+                # 旧形式(raw_score, filtering_rate)の互換性
+                raw_score, filtering_rate = cached
+                total_images = file_count
+                filtered_count = int(total_images * filtering_rate)
+            logger.info(f"Cache Hit! RawScore={raw_score:.4f}, Total={total_images}, Filtered={filtered_count}")
+            return (raw_score, total_images, filtered_count)
+        else:
+            # 古い形式のキャッシュ（互換性のため）
+            logger.info(f"Cache Hit (legacy format)! Score: {cached}")
+            return (cached, file_count, 0)
 
     try:
-        # Preprocess (same as before)
+        # Preprocess
         cmd_pre = [
             PYTHON_PREPROCESS,
             "preprocess_multitask.py",
@@ -110,7 +132,10 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             "--sharpness_percentile_low", str(sharpness_low),
             "--sharpness_percentile_high", str(sharpness_high),
             "--face_size_percentile_low", str(face_size_low),
-            "--face_size_percentile_high", str(face_size_high)
+            "--face_size_percentile_high", str(face_size_high),
+            "--retouching_percentile", str(retouching),
+            "--mask_percentile", str(mask),
+            "--glasses_percentile", str(glasses)
         ]
         if grayscale:
             cmd_pre.append("--grayscale")
@@ -124,234 +149,387 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
 
         if ret_pre.returncode != 0:
             logger.error(f"Preprocessing failed with return code {ret_pre.returncode}")
-            return 0.0
+            return (0.0, 0, 0)
 
-        if ret_pre.returncode != 0:
-            logger.error(f"Preprocessing failed with return code {ret_pre.returncode}")
-            return 0.0
+        # フィルタリング枚数を計算（前処理の出力からTotal/Savedを取得）
+        # logger.infoはstderrに出力されるため、stdout + stderr の両方を検索
+        preprocess_output = (ret_pre.stdout or "") + "\n" + (ret_pre.stderr or "")
+        total_images = 0
+        saved_images = 0
+        for line in preprocess_output.split('\n'):
+            # "Processed {src_root}: Total={total}, Saved={saved_count}, Skipped={skipped_count}"
+            match_stats = re.search(r'Total=(\d+), Saved=(\d+)', line)
+            if match_stats:
+                total_images += int(match_stats.group(1))
+                saved_images += int(match_stats.group(2))
+        
+        filtered_count = total_images - saved_images
+        if total_images > 0:
+            logger.info(f"Filtering Stats: Total={total_images}, Saved={saved_images}, Filtered={filtered_count} ({filtered_count/total_images*100:.1f}%)")
 
         # Train with specific Model and Optimized Params
         train_script = "components/train_multitask_trial.py"
         cmd_train = [PYTHON_TRAIN, train_script, "--model_name", model_name]
         
         # Load best params and append to command
+        # epochs, fine_tune, model_name は明示的に設定するので除外
         best_params = load_best_train_params()
         for k, v in best_params.items():
-            # model_nameは引数で指定されたもの（またはループで指定されたもの）を優先したいが、
-            # optimize_sequentialのmainでbest_modelが渡されるので、それを使う。
-            # 引数除外リスト: model_name, epochs (ここでは固定したい場合), fine_tune (Falseで評価したい)
-            if k not in ['model_name', 'fine_tune']:
+            if k not in ['model_name', 'fine_tune', 'epochs']:
                 cmd_train.extend([f"--{k}", str(v)])
         
-        # 評価用なのでFine-tuningはOff、Epochsは短め（例えば5）にするか、best_paramsに従うか
-        # ここでは「フィルタの効果を見る」のが目的なので、FTなし・Epoch5程度で回すのが普通だが、
-        # ユーザーの意図として「最適パラメータで」ということなら、Epochも含めるべきか？
-        # 一般にフィルタ探索は高速に行いたいので、Epochは少なめに上書きする
-        if "--epochs" in cmd_train:
-             # 上書きする（削除して追加するのは面倒なので、引数解析の仕様に依存。通常は後勝ち）
-             cmd_train.extend(["--epochs", "5"])
-        else:
-             cmd_train.extend(["--epochs", "5"])
-             
+        # 評価用なのでFine-tuningはOff、Epochsは短め（5）
+        cmd_train.extend(["--epochs", "5"])
         cmd_train.extend(["--fine_tune", "False"])
-        
 
-
-        logger.info(f"Running training with {model_name}...")
+        logger.info(f"Running training with {model_name} (epochs=5, fine_tune=False)...")
         ret_train = subprocess.run(cmd_train, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         if ret_train.returncode != 0:
             logger.error(f"Training failed: {ret_train.stderr}")
-            return 0.0
+            return (0.0, 0, 0)
 
-        # Extract Score (train_multitask_trial.py outputs FINAL_VAL_ACCURACY)
+        # Extract Score
         match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", ret_train.stdout)
         if match:
-            score = float(match.group(1))
-            logger.info(f"Result: Score = {score}")
+            raw_score = float(match.group(1))
             
+            # 各タスクのスコアを抽出してログに出力
+            for char_code in range(ord('A'), ord('Z') + 1):
+                task_label = chr(char_code)
+                # NNスクリプトは "TASK_A_ACCURACY: x.xxx (Balanced)" のような形式
+                match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*([\d\.]+)", ret_train.stdout)
+                if match_task:
+                    logger.info(f"  Task {task_label}: {float(match_task.group(1)):.4f}")
+
+            # 詳細なクラス別精度をログに転記
+            details_match = re.search(r"--- Task [A-Z] Details.*", ret_train.stdout, re.DOTALL)
+            if details_match:
+                logger.info("\n[Detailed Class Accuracy]")
+                logger.info(details_match.group(0).strip())
+
+
+            logger.info(f"Result: RawScore={raw_score:.4f} (Average), Total={total_images}, Filtered={filtered_count}")
+            
+            # キャッシュに保存
             cache = load_cache()
-            cache[cache_key] = score
+            cache[cache_key] = (raw_score, total_images, filtered_count)
             save_cache(cache)
-            return score
+            return (raw_score, total_images, filtered_count)
         else:
             logger.error("Score not found in training output.")
             logger.error(f"STDOUT:\n{ret_train.stdout}")
-            return 0.0
+            return (0.0, 0, 0)
 
     except Exception as e:
         logger.error(f"Error in trial: {e}")
-        return 0.0
+        return (0.0, 0, 0)
 
-def optimize_single_param(target_name, current_params, model_name, points=[0, 2, 5, 25, 50]):
+def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, points=[0, 2, 5, 25, 50]):
     """
     1つのパラメータを最適化する。
-    順次評価し、精度が上がらなくなったら早期終了。
+    
+    Returns:
+        tuple: (best_val, best_score, improvement, filtered_diff, efficiency)
+        - best_val: 最適なパラメータ値
+        - best_score: 最高スコア
+        - improvement: ベースラインからの精度向上
+        - filtered_diff: ベースラインからのフィルタリング枚数増加
+        - efficiency: 効率 = improvement / (filtered_diff + 1)
     """
     logger.info(f"\n>>> Optimizing {target_name} [Model: {model_name}] <<<")
+    logger.info(f"Baseline: Score={baseline_score:.4f}, Filtered={baseline_filtered}")
     
     def evaluate_wrapper(val):
         # Independent Optimization: Always start from all-zero params
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
             'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
-            'face_size_low': 0, 'face_size_high': 0
+            'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
         }
         test_params[target_name] = val
         
-        score = run_trial(
+        # run_trialは(raw_score, total_images, filtered_count)を返す
+        result = run_trial(
             test_params['pitch'], test_params['sym'], test_params['y_diff'], test_params['mouth_open'],
             test_params['eb_eye_high'], test_params['eb_eye_low'],
             test_params['sharpness_low'], test_params['sharpness_high'],
             test_params['face_size_low'], test_params['face_size_high'],
+            test_params['retouching'], test_params['mask'], test_params['glasses'],
             model_name=model_name
         )
-        return score
+        return result  # (raw_score, total_images, filtered_count)
 
     best_val = 0
-    best_score = -1.0
+    best_score = baseline_score
+    best_filtered = baseline_filtered
     
     for p in points:
         logger.info(f"Testing {target_name}={p}...")
-        score = evaluate_wrapper(p)
-        logger.info(f"  {target_name}={p} -> Score: {score:.4f}")
+        raw_score, total_images, filtered_count = evaluate_wrapper(p)
+        logger.info(f"  {target_name}={p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
         
-        if score > best_score:
-            best_score = score
+        if raw_score > best_score:
+            best_score = raw_score
             best_val = p
-            logger.info(f"  [NEW BEST] {target_name}={p} (Score: {score:.4f})")
+            best_filtered = filtered_count
+            logger.info(f"  [NEW BEST] {target_name}={p} (Score: {raw_score:.4f})")
     
-    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score:.4f})")
-    return best_val, best_score
+    # 効率計算
+    improvement = best_score - baseline_score
+    filtered_diff = best_filtered - baseline_filtered
+    # 効率 = 精度向上 / (フィルタリング枚数増加 + 1)  ※0除算防止
+    efficiency = improvement / (filtered_diff + 1) if filtered_diff >= 0 else improvement
+    
+    logger.info(f"Finished optimizing {target_name}.")
+    logger.info(f"  Best: {best_val}, Score: {best_score:.4f}")
+    logger.info(f"  Improvement: +{improvement:.4f}, FilteredDiff: +{filtered_diff}")
+    logger.info(f"  Efficiency: {efficiency:.6f} (improvement per filtered image)")
+    
+    return best_val, best_score, improvement, filtered_diff, efficiency
 
 def main():
-    logger.info("Starting Sequential Optimization")
+    logger.info("Starting Sequential Optimization (Efficiency-Based)")
     
     # Initial Params
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
         'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
-        'face_size_low': 0, 'face_size_high': 0
+        'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
     }
     
-    # --- Step 0: Model Architecture Selection ---
-    logger.info("\n>>> Step 0: Model Architecture Selection <<<")
+    # 効率情報を記録する辞書
+    # {param_name: {'val': value, 'improvement': float, 'filtered_diff': int, 'efficiency': float}}
+    param_efficiency = {}
+    
+    # --- Step 0: Model Architecture Selection & Baseline ---
+    logger.info("\n>>> Step 0: Model Architecture Selection & Baseline <<<")
     candidate_models = ['EfficientNetV2B0', 'EfficientNetV2S']
     best_model = 'EfficientNetV2B0'
     best_model_score = -1.0
+    baseline_filtered = 0
     
     for m in candidate_models:
-        # Use baseline params (all 0) for model comparison
         logger.info(f"Testing Model: {m}")
-        score = run_trial(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, model_name=m)
-        if score > best_model_score:
-            best_model_score = score
+        raw_score, total_images, filtered_count = run_trial(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, model_name=m)
+        if raw_score > best_model_score:
+            best_model_score = raw_score
             best_model = m
+            baseline_filtered = filtered_count
             
-    logger.info(f"Best Model Selected: {best_model} (Score: {best_model_score})")
+    logger.info(f"Best Model Selected: {best_model}")
+    logger.info(f"Baseline: Score={best_model_score:.4f}, Filtered={baseline_filtered}")
     
-    # Optimization Sequence using SELECTED MODEL
+    baseline_score = best_model_score
     
-    # 1. Pitch
-    val, _ = optimize_single_param('pitch', current_params, best_model)
-    current_params['pitch'] = val
+    # --- Parameter Optimization (recording efficiency) ---
+    param_names = [
+        'pitch', 'sym', 'y_diff', 'mouth_open',
+        'eb_eye_high', 'eb_eye_low', 'sharpness_low', 'sharpness_high',
+        'face_size_low', 'face_size_high', 'retouching', 'mask', 'glasses'
+    ]
     
-    # 2. Symmetry
-    val, _ = optimize_single_param('sym', current_params, best_model)
-    current_params['sym'] = val
-    
-    # 3. Y-Diff
-    val, _ = optimize_single_param('y_diff', current_params, best_model)
-    current_params['y_diff'] = val
-    
-    # 4. Mouth Open
-    val, _ = optimize_single_param('mouth_open', current_params, best_model)
-    current_params['mouth_open'] = val
-    
-    # 5. Eyebrow-Eye High (Top X% cut)
-    val, _ = optimize_single_param('eb_eye_high', current_params, best_model)
-    current_params['eb_eye_high'] = val
+    # Phase 1 loop
+    global_best_score = baseline_score
+    # 初期状態は全て0のパラメータ
+    global_best_params = {k: 0 for k in current_params}
+    global_best_desc = "Baseline (No Filter)"
 
-    # 6. Eyebrow-Eye Low (Bottom X% cut)
-    val, _ = optimize_single_param('eb_eye_low', current_params, best_model)
-    current_params['eb_eye_low'] = val
+    for param_name in param_names:
+        val, score, improvement, filtered_diff, efficiency = optimize_single_param(
+            param_name, current_params, best_model, baseline_score, baseline_filtered
+        )
+        current_params[param_name] = val
+        param_efficiency[param_name] = {
+            'val': val,
+            'improvement': improvement,
+            'filtered_diff': filtered_diff,
+            'efficiency': efficiency
+        }
+        
+        # 単体でのベスト記録を更新したか確認
+        if score > global_best_score:
+            global_best_score = score
+            # このパラメータだけ有効にした辞書を作成
+            temp_params = {k: 0 for k in current_params} # Reset all to 0
+            temp_params[param_name] = val
+            global_best_params = temp_params
+            global_best_desc = f"Single Best ({param_name}={val})"
+            logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {score:.4f}")
     
-    # 7. Sharpness Low (Bottom X% cut - blurry images)
-    val, _ = optimize_single_param('sharpness_low', current_params, best_model)
-    current_params['sharpness_low'] = val
-
-    # 8. Sharpness High (Top X% cut - noisy images)
-    val, _ = optimize_single_param('sharpness_high', current_params, best_model)
-    current_params['sharpness_high'] = val
-    
-    # 9. Face Size Low (Bottom X% cut - small/low-res images)
-    val, _ = optimize_single_param('face_size_low', current_params, best_model)
-    current_params['face_size_low'] = val
-    
-    # 10. Face Size High (Top X% cut - unusually large images)
-    val, _ = optimize_single_param('face_size_high', current_params, best_model)
-    current_params['face_size_high'] = val
-    
-    # 11. Grayscale (Boolean comparison)
+    # 14. Grayscale (Boolean comparison)
+    # Grayscaleは独立試行として扱うか、最後に組み合わせるか。
+    # 既存ロジックに合わせて最後に組み合わせるが、単体のベストと比較する際にも考慮が必要。
+    # ここでは既存通り、current_paramsには含める。
     logger.info("\n>>> Optimizing Grayscale (True vs False) <<<")
-    score_color = run_trial(
+    result_color = run_trial(
         current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
         current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'], current_params['sharpness_high'],
-        current_params['face_size_low'], current_params['face_size_high'],
+        current_params['face_size_low'], current_params['face_size_high'], current_params['retouching'],
+        current_params['mask'], current_params['glasses'],
         grayscale=False, model_name=best_model
     )
-    score_gray = run_trial(
+    result_gray = run_trial(
         current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
         current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'], current_params['sharpness_high'],
-        current_params['face_size_low'], current_params['face_size_high'],
+        current_params['face_size_low'], current_params['face_size_high'], current_params['retouching'],
+        current_params['mask'], current_params['glasses'],
         grayscale=True, model_name=best_model
     )
+    score_color = result_color[0]
+    score_gray = result_gray[0]
+    
     if score_gray > score_color:
         current_params['grayscale'] = True
-        logger.info(f"Grayscale selected (Score: {score_gray} > {score_color})")
+        logger.info(f"Grayscale selected (Score: {score_gray:.4f} > {score_color:.4f})")
+        # Grayscale単体でのスコアもチェック（他のパラメータが全部盛りの状態での比較なので、純粋なSingle Bestとは違うが、ここでは最終的な構成の一部として扱う）
+        # ただしGlobal Bestの更新は「パラメータ単体」のループで行っているので、ここでは行わない。
     else:
         current_params['grayscale'] = False
-        logger.info(f"Color selected (Score: {score_color} >= {score_gray})")
+        logger.info(f"Color selected (Score: {score_color:.4f} >= {score_gray:.4f})")
     
-    # Phase 2: Global Scaling Optimization
-    logger.info("\n>>> Phase 2: Global Scaling Optimization (x1.0, x0.5, x0.25) <<<")
+    # Phase 2: Efficiency-Based Scaling
+    logger.info("\n>>> Phase 2: Efficiency-Based Scaling <<<")
+    # 効率の最大値を取得
+    efficiencies = [info['efficiency'] for info in param_efficiency.values()]
+    max_efficiency = max(efficiencies) if efficiencies else 1.0
+    if max_efficiency <= 0: max_efficiency = 1.0 # 0除算防止
     
-    best_independent_params = current_params.copy()
-    scaling_factors = [1.0, 0.5, 0.25]
+    logger.info(f"Max Efficiency: {max_efficiency:.8f}")
     
-    best_scaling_score = -1.0
-    best_scaled_params = None
-    best_factor = 1.0
+    # 3つのスケーリング戦略を用意
+    # 3つのスケーリング戦略ではなく、効率順にパラメータを追加していく「Greedy Integration」戦略
+    # ユーザー要望: "精度向上効率が高い順に精度落ちるまで統合"
     
-    for factor in scaling_factors:
-        scaled_params = {
-            k: int(v * factor) for k, v in best_independent_params.items() if k != 'grayscale'
-        }
-        scaled_params['grayscale'] = best_independent_params.get('grayscale', False)
-        logger.info(f"Testing Scaling Factor x{factor}: {scaled_params}")
+    logger.info("\n--- Testing Greedy Integration Strategy ---")
+    
+    scaled_results = [] # Initialize here
+    
+    # 効率順にソート (効率 > 0 のもののみ)
+    sorted_params = sorted(
+        [p for p in param_efficiency.items() if p[1]['efficiency'] > 0 and p[1]['improvement'] > 0],
+        key=lambda x: x[1]['efficiency'], 
+        reverse=True
+    )
+    
+    current_greedy_params = {k: 0 for k in current_params} # Start empty
+    current_greedy_params['grayscale'] = current_params.get('grayscale', False)
+    
+    # ベースライン（何もなし + Grayscale）のスコア計測
+    # (Gray有無ですでにresult_color/result_grayがあるが、念のため今の構成で測る)
+    base_res = run_trial(
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        grayscale=current_greedy_params['grayscale'], model_name=best_model
+    )
+    current_best_score = base_res[0]
+    logger.info(f"Base Score (No filters): {current_best_score:.4f}")
+    
+    greedy_history = []
+    
+    for param_name, info in sorted_params:
+        val = info['val']
+        logger.info(f"Trying to add {param_name}={val} (Efficiency: {info['efficiency']:.6f})...")
         
-        score = run_trial(
-            scaled_params['pitch'], scaled_params['sym'], scaled_params['y_diff'], scaled_params['mouth_open'],
-            scaled_params['eb_eye_high'], scaled_params['eb_eye_low'],
-            scaled_params['sharpness_low'], scaled_params['sharpness_high'],
-            scaled_params['face_size_low'], scaled_params['face_size_high'],
-            grayscale=scaled_params['grayscale'], model_name=best_model
+        # 一時的にパラメータ適用
+        temp_params = current_greedy_params.copy()
+        temp_params[param_name] = val
+        
+        res = run_trial(
+            temp_params['pitch'], temp_params['sym'], temp_params['y_diff'], temp_params['mouth_open'],
+            temp_params['eb_eye_high'], temp_params['eb_eye_low'],
+            temp_params['sharpness_low'], temp_params['sharpness_high'],
+            temp_params['face_size_low'], temp_params['face_size_high'],
+            temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
+            grayscale=temp_params['grayscale'], model_name=best_model
         )
+        score, total, filtered = res
         
-        if score > best_scaling_score:
-            best_scaling_score = score
-            best_scaled_params = scaled_params
-            best_factor = factor
+        if score >= current_best_score:
+            logger.info(f"  -> Accepted (Score: {score:.4f} >= {current_best_score:.4f})")
+            current_best_score = score
+            current_greedy_params[param_name] = val
+            greedy_history.append((param_name, val, score))
+        else:
+            logger.info(f"  -> Rejected (Score: {score:.4f} < {current_best_score:.4f})")
+            logger.info("  -> Stopping integration as accuracy dropped.")
+            break
             
-    logger.info(f"Phase 2 Complete. Best Factor: x{best_factor} (Score: {best_scaling_score})")
-    current_params = best_scaled_params
-    final_score = best_scaling_score
+    scaled_results.append({
+        'name': "Greedy Integration",
+        'params': current_greedy_params,
+        'score': current_best_score,
+        'filtered': -1 # Calculate later or ignore
+    })
+
+    # 元のパラメータでもスコアを確認（比較用）
+    logger.info("\n--- Testing Original Parameters (no scaling) ---")
+    original_result = run_trial(
+        current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
+        current_params['eb_eye_high'], current_params['eb_eye_low'],
+        current_params['sharpness_low'], current_params['sharpness_high'],
+        current_params['face_size_low'], current_params['face_size_high'],
+        current_params['retouching'], current_params['mask'], current_params['glasses'],
+        grayscale=current_params['grayscale'], model_name=best_model
+    )
+    original_score, original_total, original_filtered = original_result
+    
+    # 最終比較
+    logger.info("\n>>> Final Selection Phase <<<")
+    
+    candidates = []
+    # Scaled Results
+    for res in scaled_results:
+        candidates.append(res)
+        logger.info(f"Strategy: {res['name']:<15} Score={res['score']:.4f}, Filtered={res['filtered']}")
+        
+    # Original
+    candidates.append({
+        'name': "Original (No Scale)",
+        'params': current_params,
+        'score': original_score,
+        'filtered': original_filtered
+    })
+    logger.info(f"Strategy: {'Original':<15} Score={original_score:.4f}, Filtered={original_filtered}")
+    
+    # Single Best
+    # Grayscaleの結果を反映して再評価する
+    logger.info(f"\n--- Testing Single Best ({global_best_desc}) with Grayscale={current_params.get('grayscale', False)} ---")
+    single_best_params_eval = global_best_params.copy()
+    single_best_params_eval['grayscale'] = current_params.get('grayscale', False)
+    
+    sb_res = run_trial(
+        single_best_params_eval['pitch'], single_best_params_eval['sym'], single_best_params_eval['y_diff'], single_best_params_eval['mouth_open'],
+        single_best_params_eval['eb_eye_high'], single_best_params_eval['eb_eye_low'],
+        single_best_params_eval['sharpness_low'], single_best_params_eval['sharpness_high'],
+        single_best_params_eval['face_size_low'], single_best_params_eval['face_size_high'],
+        single_best_params_eval['retouching'], single_best_params_eval['mask'], single_best_params_eval['glasses'],
+        grayscale=single_best_params_eval['grayscale'], model_name=best_model
+    )
+    sb_score, sb_total, sb_filtered = sb_res
+    
+    candidates.append({
+        'name': f"Single Best ({global_best_desc})",
+        'params': single_best_params_eval,
+        'score': sb_score,
+        'filtered': sb_filtered
+    })
+    logger.info(f"Strategy: {'Single Best':<15} Score={sb_score:.4f}, Filtered={sb_filtered}")
+
+    # ベストを選択 (Score最大)
+    best_candidate = max(candidates, key=lambda x: x['score'])
+    
+    logger.info(f"-> Selected: {best_candidate['name']}")
+    
+    current_params = best_candidate['params']
+    final_best_score = best_candidate['score']
     
     logger.info("\n" + "="*50)
     logger.info("OPTIMIZATION COMPLETE")
     logger.info(f"Final Best Params: {current_params}")
     logger.info(f"Final Best Model: {best_model}")
-    logger.info(f"Final Score: {final_score}")
+    logger.info(f"Final Score: {final_best_score:.4f}")
+    logger.info(f"Baseline Score: {baseline_score:.4f}")
+    logger.info(f"Total Improvement: +{final_best_score - baseline_score:.4f}")
     logger.info("="*50)
 
     # Generate and print the final preprocessing command
@@ -367,6 +545,9 @@ def main():
         f"--sharpness_percentile_high {current_params['sharpness_high']} "
         f"--face_size_percentile_low {current_params['face_size_low']} "
         f"--face_size_percentile_high {current_params['face_size_high']} "
+        f"--retouching_percentile {current_params['retouching']} "
+        f"--mask_percentile {current_params['mask']} "
+        f"--glasses_percentile {current_params['glasses']} "
     )
     if current_params.get('grayscale', False):
         final_cmd += "--grayscale "

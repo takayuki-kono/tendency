@@ -33,18 +33,57 @@ BATCH_SIZE = 32
 PREPROCESSED_TRAIN_DIR = 'preprocessed_multitask/train'
 PREPROCESSED_VALIDATION_DIR = 'preprocessed_multitask/validation'
 
-# タスク定義
-TASK_A_LABELS = ['a', 'b', 'c']
-TASK_B_LABELS = ['d', 'e']
-TASK_C_LABELS = ['f', 'g']
-TASK_D_LABELS = ['h', 'i']
-ALL_TASK_LABELS = [TASK_A_LABELS, TASK_B_LABELS, TASK_C_LABELS, TASK_D_LABELS]
+# タスク定義（動的生成のため初期値は空）
+ALL_TASK_LABELS = []
+
+def get_all_task_labels(directory, single_task_mode=False):
+    """
+    ディレクトリ内のフォルダ名からタスク構造を解析する
+    """
+    if not os.path.exists(directory):
+        # 存在しない場合はデフォルト（エラー回避のためだが、実行時には必ずディレクトリが必要）
+        # フォールバックとして4タスクを返す（既存互換）
+        return [['a', 'b'], ['d', 'e'], ['f', 'g'], ['h', 'i']]
+        
+    subdirs = [d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
+    if not subdirs:
+        return [['a', 'b'], ['d', 'e'], ['f', 'g'], ['h', 'i']]
+    
+    if single_task_mode:
+        # シングルタスクモード: ディレクトリ名をそのままクラス名として扱う
+        # タスク数は1、クラス名はディレクトリ名のリスト
+        sorted_labels = [sorted(subdirs)]
+        logger.info(f"Single Task Mode: Detected 1 task with {len(sorted_labels[0])} classes")
+        logger.info(f"  Classes: {sorted_labels[0]}")
+        return sorted_labels
+
+    # 文字数が揃っているか確認し、揃っていればそれをタスク数とする
+    first_len = len(subdirs[0])
+    task_labels = [set() for _ in range(first_len)]
+    
+    for d in subdirs:
+        if len(d) != first_len:
+            continue # 文字数が違うフォルダは無視（エラーにするのもありだが）
+        for i, char in enumerate(d):
+            task_labels[i].add(char)
+            
+    # ソートしてリスト化
+    sorted_labels = [sorted(list(chars)) for chars in task_labels]
+    
+    # ログ出力
+    logger.info(f"Detected Task Structure: {len(sorted_labels)} tasks")
+    for i, labels in enumerate(sorted_labels):
+        logger.info(f"  Task {chr(65+i)}: {labels}")
+
+    # 全てのタスクが少なくとも1つのクラスを持っているか確認
+    # (持っていない場合は空リストになるが、その場合はタスクとして機能しない)
+    return sorted_labels
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-def calculate_class_weights_as_tables(directory):
+def calculate_class_weights_as_tables(directory, task_labels, single_task_mode=False):
     # train_with_bayesian.py から移植
     logger.info(f"Calculating class weights from directory: {directory}")
     multi_label_counts = {}
@@ -61,19 +100,24 @@ def calculate_class_weights_as_tables(directory):
 
     if total_images == 0: return None
 
-    per_task_counts = [{label: 0 for label in task_labels} for task_labels in ALL_TASK_LABELS]
-    for multi_label, count in multi_label_counts.items():
-        for i, char_label in enumerate(multi_label):
-            if i < len(per_task_counts) and char_label in per_task_counts[i]:
-                per_task_counts[i][char_label] += count
+    if single_task_mode:
+        # シングルタスクモード: ディレクトリ名がそのままクラス
+        # task_labels[0] に全クラスが入っている
+        per_task_counts = [multi_label_counts] # そのまま辞書を使う
+    else:
+        per_task_counts = [{label: 0 for label in t_labels} for t_labels in task_labels]
+        for multi_label, count in multi_label_counts.items():
+            for i, char_label in enumerate(multi_label):
+                if i < len(per_task_counts) and char_label in per_task_counts[i]:
+                    per_task_counts[i][char_label] += count
 
     weight_tables = []
-    for i, task_labels in enumerate(ALL_TASK_LABELS):
+    for i, labels in enumerate(task_labels):
         counts = per_task_counts[i]
-        num_classes = len(task_labels)
+        num_classes = len(labels)
         class_indices = []
         class_weight_values = []
-        for j, label in enumerate(task_labels):
+        for j, label in enumerate(labels):
             class_indices.append(j)
             class_count = counts.get(label, 0)
             weight = total_images / (num_classes * (class_count + 1e-6))
@@ -89,7 +133,7 @@ def calculate_class_weights_as_tables(directory):
         weight_tables.append(table)
     return weight_tables
 
-def create_dataset(directory, task_labels, weight_tables=None, augment_params=None):
+def create_dataset(directory, task_labels, weight_tables=None, augment_params=None, single_task_mode=False):
     label_tables = [
         tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(keys=tf.constant(labels), values=tf.constant(list(range(len(labels))))),
@@ -100,8 +144,16 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
     def parse_path(path):
         parts = tf.strings.split(path, os.sep)
         folder_name = parts[-2]
-        chars = [tf.strings.substr(folder_name, i, 1) for i in range(len(task_labels))]
-        labels = tuple(label_tables[i].lookup(chars[i]) for i in range(len(task_labels)))
+        
+        if single_task_mode:
+            # シングルタスクモード: フォルダ名全体をクラス名としてルックアップ
+            # タスクは1つだけなので、index 0 のテーブルを使用
+            labels = tuple([label_tables[0].lookup(folder_name)])
+        else:
+            # マルチタスクモード: 文字分解
+            chars = [tf.strings.substr(folder_name, i, 1) for i in range(len(task_labels))]
+            labels = tuple(label_tables[i].lookup(chars[i]) for i in range(len(task_labels)))
+            
         image = tf.io.read_file(path)
         image = tf.image.decode_jpeg(image, channels=3)
         image = tf.image.resize(image, [IMG_SIZE, IMG_SIZE])
@@ -235,7 +287,58 @@ class BalancedSparseCategoricalAccuracy(tf.keras.metrics.Metric):
         self.true_positives.assign(tf.zeros(self.num_classes))
         self.total_count.assign(tf.zeros(self.num_classes))
 
-def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params):
+class MinClassAccuracy(tf.keras.metrics.Metric):
+    def __init__(self, num_classes, name='min_class_accuracy', **kwargs):
+        super(MinClassAccuracy, self).__init__(name=name, **kwargs)
+        self.num_classes = num_classes
+        self.true_positives = self.add_weight(name='tp', shape=(num_classes,), initializer='zeros')
+        self.total_count = self.add_weight(name='tc', shape=(num_classes,), initializer='zeros')
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        # Handle One-hot inputs (Mixup)
+        if len(y_true.shape) > 1 and y_true.shape[-1] > 1:
+            y_true = tf.argmax(y_true, axis=-1)
+            
+        y_true = tf.cast(y_true, tf.int32)
+        y_pred = tf.argmax(y_pred, axis=-1)
+        y_pred = tf.cast(y_pred, tf.int32)
+        
+        # Flatten
+        y_true = tf.reshape(y_true, [-1])
+        y_pred = tf.reshape(y_pred, [-1])
+
+        if sample_weight is not None:
+             sample_weight = tf.cast(sample_weight, tf.float32)
+             sample_weight = tf.reshape(sample_weight, [-1])
+
+        # Vectorized Update
+        y_true_onehot = tf.one_hot(y_true, self.num_classes) # [Batch, NumClasses]
+        
+        if sample_weight is not None:
+             # Ensure shape broadcasting [Batch, 1] * [Batch, NumClasses]
+             sample_weight = tf.expand_dims(sample_weight, -1)
+             y_true_onehot = y_true_onehot * sample_weight
+
+        # Update Total Count (per class presence)
+        self.total_count.assign_add(tf.reduce_sum(y_true_onehot, axis=0))
+
+        # Update True Positives
+        correct_mask = tf.cast(tf.equal(y_true, y_pred), tf.float32) # [Batch]
+        # Mask the one-hot vectors to only keep correct ones
+        correct_onehot = y_true_onehot * tf.expand_dims(correct_mask, -1)
+        self.true_positives.assign_add(tf.reduce_sum(correct_onehot, axis=0))
+
+    def result(self):
+        per_class_acc = tf.math.divide_no_nan(self.true_positives, self.total_count)
+        return tf.reduce_min(per_class_acc)
+
+    def reset_state(self):
+        self.true_positives.assign(tf.zeros(self.num_classes))
+        self.total_count.assign(tf.zeros(self.num_classes))
+
+
+
+def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params, task_labels):
     model_map = {
         'EfficientNetV2B0': EfficientNetV2B0,
         'EfficientNetV2S': EfficientNetV2S,
@@ -276,9 +379,9 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         x = layers.Activation('relu')(x)
         x = layers.Dropout(dropout)(x)
 
-    output_names = [f'task_{chr(97+i)}_output' for i in range(len(ALL_TASK_LABELS))]
+    output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
     outputs = []
-    for name, labels in zip(output_names, ALL_TASK_LABELS):
+    for name, labels in zip(output_names, task_labels):
         # Mixed Precision安定化: 出力層はfloat32で行う
         x_out = layers.Dense(len(labels), name=name+'_logits')(x)
         outputs.append(layers.Activation('softmax', dtype='float32', name=name)(x_out))
@@ -295,16 +398,17 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         loss_fn = 'sparse_categorical_crossentropy'
 
     loss_dict = {name: loss_fn for name in output_names}
-    loss_weights_dict = {name: 1.0 / len(ALL_TASK_LABELS) for name in output_names}
+    loss_weights_dict = {name: 1.0 / len(task_labels) for name in output_names}
     
     # メトリクス定義 (Balanced Accuracyを追加)
     metrics_dict = {}
-    for name, labels in zip(output_names, ALL_TASK_LABELS):
+    for name, labels in zip(output_names, task_labels):
         metrics_list = ['accuracy'] 
         if use_categorical:
             metrics_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')]
         
         metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
+        metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
         metrics_dict[name] = metrics_list
 
     wd = augment_params.get('weight_decay', 0.0)
@@ -350,7 +454,8 @@ def main():
     # Mode
     parser.add_argument('--fine_tune', type=str, default='False')
     parser.add_argument('--epochs', type=int, default=10)
-    
+    parser.add_argument('--single_task_mode', type=str, default='False') # "True" or "False"
+
     args = parser.parse_args()
     
     augment_params = {
@@ -364,14 +469,22 @@ def main():
         'weight_decay': args.weight_decay
     }
     
+    single_task_mode = args.single_task_mode.lower() == 'true'
+    # single_task_mode = True # Hardcoded as requested - Reverted
+    
     logger.info(f"Starting trial with params: {args}")
+    logger.info(f"Single Task Mode: {single_task_mode}")
+    
+    # 動的タスクラベル取得
+    task_labels = get_all_task_labels(PREPROCESSED_TRAIN_DIR, single_task_mode=single_task_mode)
+    logger.info(f"Detected {len(task_labels)} tasks from {PREPROCESSED_TRAIN_DIR}")
 
-    weight_tables = calculate_class_weights_as_tables(PREPROCESSED_TRAIN_DIR)
-    val_weight_tables = calculate_class_weights_as_tables(PREPROCESSED_VALIDATION_DIR)
+    weight_tables = calculate_class_weights_as_tables(PREPROCESSED_TRAIN_DIR, task_labels, single_task_mode=single_task_mode)
+    val_weight_tables = calculate_class_weights_as_tables(PREPROCESSED_VALIDATION_DIR, task_labels, single_task_mode=single_task_mode)
 
-    train_ds = create_dataset(PREPROCESSED_TRAIN_DIR, ALL_TASK_LABELS, weight_tables=weight_tables, augment_params=augment_params)\
+    train_ds = create_dataset(PREPROCESSED_TRAIN_DIR, task_labels, weight_tables=weight_tables, augment_params=augment_params, single_task_mode=single_task_mode)\
         .shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-    val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, ALL_TASK_LABELS, weight_tables=val_weight_tables, augment_params=augment_params)\
+    val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, task_labels, weight_tables=val_weight_tables, augment_params=augment_params, single_task_mode=single_task_mode)\
         .batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
     model = create_model(
@@ -381,7 +494,8 @@ def main():
         args.dropout, 
         args.head_dropout,
         args.learning_rate,
-        augment_params
+        augment_params,
+        task_labels
     )
 
     # コールバック生成関数 (Balanced Accuracyを監視 + Cosine Decay)
@@ -391,8 +505,14 @@ def main():
             # Cosine Decay: 0.5 * (1 + cos(pi * epoch / total_epochs)) * initial_lr
             return initial_lr * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
 
+        # Early Stopping Monitor
+        if len(task_labels) == 1:
+            monitor_metric = 'val_min_class_accuracy'
+        else:
+            monitor_metric = 'val_task_a_output_min_class_accuracy'
+
         return [
-            EarlyStopping(monitor='val_task_a_output_balanced_accuracy', patience=5, restore_best_weights=True, verbose=1, mode='max'),
+            EarlyStopping(monitor=monitor_metric, patience=5, restore_best_weights=True, verbose=1, mode='max'),
             LearningRateScheduler(cosine_decay, verbose=1)
         ]
 
@@ -412,11 +532,66 @@ def main():
         verbose=2
     )
     
-    # Phase 1 のベストスコアを記録
-    if 'val_task_a_output_accuracy' in history.history:
-        warmup_best_score = max(history.history['val_task_a_output_accuracy'])
-    else:
-        warmup_best_score = 0.0
+    # Phase 1 のベストスコアを記録 (全タスクの平均Balanced Accuracy)
+    # history.historyには 'val_task_a_output_balanced_accuracy' 等が含まれる
+    warmup_best_score = 0.0
+    if hasattr(history, 'history'):
+        task_acc_keys = []
+        if len(task_labels) == 1:
+            # Single task mode (metrics might not have prefix)
+            single_keys = ['val_min_class_accuracy', 'val_balanced_accuracy', 'val_accuracy']
+            for k in single_keys:
+                if k in history.history:
+                    task_acc_keys.append(k)
+                    break # Use the best one found
+        else:
+            for i in range(len(task_labels)):
+                char_code = chr(ord('a') + i)
+                key_min = f"val_task_{char_code}_output_min_class_accuracy"
+                key_bal = f"val_task_{char_code}_output_balanced_accuracy"
+                key_acc = f"val_task_{char_code}_output_accuracy"
+                
+                if key_min in history.history:
+                    task_acc_keys.append(key_min)
+                elif key_bal in history.history:
+                    task_acc_keys.append(key_bal)
+                elif key_acc in history.history:
+                    task_acc_keys.append(key_acc)
+        
+        if task_acc_keys:
+            # 各エポックごとの平均を計算
+            num_epochs = len(history.history[task_acc_keys[0]])
+            avg_scores = []
+            for epoch in range(num_epochs):
+                # Calculate average MinClassAccuracy across tasks
+                epoch_sum = 0
+                count = 0
+                for char_code in range(ord('a'), ord('a') + len(task_labels)):
+                    key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
+                    if key_min in history.history:
+                         epoch_sum += history.history[key_min][epoch]
+                         count += 1
+                    elif 'val_min_class_accuracy' in history.history:
+                         # Single task fallback
+                         epoch_sum += history.history['val_min_class_accuracy'][epoch]
+                         count += 1
+                         break # Only one task anyway
+                
+                if count > 0:
+                    avg_scores.append(epoch_sum / count)
+                else:
+                    # If min keys are missing, but we entered because of other keys...
+                    # Try to use whatever keys we found in task_acc_keys?
+                    # No, let's just use what we have.
+                    # Fallback: use balanced accuracy if min is missing for this task
+                    # Re-loop to calculate sum based on task_acc_keys (which has best available metric)
+                    epoch_sum_fallback = sum(history.history[k][epoch] for k in task_acc_keys)
+                    avg_scores.append(epoch_sum_fallback / len(task_acc_keys))
+
+            warmup_best_score = max(avg_scores)
+            logger.info(f"Phase 1 Best Average Min-Class Score: {warmup_best_score:.4f}")
+        else:
+            logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
     
     # Backup weights (FTで悪化した場合の保険)
     temp_weights_path = 'temp_warmup_weights.weights.h5'
@@ -442,7 +617,7 @@ def main():
             for layer in base_model_layer.layers[:-40]:
                 layer.trainable = False
             
-            output_names = [f'task_{chr(97+i)}_output' for i in range(len(ALL_TASK_LABELS))]
+            output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
             
             # Loss switching based on Mixup/Smoothing
             label_smoothing = augment_params.get('label_smoothing', 0.0)
@@ -453,16 +628,17 @@ def main():
             else:
                 loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
 
-            loss_weights_dict = {name: 1.0 / len(ALL_TASK_LABELS) for name in output_names}
+            loss_weights_dict = {name: 1.0 / len(task_labels) for name in output_names}
             
             # Update metrics to match loss type (though BalancedAcc handles one-hot, 'accuracy' needs to match)
             metrics_dict = {}
-            for name, labels in zip(output_names, ALL_TASK_LABELS):
+            for name, labels in zip(output_names, task_labels):
                 metrics_list = ['accuracy'] 
                 if use_categorical:
                     metrics_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')] # Explicit categorical acc
                 
                 metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
+                metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
                 metrics_dict[name] = metrics_list
             
             # 再コンパイル (学習率をさらに下げる: 1/10 -> 1/100)
@@ -493,10 +669,53 @@ def main():
             )
             
             # スコア比較とロールバック
-            if 'val_task_a_output_accuracy' in history_ft.history:
-                ft_best_score = max(history_ft.history['val_task_a_output_accuracy'])
-            else:
-                ft_best_score = 0.0
+            # FTのベストスコアも全タスク平均で計算
+            ft_best_score = 0.0
+            if hasattr(history_ft, 'history'):
+                task_acc_keys = []
+                if len(task_labels) == 1:
+                    # Single task mode (metrics might not have prefix)
+                    single_keys = ['val_min_class_accuracy', 'val_balanced_accuracy', 'val_accuracy']
+                    for k in single_keys:
+                        if k in history_ft.history:
+                            task_acc_keys.append(k)
+                            break
+                else:
+                    for i in range(len(task_labels)):
+                        char_code = chr(ord('a') + i)
+                        key_min = f"val_task_{char_code}_output_min_class_accuracy"
+                        key_bal = f"val_task_{char_code}_output_balanced_accuracy"
+                        key_acc = f"val_task_{char_code}_output_accuracy"
+                        
+                        if key_min in history_ft.history:
+                            task_acc_keys.append(key_min)
+                        elif key_bal in history_ft.history:
+                            task_acc_keys.append(key_bal)
+                        elif key_acc in history_ft.history:
+                            task_acc_keys.append(key_acc)
+                
+                if task_acc_keys:
+                    num_epochs = len(history_ft.history[task_acc_keys[0]])
+                    avg_scores = []
+                    for epoch in range(num_epochs):
+                        epoch_sum = 0
+                        count = 0
+                        for char_code in range(ord('a'), ord('a') + len(task_labels)):
+                            key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
+                            if key_min in history_ft.history:
+                                 epoch_sum += history_ft.history[key_min][epoch]
+                                 count += 1
+                            elif 'val_min_class_accuracy' in history_ft.history:
+                                 epoch_sum += history_ft.history['val_min_class_accuracy'][epoch]
+                                 count += 1
+                                 break
+                        
+                        if count > 0:
+                            avg_scores.append(epoch_sum / count)
+                        else:
+                            avg_scores.append(0.0)
+
+                    ft_best_score = max(avg_scores)
             
             logger.info(f"Warmup Best: {warmup_best_score:.4f}, FT Best: {ft_best_score:.4f}")
             
@@ -528,19 +747,131 @@ def main():
 
     # 最終結果出力
     # 上記ロジックで final_val_acc が計算されている場合がある
+    logger.info(f"Final Score calculated as average across {len(task_labels)} tasks.")
+    
     # 最終結果出力 (全タスク)
-    print(f"FINAL_VAL_ACCURACY: {final_val_acc}") # 互換性のため維持
+    # print(f"FINAL_VAL_ACCURACY: {final_val_acc}") # 計算方法を変更するため一旦コメントアウト
 
     # 全タスクのスコアを表示
     if 'history' in locals() and hasattr(history, 'history'):
-        for char_code, task_label in zip(range(ord('a'), ord('a') + len(ALL_TASK_LABELS)), ['A', 'B', 'C', 'D']):
-            task_key = f"val_task_{chr(char_code)}_output_accuracy"
-            if task_key in history.history:
-                # best score (max) or final score? Usually max is better for "potential"
-                best_task_score = max(history.history[task_key])
-                print(f"TASK_{task_label}_ACCURACY: {best_task_score}")
+        task_names = [chr(65+i) for i in range(len(task_labels))] # A, B, C...
+        for char_code, task_label in zip(range(ord('a'), ord('a') + len(task_labels)), task_names):
+            # Try Balanced Accuracy first
+            task_key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
+            task_key_balanced = f"val_task_{chr(char_code)}_output_balanced_accuracy"
+            task_key_acc = f"val_task_{chr(char_code)}_output_accuracy"
+            
+            if task_key_min in history.history:
+                best_task_score = max(history.history[task_key_min])
+                print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (MinClass)")
+            elif task_key_balanced in history.history:
+                best_task_score = max(history.history[task_key_balanced])
+                print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (Balanced)")
+            elif task_key_acc in history.history:
+                best_task_score = max(history.history[task_key_acc])
+                print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (Normal)")
+
+    # --- 詳細なクラス別精度の出力 ---
+    logger.info("Computing detailed per-class accuracy...")
+    
+    # バリデーションデータの予測
+    val_preds = model.predict(val_ds, verbose=0)
+    
+    # Datasetから正解ラベルを回収
+    val_labels_dict = {}
+    for _, y_batch, *_ in val_ds: # y_batch is dict
+        for k, v in y_batch.items():
+            if k not in val_labels_dict: val_labels_dict[k] = []
+            val_labels_dict[k].append(v.numpy())
+            
+    # Concatenate
+    for k in val_labels_dict:
+        val_labels_dict[k] = np.concatenate(val_labels_dict[k], axis=0)
+        
+    # 各タスクごとに計算
+    # model.outputs の順序と shape を考慮
+    output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
+    
+    # validation予測値の整形 (単一タスクの場合はリストではない可能性がある)
+    if isinstance(val_preds, np.ndarray):
+        val_preds = [val_preds] # リスト化
+        
+    for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
+        # 予測ラベル
+        pred_probs = val_preds[i] # [N, NumClasses]
+        pred_labels = np.argmax(pred_probs, axis=-1)
+        
+        # 正解ラベル
+        true_labels_raw = val_labels_dict[task_name] # [N, ] or [N, NumClasses] (OneHot)
+        
+        # One-hotならインデックスに戻す
+        if len(true_labels_raw.shape) > 1 and true_labels_raw.shape[-1] > 1:
+            true_labels = np.argmax(true_labels_raw, axis=-1)
+        else:
+            true_labels = true_labels_raw.astype(int)
+            
+        print(f"\n--- Task {chr(65+i)} Details ({len(class_names)} classes) ---")
+        
+        # クラスごとの精度計算
+        # Confusion Matrix的なものを手計算
+        for cls_idx, cls_name in enumerate(class_names):
+            # このクラスが正解であるインデックス
+            mask = (true_labels == cls_idx)
+            count = np.sum(mask)
+            
+            if count > 0:
+                correct = np.sum(pred_labels[mask] == cls_idx)
+                accuracy = correct / count
+                print(f"  Class '{cls_name}': {accuracy:.4f} ({correct}/{count})")
+            else:
+                print(f"  Class '{cls_name}': N/A (0 samples)")
+
+    logger.info("Detailed metrics complete.")
+    
+    # --- 最終スコアの再計算と出力 ---
+    # 詳細出力と整合性を取るため、ここで計算したMinClassAccuracyを最終スコアとする
+    # マルチタスクの場合は全タスクのMinClassAccuracyの平均
+    
+    # output_names, val_preds, val_labels_dict は上記で既に用意されている
+    
+    task_min_accuracies = []
+    
+    for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
+        pred_probs = val_preds[i]
+        pred_labels = np.argmax(pred_probs, axis=-1)
+        
+        true_labels_raw = val_labels_dict[task_name]
+        if len(true_labels_raw.shape) > 1 and true_labels_raw.shape[-1] > 1:
+            true_labels = np.argmax(true_labels_raw, axis=-1)
+        else:
+            true_labels = true_labels_raw.astype(int)
+            
+        class_accuracies = []
+        for cls_idx, cls_name in enumerate(class_names):
+            mask = (true_labels == cls_idx)
+            count = np.sum(mask)
+            if count > 0:
+                correct = np.sum(pred_labels[mask] == cls_idx)
+                accuracy = correct / count
+                class_accuracies.append(accuracy)
+            else:
+                # サンプル0のクラスがある場合... Minをとると0になる危険があるが、validationにデータがないなら無視すべきか？
+                # ここでは安全のため 1.0 (無視) 扱いにするか、エラーにするか。
+                # 通常validationには全クラスあるべき。
+                pass
+                
+        if class_accuracies:
+            task_min_acc = min(class_accuracies)
+            task_min_accuracies.append(task_min_acc)
+            
+    if task_min_accuracies:
+        # タスクごとのMinAccuracyの平均
+        final_recalculated_score = sum(task_min_accuracies) / len(task_min_accuracies)
+        print(f"FINAL_VAL_ACCURACY: {final_recalculated_score:.8f}")
+        logger.info(f"Recalculated FINAL_VAL_ACCURACY (MinClass): {final_recalculated_score:.8f}")
     else:
-        logger.warning("History object not found, cannot print individual task scores.")
+        # Fallback
+        print(f"FINAL_VAL_ACCURACY: {final_val_acc}")
 
 if __name__ == "__main__":
     main()
