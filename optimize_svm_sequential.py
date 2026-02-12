@@ -6,6 +6,7 @@ import logging
 import time
 import json
 import hashlib
+import winsound
 
 # --- 設定 ---
 # Python実行環境のパス
@@ -19,6 +20,10 @@ CACHE_DIR = "outputs/cache"
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_FILE = os.path.join(CACHE_DIR, "svm_filter_opt_cache.json")
+
+# 効率ベースの最適化設定
+# 効率 = 精度向上 / フィルタリング枚数
+MIN_EFFICIENCY_THRESHOLD = 0.00001
 
 # パスが存在しない場合はデフォルトを使用
 if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
@@ -44,46 +49,76 @@ def count_files(directory):
     return count
 
 def load_cache():
+    current_file_count = count_files("train") + count_files("validation")
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                cache = json.load(f)
+            if cache.get('__file_count__') != current_file_count:
+                logger.info(f"Data changed ({cache.get('__file_count__')} -> {current_file_count}). Clearing cache.")
+                return {'__file_count__': current_file_count}
+            return cache
         except:
-            return {}
-    return {}
+            return {'__file_count__': current_file_count}
+    return {'__file_count__': current_file_count}
 
 def save_cache(cache):
+    cache['__file_count__'] = count_files("train") + count_files("validation")
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, grayscale=False, model_name='SVM'):
+def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='SVM', svm_params={}):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
     """
+    # Merge SVM params into log string if present
+    param_log = f"Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Grayscale={grayscale}"
+    if svm_params:
+        param_log += f", SVM_Params={svm_params}"
+
     logger.info(f"\n{'='*50}")
-    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp={sharpness_low}%, Grayscale={grayscale}")
+    logger.info(f"Evaluating: {param_log}")
     
     file_count = count_files("train") + count_files("validation")
-    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_gray={grayscale}_cnt={file_count}"
+    # Cache key includes SVM params if present
+    svm_key = f"_C={svm_params.get('C')}_k={svm_params.get('kernel')}_g={svm_params.get('gamma')}" if svm_params else ""
+    cache_key = f"model={model_name}{svm_key}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}_cnt={file_count}"
     
     cache = load_cache()
     if cache_key in cache:
-        logger.info(f"Cache Hit! Score: {cache[cache_key]}")
-        return cache[cache_key]
+        cached = cache[cache_key]
+        if isinstance(cached, (list, tuple)) and len(cached) >= 2:
+            if len(cached) == 3:
+                raw_score, total_images, filtered_count = cached
+            else:
+                raw_score, filtering_rate = cached
+                total_images = file_count
+                filtered_count = int(total_images * filtering_rate)
+            logger.info(f"Cache Hit! RawScore={raw_score:.4f}, Total={total_images}, Filtered={filtered_count}")
+            return (raw_score, total_images, filtered_count)
+        else:
+            logger.info(f"Cache Hit (legacy)! Score: {cached}")
+            return (float(cached), file_count, 0)
 
     try:
-        # Preprocess (same as before)
+        # Preprocess
         cmd_pre = [
             PYTHON_PREPROCESS,
             "preprocess_multitask.py",
-            "--out_dir", "preprocessed_multitask_svm", # SVM専用に出力先を変更
+            "--out_dir", "preprocessed_multitask_svm", 
             "--pitch_percentile", str(pitch),
             "--symmetry_percentile", str(sym),
             "--y_diff_percentile", str(y_diff),
             "--mouth_open_percentile", str(mouth_open),
             "--eyebrow_eye_percentile_high", str(eb_eye_high),
             "--eyebrow_eye_percentile_low", str(eb_eye_low),
-            "--sharpness_percentile_low", str(sharpness_low)
+            "--sharpness_percentile_low", str(sharpness_low),
+            "--sharpness_percentile_high", str(sharpness_high),
+            "--face_size_percentile_low", str(face_size_low),
+            "--face_size_percentile_high", str(face_size_high),
+            "--retouching_percentile", str(retouching),
+            "--mask_percentile", str(mask),
+            "--glasses_percentile", str(glasses)
         ]
         if grayscale:
             cmd_pre.append("--grayscale")
@@ -91,223 +126,287 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.info("Running preprocessing...")
         ret_pre = subprocess.run(cmd_pre, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
-        if ret_pre.stdout:
-            # logger.info(f"Preprocessing STDOUT:\n{ret_pre.stdout}") # ログ抑制
-            pass
-        if ret_pre.stderr:
-            # logger.warning(f"Preprocessing STDERR:\n{ret_pre.stderr}")
-            pass
+        # フィルタリング枚数を取得
+        preprocess_output = (ret_pre.stdout or "") + "\n" + (ret_pre.stderr or "")
+        total_images = 0
+        saved_images = 0
+        for line in preprocess_output.split('\n'):
+            match_stats = re.search(r'Total=(\d+), Saved=(\d+)', line)
+            if match_stats:
+                total_images += int(match_stats.group(1))
+                saved_images += int(match_stats.group(2))
+        
+        filtered_count = total_images - saved_images
+        if total_images > 0:
+            logger.info(f"Filtering Stats: Total={total_images}, Saved={saved_images}, Filtered={filtered_count} ({filtered_count/total_images*100:.1f}%)")
 
         if ret_pre.returncode != 0:
-            logger.error(f"Preprocessing failed with return code {ret_pre.returncode}")
-            logger.error(ret_pre.stderr)
-            return 0.0
+            logger.error(f"Preprocessing failed: {ret_pre.stderr}")
+            return (0.0, 0, 0)
 
         # Train with SVM
         cmd_train = [PYTHON_TRAIN, "components/train_svm.py", "--data_dir", "preprocessed_multitask_svm"]
+        
+        # Pass SVM parameters if provided
+        if svm_params:
+            if 'C' in svm_params: cmd_train.extend(["--C", str(svm_params['C'])])
+            if 'kernel' in svm_params: cmd_train.extend(["--kernel", str(svm_params['kernel'])])
+            if 'gamma' in svm_params: cmd_train.extend(["--gamma", str(svm_params['gamma'])])
+
         logger.info(f"Running training with {model_name}...")
         ret_train = subprocess.run(cmd_train, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         if ret_train.returncode != 0:
             logger.error(f"Training failed: {ret_train.stderr}")
-            return 0.0
+            return (0.0, 0, 0)
+            
+        # Debug: Print full training output to see class distributions
+        # (Logging this to understand why score is 0.5)
+        logger.info(f"--- SVM Training Output ---\n{ret_train.stdout}\n-----------------------------")
 
-        # Extract Score
+        # Extract Score (Same as before)
         match = re.search(r"FINAL_SCORE:\s*([\d.]+)", ret_train.stdout)
         if match:
-            score = float(match.group(1))
-            logger.info(f"Result: Score = {score}")
+            raw_score = float(match.group(1))
+            # 各タスクのスコアを抽出
+            found_tasks = False
+            for char_code in range(ord('A'), ord('Z') + 1):
+                task_label = chr(char_code)
+                # SVMスクリプトは "Task A Score: 0.50000" のような形式
+                match_task = re.search(f"Task {task_label} Score:\s*([\d\.]+)", ret_train.stdout)
+                if match_task:
+                    logger.info(f"  Task {task_label}: {float(match_task.group(1)):.4f}")
+                    found_tasks = True
             
+            logger.info(f"Total Score (Average) = {raw_score:.4f}")
+            
+            # Retry logic for 0.5 score with custom params
+            if raw_score == 0.5 and svm_params:
+                logger.warning("Score is exactly 0.5 with custom SVM params. These params might be unsuitable for the current data.")
+                logger.warning("Retrying with DEFAULT SVM params (gamma='scale', C=1.0)...")
+                return run_trial(
+                    pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, 
+                    sharpness_low, sharpness_high, face_size_low, face_size_high, 
+                    retouching, mask, glasses, grayscale, model_name, svm_params={}
+                )
+
             cache = load_cache()
-            cache[cache_key] = score
+            cache[cache_key] = (raw_score, total_images, filtered_count)
             save_cache(cache)
-            return score
+            return (raw_score, total_images, filtered_count)
         else:
             logger.error("Score not found in training output.")
-            logger.error(f"STDOUT:\n{ret_train.stdout}")
-            return 0.0
+            return (0.0, 0, 0)
 
     except Exception as e:
         logger.error(f"Error in trial: {e}")
-        return 0.0
+        return (0.0, 0, 0)
 
-def optimize_single_param(target_name, current_params, model_name, points=[0, 25, 50]):
-    """
-    1つのパラメータを最適化する。
-    Step 1: pointsで指定された点を評価
-    Step 2: 上位2点の中間を探索（2分探索的アプローチ）
-    """
-    logger.info(f"\n>>> Optimizing {target_name} (Points: {points}) [Model: {model_name}] <<<")
+def load_best_svm_params():
+    params_file = "outputs/best_svm_train_params.json"
+    if os.path.exists(params_file):
+        try:
+            with open(params_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, svm_params={}, points=[0, 2, 5, 25, 50]):
+    logger.info(f"\n>>> Optimizing {target_name} [Model: {model_name}] <<<")
+    logger.info(f"Baseline: Score={baseline_score:.4f}, Filtered={baseline_filtered}")
     
-    best_val = current_params[target_name]
-    best_score = -1.0
-    history = {}
-
     def evaluate_wrapper(val):
-        if val in history: return history[val]
-        
-        # Independent Optimization: Always start from all-zero params
+        # Independent Optimization: Always start from zero
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
-            'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0
+            'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
+            'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
         }
         test_params[target_name] = val
         
-        score = run_trial(
+        return run_trial(
             test_params['pitch'], test_params['sym'], test_params['y_diff'], test_params['mouth_open'],
             test_params['eb_eye_high'], test_params['eb_eye_low'],
-            test_params['sharpness_low'], model_name=model_name
+            test_params['sharpness_low'], test_params['sharpness_high'],
+            test_params['face_size_low'], test_params['face_size_high'],
+            test_params['retouching'], test_params['mask'], test_params['glasses'],
+            model_name=model_name,
+            svm_params=svm_params
         )
-        history[val] = score
-        return score
 
-    # Step 1: Evaluate initial points
-    logger.info(f"Step 1: Evaluate points {points}")
-    scores = {}
-    for p in points:
-        scores[p] = evaluate_wrapper(p)
+    best_val = 0
+    best_score = baseline_score
+    best_filtered = baseline_filtered
     
-    # Step 2: Refinement
-    logger.info("Step 2: Binary Search Refinement")
-    while True:
-        sorted_history = sorted(history.items(), key=lambda x: x[1], reverse=True)
-        if len(sorted_history) < 2: break
-            
-        best1_val, best1_score = sorted_history[0]
-        best2_val, best2_score = sorted_history[1]
+    for p in points:
+        logger.info(f"Testing {target_name}={p}...")
+        raw_score, total_images, filtered_count = evaluate_wrapper(p)
+        logger.info(f"  {target_name}={p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
         
-        mid_val = int((best1_val + best2_val) / 2)
-        
-        if mid_val in history:
-            logger.info(f"Refinement converged at {mid_val} (Already evaluated).")
-            # Safety fallback: Choose the lower value between the top 2
-            safer_val = min(best1_val, best2_val)
-            logger.info(f"Selecting lower value for reproducibility/safety: {safer_val}")
-            best_val = safer_val
-            best_score = history[safer_val]
-            logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
-            return best_val, best_score
-            
-        logger.info(f"Refining: Best1={best1_val}({best1_score:.4f}), Best2={best2_val}({best2_score:.4f}) -> Next: {mid_val}")
-        scores[mid_val] = evaluate_wrapper(mid_val)
-            
-    best_val = max(scores, key=scores.get)
-    best_score = scores[best_val]
-    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
-    return best_val, best_score
+        if raw_score > best_score:
+            best_score = raw_score
+            best_val = p
+            best_filtered = filtered_count
+            logger.info(f"  [NEW BEST] {target_name}={p} (Score: {raw_score:.4f})")
+    
+    # Efficiency calculation
+    improvement = best_score - baseline_score
+    filtered_diff = best_filtered - baseline_filtered
+    efficiency = improvement / (filtered_diff + 1) if filtered_diff >= 0 else improvement
+    
+    logger.info(f"Finished optimizing {target_name}. Best: {best_val}, Score: {best_score:.4f}, Efficiency: {efficiency:.6f}")
+    return best_val, best_score, improvement, filtered_diff, efficiency
 
 def main():
-    logger.info("Starting SVM Sequential Optimization")
+    logger.info("Starting SVM Sequential Optimization (Efficiency-Based)")
     
+    # Load Best SVM Params
+    best_svm_params = load_best_svm_params()
+    if best_svm_params:
+        logger.info(f"Loaded Best SVM Params: {best_svm_params}")
+    else:
+        logger.info("Using default SVM params (no best params found)")
+
     # Initial Params
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
-        'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0
+        'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
+        'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
     }
     
-    best_model = 'SVM'
-    
-    # Optimization Sequence
-    
-    # 1. Pitch
-    val, _ = optimize_single_param('pitch', current_params, best_model, points=[0, 25, 50])
-    current_params['pitch'] = val
-    
-    # 2. Symmetry
-    val, _ = optimize_single_param('sym', current_params, best_model, points=[0, 25, 50])
-    current_params['sym'] = val
-    
-    # 3. Y-Diff
-    val, _ = optimize_single_param('y_diff', current_params, best_model, points=[0, 25, 50])
-    current_params['y_diff'] = val
-    
-    # 4. Mouth Open
-    val, _ = optimize_single_param('mouth_open', current_params, best_model, points=[0, 25, 50])
-    current_params['mouth_open'] = val
-    
-    # 5. Eyebrow-Eye High (Top X% cut)
-    val, _ = optimize_single_param('eb_eye_high', current_params, best_model, points=[0, 25, 50])
-    current_params['eb_eye_high'] = val
+    param_efficiency = {}
+    best_model = "SVM"
 
-    # 6. Eyebrow-Eye Low (Bottom X% cut)
-    val, _ = optimize_single_param('eb_eye_low', current_params, best_model, points=[0, 25, 50])
-    current_params['eb_eye_low'] = val
+    # --- Step 0: Baseline ---
+    logger.info("\n>>> Step 0: Baseline <<<")
+    baseline_score, total_images, baseline_filtered = run_trial(0,0,0,0,0,0,0,0,0,0,0,0,0, model_name=best_model, svm_params=best_svm_params)
+    logger.info(f"Baseline: Score={baseline_score:.4f}, Filtered={baseline_filtered}")
     
-    # 7. Sharpness Low (Bottom X% cut - blurry images)
-    val, _ = optimize_single_param('sharpness_low', current_params, best_model, points=[0, 25, 50])
-    current_params['sharpness_low'] = val
+    # --- Parameter Optimization ---
+    param_names = [
+        'pitch', 'sym', 'y_diff', 'mouth_open',
+        'eb_eye_high', 'eb_eye_low', 'sharpness_low', 'sharpness_high',
+        'face_size_low', 'face_size_high', 'retouching', 'mask', 'glasses'
+    ]
     
-    # 8. Grayscale (Boolean comparison)
-    # SVMの場合も一応試すが、Embedding抽出器がRGB前提の場合どうなるか注意
-    # InsightFaceは基本RGBだが、グレースケールでも動く（内部で変換されることも）
-    logger.info("\n>>> Optimizing Grayscale (True vs False) <<<")
-    score_color = run_trial(
-        current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
-        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'],
-        grayscale=False, model_name=best_model
-    )
-    score_gray = run_trial(
-        current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
-        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'],
-        grayscale=True, model_name=best_model
-    )
+    global_best_score = baseline_score
+    global_best_params = {k: 0 for k in current_params}
+    global_best_desc = "Baseline (No Filter)"
+
+    for param_name in param_names:
+        val, score, improvement, filtered_diff, efficiency = optimize_single_param(
+            param_name, current_params, best_model, baseline_score, baseline_filtered, svm_params=best_svm_params
+        )
+        current_params[param_name] = val
+        param_efficiency[param_name] = {
+            'val': val, 'improvement': improvement,
+            'filtered_diff': filtered_diff, 'efficiency': efficiency
+        }
+        
+        # Single Best Tracking
+        if score > global_best_score:
+            global_best_score = score
+            temp_params = {k: 0 for k in current_params}
+            temp_params[param_name] = val
+            global_best_params = temp_params
+            global_best_desc = f"Single Best ({param_name}={val})"
+            logger.info(f"  [Global Best Update] New best found: {global_best_desc}, Score: {score:.4f}")
+
+    # Grayscale
+    logger.info("\n>>> Optimizing Grayscale <<<")
+    res_color = run_trial(*(list(current_params.values()) + [False, best_model, best_svm_params]))
+    res_gray = run_trial(*(list(current_params.values()) + [True, best_model, best_svm_params]))
+    
+    score_color, score_gray = res_color[0], res_gray[0]
+    
     if score_gray > score_color:
         current_params['grayscale'] = True
-        logger.info(f"Grayscale selected (Score: {score_gray} > {score_color})")
+        logger.info(f"Grayscale selected ({score_gray:.4f} > {score_color:.4f})")
     else:
         current_params['grayscale'] = False
-        logger.info(f"Color selected (Score: {score_color} >= {score_gray})")
-    
-    # Phase 2: Global Scaling Optimization
-    logger.info("\n>>> Phase 2: Global Scaling Optimization (x1.0, x0.5, x0.25) <<<")
-    
-    best_independent_params = current_params.copy()
-    scaling_factors = [1.0, 0.5, 0.25]
-    
-    best_scaling_score = -1.0
-    best_scaled_params = None
-    best_factor = 1.0
-    
-    for factor in scaling_factors:
-        scaled_params = {
-            k: int(v * factor) for k, v in best_independent_params.items() if k != 'grayscale'
-        }
-        scaled_params['grayscale'] = best_independent_params.get('grayscale', False)
-        logger.info(f"Testing Scaling Factor x{factor}: {scaled_params}")
+        logger.info(f"Color selected ({score_color:.4f} >= {score_gray:.4f})")
         
-        score = run_trial(
-            scaled_params['pitch'], scaled_params['sym'], scaled_params['y_diff'], scaled_params['mouth_open'],
-            scaled_params['eb_eye_high'], scaled_params['eb_eye_low'],
-            scaled_params['sharpness_low'], grayscale=scaled_params['grayscale'], model_name=best_model
+    # Phase 2: Efficiency-Based Greedy Integration
+    logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
+    
+    # 効率順にソート
+    sorted_params = sorted(
+        [p for p in param_efficiency.items() if p[1]['efficiency'] > 0 and p[1]['improvement'] > 0],
+        key=lambda x: x[1]['efficiency'], 
+        reverse=True
+    )
+    
+    current_greedy_params = {k: 0 for k in current_params}
+    current_greedy_params['grayscale'] = current_params.get('grayscale', False)
+    
+    # Base check
+    base_res = run_trial(
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        grayscale=current_greedy_params['grayscale'], model_name=best_model, svm_params=best_svm_params
+    )
+    current_best_score = base_res[0]
+    logger.info(f"Base Score: {current_best_score:.4f}")
+    
+    scaled_results = [] # To keep consistent struct
+    
+    for param_name, info in sorted_params:
+        val = info['val']
+        logger.info(f"Trying to add {param_name}={val} (Efficiency: {info['efficiency']:.8f})...")
+        
+        temp_params = current_greedy_params.copy()
+        temp_params[param_name] = val
+        
+        res = run_trial(
+            temp_params['pitch'], temp_params['sym'], temp_params['y_diff'], temp_params['mouth_open'],
+            temp_params['eb_eye_high'], temp_params['eb_eye_low'],
+            temp_params['sharpness_low'], temp_params['sharpness_high'],
+            temp_params['face_size_low'], temp_params['face_size_high'],
+            temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
+            grayscale=temp_params['grayscale'], model_name=best_model, svm_params=best_svm_params
         )
+        score = res[0]
         
-        if score > best_scaling_score:
-            best_scaling_score = score
-            best_scaled_params = scaled_params
-            best_factor = factor
+        if score >= current_best_score:
+            logger.info(f"  -> Accepted (Score: {score:.4f} >= {current_best_score:.4f})")
+            current_best_score = score
+            current_greedy_params[param_name] = val
+        else:
+            logger.info(f"  -> Rejected (Score: {score:.4f} < {current_best_score:.4f})")
+            logger.info("  -> Stopping integration.")
+            break
             
-    logger.info(f"Phase 2 Complete. Best Factor: x{best_factor} (Score: {best_scaling_score})")
-    current_params = best_scaled_params
-    final_score = best_scaling_score
+    scaled_results.append({
+        'name': "Greedy Integration",
+        'params': current_greedy_params,
+        'score': current_best_score,
+        'filtered': 0 # Dummy
+    })
     
-    logger.info("\n" + "="*50)
-    logger.info("OPTIMIZATION COMPLETE")
-    logger.info(f"Final Best Params: {current_params}")
-    logger.info(f"Final Score: {final_score}")
+    final_score = current_best_score # For compatibility with later code
+        
     logger.info("="*50)
-
-    # Generate and print the final preprocessing command
+    logger.info(f"OPTIMIZATION COMPLETE. Best Score: {current_best_score:.4f}")
+    logger.info(f"Params: {current_greedy_params}")
+    
+    # Command Generation
     final_cmd = (
         f"{PYTHON_PREPROCESS} preprocess_multitask.py --out_dir preprocessed_multitask_svm "
-        f"--pitch_percentile {current_params['pitch']} "
-        f"--symmetry_percentile {current_params['sym']} "
-        f"--y_diff_percentile {current_params['y_diff']} "
-        f"--mouth_open_percentile {current_params['mouth_open']} "
-        f"--eyebrow_eye_percentile_high {current_params['eb_eye_high']} "
-        f"--eyebrow_eye_percentile_low {current_params['eb_eye_low']} "
-        f"--sharpness_percentile_low {current_params['sharpness_low']} "
+        f"--pitch_percentile {current_greedy_params['pitch']} "
+        f"--symmetry_percentile {current_greedy_params['sym']} "
+        f"--y_diff_percentile {current_greedy_params['y_diff']} "
+        f"--mouth_open_percentile {current_greedy_params['mouth_open']} "
+        f"--eyebrow_eye_percentile_high {current_greedy_params['eb_eye_high']} "
+        f"--eyebrow_eye_percentile_low {current_greedy_params['eb_eye_low']} "
+        f"--sharpness_percentile_low {current_greedy_params['sharpness_low']} "
+        f"--sharpness_percentile_high {current_greedy_params['sharpness_high']} "
+        f"--face_size_percentile_low {current_greedy_params['face_size_low']} "
+        f"--face_size_percentile_high {current_greedy_params['face_size_high']} "
+        f"--retouching_percentile {current_greedy_params['retouching']} "
+        f"--mask_percentile {current_greedy_params['mask']} "
+        f"--glasses_percentile {current_greedy_params['glasses']} "
     )
-    if current_params.get('grayscale', False):
+    if current_greedy_params.get('grayscale', False):
         final_cmd += "--grayscale "
     logger.info("\nRun this command to apply the best filters:")
     logger.info(final_cmd)
@@ -315,3 +414,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)
