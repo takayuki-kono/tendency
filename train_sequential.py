@@ -10,6 +10,7 @@ import winsound
 # --- 設定 ---
 PYTHON_EXEC = r"d:\tendency\tendency.venv_tf210_gpu\Scripts\python.exe"
 DATA_SOURCE_DIR = "preprocessed_multitask/train" # ファイル数カウント用
+SINGLE_TASK_MODE = True # フォルダ名＝クラス名の場合はTrue, ファイル名パースの場合はFalse
 
 # 出力ディレクトリ
 LOG_DIR = "outputs/logs"
@@ -84,6 +85,9 @@ def run_trial(params):
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
     for key, value in params.items():
         cmd.extend([f"--{key}", str(value)])
+        
+    # シングルタスクモード設定
+    cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
 
     try:
         ret = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -97,10 +101,18 @@ def run_trial(params):
         match_a = re.search(r"FINAL_VAL_ACCURACY:\s*(\d+\.\d+)", ret.stdout)
         
         # 他のタスクも抽出してログに出す
-        for task_label in ['A', 'B', 'C', 'D']:
+        # 他のタスクも抽出してログに出す
+        for char_code in range(ord('A'), ord('Z') + 1):
+            task_label = chr(char_code)
             match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*(\d+\.\d+)", ret.stdout)
             if match_task:
                 logger.info(f"Task {task_label} Accuracy: {float(match_task.group(1))}")
+
+        # 詳細なクラス別精度をログに転記
+        details_match = re.search(r"--- Task [A-Z] Details.*", ret.stdout, re.DOTALL)
+        if details_match:
+            logger.info("\n[Detailed Class Accuracy]")
+            logger.info(details_match.group(0).strip())
 
         if match_a:
             score = float(match_a.group(1))

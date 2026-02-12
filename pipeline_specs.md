@@ -70,8 +70,21 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 2.  **再帰探索:** 各ディレクトリ内を再帰的に探索し、ラベル（人物名の入れ子含む）ごとの集計を行う。
 3.  **分布表示:** タスク A, B, C, D ごとのクラス分布を統計的に表示。
 
+### ステージ 3: モデル学習 (Sequential Training)
+**スクリプト:** `train_sequential.py` (および `components/train_multitask_trial.py`)
+**最適化手法:**
+- 探索空間（Learning Rate, Layers, Dropout, Augmentation等）を順次固定しながら最適化するSequential Optimizationを採用。
+- **評価指標の変更 (2026-02-11):**
+    - 従来の `Balanced Accuracy` (平均再現率) に代わり、**`MinClassAccuracy` (最低クラス精度)** を採用。
+    - 各クラスの再現率（Recall）のうち、**最も低い値**を最大化するように学習・最適化を行う。
+    - これにより、難易度の高いクラスや少数派クラスの放置を防ぎ、全てのクラスで一定以上の精度を保証することを目指す。
+- **Fine-tuning:**
+    - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
+    - **詳細ログ出力 (2026-02-11):**
+        - 検証データに対する全クラスの個別精度（正解数/総数）を出力し、ボトルネックとなっているクラスを特定可能にした。
+
 ---
 
 ## Author
-Gemini (Updated 2026-02-05)
+Gemini (Updated 2026-02-11)
 
