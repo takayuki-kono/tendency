@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler
 # Allow importing from the same directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from common import BalancedSparseCategoricalAccuracy
+from common import BalancedSparseCategoricalAccuracy, MinClassAccuracy
 from model_factory import create_model
 from dataset_loader import get_class_names, compute_class_weights, create_dataset
 
@@ -105,7 +105,7 @@ def main():
             return initial_lr * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
 
         return [
-            EarlyStopping(monitor='val_balanced_accuracy', patience=5, restore_best_weights=True, verbose=1, mode='max'),
+            EarlyStopping(monitor='val_min_class_accuracy', patience=5, restore_best_weights=True, verbose=1, mode='max'),
             LearningRateScheduler(cosine_decay, verbose=1)
         ]
 
@@ -122,7 +122,7 @@ def main():
         verbose=2
     )
 
-    warmup_best_score = max(history.history.get('val_balanced_accuracy', [0.0]))
+    warmup_best_score = max(history.history.get('val_min_class_accuracy', [0.0]))
     logger.info(f"Warmup Best Score: {warmup_best_score}")
     
     # Save temp weights
@@ -162,7 +162,7 @@ def main():
             
             # SparseCategoricalCrossentropy doesn't support label_smoothing in TF 2.10
             loss = tf.keras.losses.SparseCategoricalCrossentropy()
-            metrics = ['accuracy', BalancedSparseCategoricalAccuracy(num_classes, name='balanced_accuracy')]
+            metrics = ['accuracy', BalancedSparseCategoricalAccuracy(num_classes, name='balanced_accuracy'), MinClassAccuracy(num_classes, name='min_class_accuracy')]
             
             model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
             
@@ -175,7 +175,7 @@ def main():
                 verbose=2
             )
             
-            ft_best_score = max(history_ft.history.get('val_balanced_accuracy', [0.0]))
+            ft_best_score = max(history_ft.history.get('val_min_class_accuracy', [0.0]))
             
             if ft_best_score < warmup_best_score:
                 logger.warning("Fine-tuning degraded performance. Reverting.")

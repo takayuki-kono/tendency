@@ -30,17 +30,23 @@ def compute_class_weights(directory, class_names):
         label_path = os.path.join(directory, label)
         if not os.path.isdir(label_path): continue
         
-        # Count all images in all person subdirs
-        for person_name in os.listdir(label_path):
-            person_path = os.path.join(label_path, person_name)
-            if not os.path.isdir(person_path): continue
-            
-            num = len([f for f in os.listdir(person_path) 
-                       if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))])
-            
-            idx = class_to_idx[label]
-            counts[idx] += num
-            total_images += num
+        # Count all images in the label dir AND subdirs
+        idx = class_to_idx[label]
+        
+        # Directly under label_path
+        direct_files = [f for f in os.listdir(label_path) 
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
+        counts[idx] += len(direct_files)
+        total_images += len(direct_files)
+        
+        # Inside person subdirs
+        for item in os.listdir(label_path):
+            item_path = os.path.join(label_path, item)
+            if os.path.isdir(item_path):
+                num = len([f for f in os.listdir(item_path) 
+                           if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))])
+                counts[idx] += num
+                total_images += num
             
     # Calculate weights
     num_classes = len(class_names)
@@ -57,7 +63,9 @@ def compute_class_weights(directory, class_names):
 def create_dataset(directory, class_names, img_size, batch_size, augment_params=None, shuffle=False):
     """
     Creates tf.data.Dataset from nested directory structure.
-    Class = label folder name (adfh, aefh, etc.)
+    Supports: 
+    - directory/label/image.jpg
+    - directory/label/person_name/image.jpg
     """
     class_to_idx = {name: i for i, name in enumerate(class_names)}
     
@@ -72,21 +80,25 @@ def create_dataset(directory, class_names, img_size, batch_size, augment_params=
             print(f"DEBUG: Label dir not found: {label}")
             continue
         
-        print(f"DEBUG: Checking label dir: {label}")
+        # 1. Directly under label_path
+        direct_files = [os.path.join(label_path, f) for f in os.listdir(label_path)
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
         
-        # Collect all images from all person subdirs
-        for person_name in os.listdir(label_path):
-            person_path = os.path.join(label_path, person_name)
-            if not os.path.isdir(person_path): continue
-            
-            files = [os.path.join(person_path, f) for f in os.listdir(person_path)
-                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
-            
-            if files:
-                print(f"DEBUG: Found {len(files)} images in {label}/{person_name}")
-            
-            file_paths.extend(files)
-            labels.extend([class_to_idx[label]] * len(files))
+        if direct_files:
+            print(f"DEBUG: Found {len(direct_files)} images directly in {label}")
+            file_paths.extend(direct_files)
+            labels.extend([class_to_idx[label]] * len(direct_files))
+        
+        # 2. Inside subdirs (person_name)
+        for item in os.listdir(label_path):
+            item_path = os.path.join(label_path, item)
+            if os.path.isdir(item_path):
+                files = [os.path.join(item_path, f) for f in os.listdir(item_path)
+                         if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
+                if files:
+                    print(f"DEBUG: Found {len(files)} images in {label}/{item}")
+                    file_paths.extend(files)
+                    labels.extend([class_to_idx[label]] * len(files))
             
     if not file_paths:
         print(f"Warning: No images found in {directory}")

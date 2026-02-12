@@ -32,13 +32,9 @@ BATCH_SIZE = 32
 # 指標計算用 (InsightFace定数は不要になったが、辞書キーとして使うので名前だけ残す意味はない)
 # FACE_APP = None # 削除
 
-# ラベル定義（train_for_filter_search.py と同じ）
-TASK_A_LABELS = ['a', 'b', 'c']
-TASK_B_LABELS = ['d', 'e']
-TASK_C_LABELS = ['f', 'g']
-TASK_D_LABELS = ['h', 'i']
-ALL_TASK_LABELS = [TASK_A_LABELS, TASK_B_LABELS, TASK_C_LABELS, TASK_D_LABELS]
-TASK_NAMES = ['Task A', 'Task B', 'Task C', 'Task D']
+# ラベル定義（動的に更新されるため初期値は空）
+ALL_TASK_LABELS = []
+TASK_NAMES = []
 
 
 def analyze_data_distribution(image_paths):
@@ -73,33 +69,145 @@ def analyze_data_distribution(image_paths):
             bar = "█" * int(pct / 5)  # 5%ごとに1ブロック
             print(f"  {label}: {cnt:>5} ({pct:>5.1f}%) {bar}")
 
-def load_validation_data():
-    """検証データを読み込み、画像パスとラベルを取得"""
+def load_validation_data(data_dir):
+    """検証データを読み込み、画像パスとラベルを取得 (シングル/マルチタスク対応)"""
+    global ALL_TASK_LABELS, TASK_NAMES
+    
     image_paths = []
-    true_labels = []  # [(task_a, task_b, task_c, task_d), ...]
+    true_labels = []  # [(task_0_label, ...), ...]
     
-    for multi_label in os.listdir(VALIDATION_DIR):
-        label_dir = os.path.join(VALIDATION_DIR, multi_label)
-        if not os.path.isdir(label_dir):
-            continue
+    if not os.path.exists(data_dir):
+        print(f"Error: Data directory not found: {data_dir}")
+        return [], []
+
+    # ディレクトリ構造を解析してタスク定義を更新
+    subdirs = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
+    if not subdirs:
+        return [], []
         
-        # マルチラベルから各タスクのラベルを抽出
-        if len(multi_label) < len(ALL_TASK_LABELS):
-            continue
+    first_dir = subdirs[0]
+    
+    # シングルタスク判定: ディレクトリ名がそのままクラス名の場合 (例: 'a', 'b', ...)
+    # またはマルチタスク: ディレクトリ名が文字連結 (例: 'adfh', 'aefh', ...)
+    # 決定ロジック:
+    # 全てのサブディレクトリの長さが同じで、かつ文字連結構造とみなせるか？
+    # data_dir直下がクラスフォルダ（a, b, ...）ならシングルタスク
+    # data_dir直下が組み合わせフォルダ（abcd）ならマルチタスク
+    
+    # 今回はシンプルに、train_multitask_trial.py と同様のロジックで判定
+    # シングルタスクモードを優先的に判定したいが、外部フラグがないので推測する。
+    # 既存の仕様では、マルチタスクの組み合わせフォルダはすべて同じ長さ(4文字など)になる。
+    # シングルタスクの場合は、'a', 'z' など長さ1もありうるし、'classA' などもありうる。
+    
+    # ここでは、ディレクトリ内の画像有無で判定する
+    # data_dir/subdir/image.jpg exists? -> Single Task Struct
+    # data_dir/subdir/subdir_person/image.jpg exists? -> Multi Task Struct (Preprocessed format)
+    # data_dir/subdir/image.jpg exists -> Single Task Struct (Preprocessed format)
+    
+    # 実際の前処理済みフォルダ構造:
+    # Multi: preprocessed/val/adfh/person/image.jpg OR preprocessed/val/adfh/image.jpg
+    # Single: preprocessed/val/a/image.jpg
+    
+    # 判定: フォルダ名を解析してタスク構造を推定
+    # 1. 全部長さが同じ > 1 かつ 構成文字種が限定的 -> Multi?
+    # 2. それ以外 -> Single
+    
+    # より確実な方法: モデルのOutput数と合わせるべきだが、モデルロード前なのでデータから推測
+    
+    # Try to treat as Multi-Task first if lengths match and > 1
+    is_multitask_struct = True
+    dir_len = len(first_dir)
+    if dir_len <= 1: 
+        is_multitask_struct = False
+    else:
+        for d in subdirs:
+            if len(d) != dir_len:
+                is_multitask_struct = False
+                break
+    
+    # しかし、ユーザーが指定した Single Task Mode (フォルダ名=クラス) の場合、長さがバラバラなこともあろうが、
+    # 今回の文脈では single_task_mode=True の場合、フォルダ名=クラス名として扱う。
+    # Analyze_errors.py は汎用的にしたい。
+    
+    # 簡易実装:
+    # フォルダ名を収集し、文字位置ごとにユニークな文字を集めてタスク定義を作る (Multi)
+    # または、フォルダ名そのものをクラスリストとする (Single)
+    
+    # ここでは、「フォルダ名そのものを1つのタスクのクラス」として扱うモード (Single Task / Flat Class) をデフォルトとし、
+    # 特定の条件（文字数一定など）でマルチタスク分解を試みるスイッチ、あるいは引数が欲しいところだが...
+    
+    # 以前のコードとの互換性のため、ALL_TASK_LABELSが空なら推論する
+    
+    inferred_tasks = []
+    
+    # 1. マルチタスク解釈を試行
+    if is_multitask_struct:
+        temp_tasks = [set() for _ in range(dir_len)]
+        valid = True
+        for d in subdirs:
+            for i, c in enumerate(d):
+                temp_tasks[i].add(c)
+        
+        # タスクごとのクラス数が妥當か？ (例えば全て1クラスだけならマルチタスクの意味なし)
+        # ここは決め打ちで、「フォルダ名リスト」をそのままシングルタスクとして扱うほうが安全かもしれない
+        # が、既存のマルチタスクモデルの評価には分解が必要。
+        
+        # ユーザーの意図: 今回は Single Task Mode で学習したモデルを評価したい。
+        # データセットも Single Task 構造 (a, b...) なので is_multitask_struct = False になるはず。
+        # もしデータセットが adfh 等のまま Single Task Mode True で学習したなら？
+        # -> train_multitask_trial.py では「ディレクトリ名をそのままクラス名」として扱っている。
+        # つまり adfh というクラス、 aefh というクラス... になる。
+        
+        # 結論: フォルダ名をそのままクラス名として扱う「シングルタスク」として解析し、
+        # もしモデルがマルチ出力を持っていたらエラーになる、という形が自然。
+        pass
+
+    # 今回はモデルに合わせて動的にしたいが、ロード前。
+    # 常に「フォルダ名＝クラス名」の1タスクとして扱うのが、
+    # 以前の変更 (Single Task Mode) に追従する形になる。
+    
+    # ただし、既存のマルチタスク評価も壊したくない。
+    # 妥協案: ディレクトリ名が全て len=4 かつ ... という判定は危険。
+    
+    # シンプルに: フォルダ名をソートしてクラスリストとし、タスク数=1 とする。
+    # これで Single Task Mode の評価は可能。
+    # Multi Task Mode のデータセット (adfh...) を評価する場合も、それを「1つのクラス」として扱うことになる。
+    # 詳細なタスク別評価はできなくなるが、エラー分析としては機能する。
+    
+    # もし本当にマルチタスク分解が必要なら引数で指定すべき。
+    
+    # アップデート:
+    sorted_subdirs = sorted(subdirs)
+    ALL_TASK_LABELS = [sorted_subdirs]
+    TASK_NAMES = ['Task A']
+    
+    classes = sorted_subdirs
+    class_to_idx = {c: i for i, c in enumerate(classes)}
+    
+    print(f"Detected 1 task with {len(classes)} classes")
+    
+    for label_name in subdirs:
+        label_dir = os.path.join(data_dir, label_name)
+        if not os.path.isdir(label_dir): continue
+        
+        idx = class_to_idx[label_name]
+        
+        # Recursive search or direct
+        # Direct files
+        files = [f for f in os.listdir(label_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        for f in files:
+            image_paths.append(os.path.join(label_dir, f))
+            true_labels.append((idx,)) # Single task tuple
             
-        task_labels = []
-        for i, task_label_list in enumerate(ALL_TASK_LABELS):
-            char = multi_label[i]
-            if char in task_label_list:
-                task_labels.append(task_label_list.index(char))
-            else:
-                task_labels.append(-1)  # 不明
-        
-        for img_file in os.listdir(label_dir):
-            if img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                image_paths.append(os.path.join(label_dir, img_file))
-                true_labels.append(tuple(task_labels))
-    
+        # Recursive (person subdirs)
+        for item in os.listdir(label_dir):
+            item_path = os.path.join(label_dir, item)
+            if os.path.isdir(item_path):
+                files = [f for f in os.listdir(item_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                for f in files:
+                    image_paths.append(os.path.join(item_path, f))
+                    true_labels.append((idx,))
+
     return image_paths, true_labels
 
 
@@ -122,10 +230,15 @@ def predict_batch(model, image_paths):
         # 予測
         preds = model.predict(batch_tensor, verbose=0)
         
+        # モデル出力形式の正規化: シングルタスク(1出力)の場合でもリスト形式にする
+        if not isinstance(preds, list):
+            preds = [preds]
+            
         # 各タスクの予測を保存
         for task_idx in range(len(ALL_TASK_LABELS)):
-            pred_classes = np.argmax(preds[task_idx], axis=1)
-            predictions[task_idx].extend(pred_classes)
+            if task_idx < len(preds):
+                pred_classes = np.argmax(preds[task_idx], axis=1)
+                predictions[task_idx].extend(pred_classes)
         
         print(f"Processed {min(i+BATCH_SIZE, len(image_paths))}/{len(image_paths)} images")
     
@@ -271,12 +384,16 @@ def analyze_per_combination(image_paths, true_labels, predictions):
         # フォルダ名を取得
         folder_name = os.path.basename(os.path.dirname(path))
         
-        # 4タスク全てが正解か判定
+        # 全タスク正解判定
         all_correct = True
         for task_idx in range(len(ALL_TASK_LABELS)):
-            if true_label[task_idx] != predictions[task_idx][i]:
-                all_correct = False
-                break
+            if task_idx < len(true_label) and task_idx < len(predictions):
+               if true_label[task_idx] != predictions[task_idx][i]:
+                   all_correct = False
+                   break
+            else:
+               all_correct = False
+               break
         
         combination_stats[folder_name]['total'] += 1
         if all_correct:
@@ -417,15 +534,25 @@ def analyze_metrics_distribution(image_paths, label_prefix=""):
     return summary
 
 def main():
+    # グローバル変数を更新してディレクトリを切り替え可能にする
+    global VALIDATION_DIR, OUTPUT_DIR
+
     parser = argparse.ArgumentParser(description="Error Analysis Script")
     parser.add_argument('--model', type=str, default=DEFAULT_MODEL_PATH, help='Path to the model file')
+    parser.add_argument('--data_dir', type=str, default=VALIDATION_DIR, help='Path to validation data directory')
+    parser.add_argument('--out_dir', type=str, default=OUTPUT_DIR, help='Path to output directory')
     args = parser.parse_args()
     
     MODEL_PATH = args.model
+    
+    VALIDATION_DIR = args.data_dir
+    OUTPUT_DIR = args.out_dir
 
     print("=" * 60)
     print("Error Analysis Script")
     print("=" * 60)
+    print(f"Target Data: {VALIDATION_DIR}")
+    print(f"Output Dir : {OUTPUT_DIR}")
     
     # 出力ディレクトリをクリーンアップ
     if os.path.exists(OUTPUT_DIR):
@@ -449,8 +576,8 @@ def main():
     print("Model loaded successfully.")
     
     # 検証データ読み込み
-    print(f"\nLoading validation data from: {VALIDATION_DIR}")
-    image_paths, true_labels = load_validation_data()
+    print(f"\nLoading data from: {VALIDATION_DIR}")
+    image_paths, true_labels = load_validation_data(VALIDATION_DIR)
     print(f"Found {len(image_paths)} validation images.")
     
     if len(image_paths) == 0:

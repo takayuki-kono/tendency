@@ -21,10 +21,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 KEYWORDS = [
-    "米倉涼子",
-    "倉科カナ",
-    "小泉今日子",
-    "観月ありさ"
+    "草刈民代",
+    "池田エライザ"
 ] 
 BASE_OUTPUT_DIR = "master_data"
 PHYSICAL_DELETE = True # True: Permanently delete, False: Move to 'deleted' folder
@@ -96,6 +94,9 @@ def main():
             logger.error("Part 2a failed.")
         if not run_script(part2b_script, delete_args):
             logger.error("Part 2b failed.")
+        
+        # Note: Retouching filter is now part of preprocess_multitask.py
+        # and can be optimized via optimize_sequential.py
         
         logger.info(f"Pipeline finished for {keyword}")
 

@@ -45,9 +45,12 @@ MOUTH_OPEN_FILTER_PERCENTILE = 0
 EYEBROW_EYE_PERCENTILE_HIGH = 0 
 EYEBROW_EYE_PERCENTILE_LOW = 0  
 SHARPNESS_PERCENTILE_LOW = 0  # Filter bottom X% by sharpness (Laplacian variance)
-SHARPNESS_PERCENTILE_HIGH = 50  # Filter top X% by sharpness
+SHARPNESS_PERCENTILE_HIGH = 0  # Filter top X% by sharpness
 FACE_SIZE_PERCENTILE_LOW = 0   # Filter bottom X% by face size (small images)
 FACE_SIZE_PERCENTILE_HIGH = 0  # Filter top X% by face size (large images)
+RETOUCHING_PERCENTILE = 0  # Filter bottom X% by skin smoothness (retouched images have lower values)
+MASK_PERCENTILE = 0 # Filter top X% by mask likelihood (high score = mask)
+GLASSES_PERCENTILE = 0 # Filter top X% by glasses likelihood (high score = glasses)
 
 # Landmarks (InsightFace 106)
 LEFT_INNER_EYE_IDX = 89
@@ -63,6 +66,146 @@ LEFT_EYE_IDX = 94
 
 # Global for Worker
 face_app = None
+
+def get_skin_mask(img):
+    """
+    肌色領域のマスクを取得
+    YCrCb色空間で肌色を検出
+    """
+    ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+    # 肌色の範囲（YCrCb）
+    lower = np.array([0, 133, 77], dtype=np.uint8)
+    upper = np.array([255, 173, 127], dtype=np.uint8)
+    mask = cv2.inRange(ycrcb, lower, upper)
+    
+    # ノイズ除去
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    
+    return mask
+
+def calculate_skin_smoothness(img):
+    """
+    肌領域のスムージング度を計算
+    加工画像（美肌加工等）は肌の高周波成分が少ないため低い値になる
+    値が高いほど自然な肌、低いほど加工されている可能性が高い
+    """
+    skin_mask = get_skin_mask(img)
+    
+    if skin_mask.sum() < 100:
+        # 肌領域が十分にない場合はフィルタリング対象外（高い値を返す）
+        return float('inf')
+    
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # ソーベルフィルタで高周波成分を抽出
+    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+    
+    # 肌領域の高周波成分の平均
+    magnitude_masked = magnitude[skin_mask > 0]
+    if len(magnitude_masked) > 0:
+        return np.mean(magnitude_masked)
+    
+    return float('inf')
+
+def calculate_mask_likehood(img, lmk):
+    """
+    マスク装着の可能性をスコア化 (高いほどマスクの可能性大)
+    上顔面(額)と下顔面(口周辺)の肌色比率を比較
+    """
+    h, w = img.shape[:2]
+    mask = get_skin_mask(img)
+    
+    # Upper Face (Forehead): Above eyebrows
+    # LMK 72(L-Brow), 33(R-Brow) approx.
+    # Use average Y of eyebrows upwards
+    # InsightFace 106: Brows 33-42 (R), 64-73 (L)
+    # Let's use Eye Center to Top
+    # L: 89, R: 39
+    
+    # 簡易的に: 目のY座標より上をUpper、鼻先より下をLowerとする
+    eye_y = int((lmk[89][1] + lmk[39][1]) / 2)
+    nose_y = int(lmk[86][1])
+    
+    # Upper ROI
+    upper_roi = mask[0:eye_y, :]
+    upper_skin_ratio = (upper_roi > 0).sum() / (upper_roi.size + 1e-6)
+    
+    # Lower ROI
+    lower_roi = mask[nose_y:h, :]
+    lower_skin_ratio = (lower_roi > 0).sum() / (lower_roi.size + 1e-6)
+    
+    # もし上顔面がしっかり肌色であれば、下顔面の肌色率が低い＝マスクの可能性
+    # Upperが肌色でない(前髪等)場合は信頼度低いが、とりあえず比率で見る
+    
+    # Score: 1.0 - (Lower / (Upper + epsilon))
+    # Upperが0の場合は考慮して、単純に Lower Ratio が低いかどうかを見るだけでも良いが、
+    # 暗い画像対策で相対評価にする
+    
+    if upper_skin_ratio < 0.1:
+        # 上顔面も肌が見えない -> 全体的に暗いか顔検出がおかしい -> マスク判定は危険（判定しない=0）
+        return 0.0
+        
+    # 比率スコア (大きいほどマスク)
+    score = 1.0 - (lower_skin_ratio / (upper_skin_ratio + 1e-6))
+    return max(0.0, score)
+
+def calculate_glasses_score(img, lmk):
+    """
+    眼鏡の可能性をスコア化 (高いほど眼鏡の可能性大)
+    目周辺のエッジ量を顔全体のエッジ量と比較、または絶対値
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Face Box (lmk min/max)
+    min_x = int(np.min(lmk[:, 0]))
+    max_x = int(np.max(lmk[:, 0]))
+    min_y = int(np.min(lmk[:, 1]))
+    max_y = int(np.max(lmk[:, 1]))
+    
+    # Eye Region Box
+    # L-Eye: 89, R-Eye: 39. Expand to cover frames.
+    # Dist between eyes
+    dist = np.linalg.norm(lmk[89] - lmk[39])
+    pad = int(dist * 0.4)
+    
+    eye_min_x = int(min(lmk[39][0], lmk[89][0])) - pad
+    eye_max_x = int(max(lmk[39][0], lmk[89][0])) + pad
+    eye_min_y = int(min(lmk[39][1], lmk[89][1])) - int(pad * 0.5)
+    eye_max_y = int(max(lmk[39][1], lmk[89][1])) + int(pad * 0.5)
+    
+    # Clip
+    h, w = gray.shape
+    eye_min_x = max(0, eye_min_x); eye_max_x = min(w, eye_max_x)
+    eye_min_y = max(0, eye_min_y); eye_max_y = min(h, eye_max_y)
+    
+    eye_roi = gray[eye_min_y:eye_max_y, eye_min_x:eye_max_x]
+    if eye_roi.size == 0: return 0.0
+    
+    # Sobel Edge
+    sobel_x = cv2.Sobel(eye_roi, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(eye_roi, cv2.CV_64F, 0, 1, ksize=3)
+    mag_eye = np.mean(np.sqrt(sobel_x**2 + sobel_y**2))
+    
+    # Compare to Forehead (smooth skin usually)
+    # Forehead: Above eyes
+    fh_min_y = max(0, eye_min_y - pad)
+    fh_max_y = eye_min_y
+    fh_roi = gray[fh_min_y:fh_max_y, eye_min_x:eye_max_x]
+    
+    if fh_roi.size > 0:
+        sobel_x = cv2.Sobel(fh_roi, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(fh_roi, cv2.CV_64F, 0, 1, ksize=3)
+        mag_fh = np.mean(np.sqrt(sobel_x**2 + sobel_y**2))
+        
+        # Raito: Eye Edge / Forehead Edge
+        # Glasses add edges to eye region
+        return mag_eye / (mag_fh + 1e-6)
+    
+    return mag_eye # Fallback (Absolute value)
 
 def init_worker():
     global face_app
@@ -133,6 +276,10 @@ def analyze_single_image(args):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
 
+    # Skin Smoothness for Retouching Detection
+    # 肌領域のスムージング度を計算（加工画像は低い値になる）
+    skin_smoothness = calculate_skin_smoothness(img)
+
     # Aspect Ratio (Height / Width)
     box = face.bbox
     box_w = box[2] - box[0]
@@ -153,8 +300,27 @@ def analyze_single_image(args):
         'mouth_open': mouth_open,
         'eb_eye_dist': eb_eye_dist,
         'sharpness': sharpness,
+        'skin_smoothness': skin_smoothness,
         'aspect_ratio': aspect_ratio,
         'face_size': face_size
+    }
+    # Mask & Glasses
+    mask_score = calculate_mask_likehood(img, lmk)
+    glasses_score = calculate_glasses_score(img, lmk)
+    
+    res['valid'] = True
+    res['metrics'] = {
+        'pitch': pitch,
+        'symmetry': symmetry,
+        'y_diff': y_diff,
+        'mouth_open': mouth_open,
+        'eb_eye_dist': eb_eye_dist,
+        'sharpness': sharpness,
+        'skin_smoothness': skin_smoothness,
+        'aspect_ratio': aspect_ratio,
+        'face_size': face_size,
+        'mask_score': mask_score,
+        'glasses_score': glasses_score
     }
     return res
 
@@ -308,7 +474,34 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             th_ar_low = np.percentile(ar_vals, args.aspect_ratio_cutoff)
             th_ar_high = np.percentile(ar_vals, 100 - args.aspect_ratio_cutoff)
     
-    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}, AR<={th_ar_low:.3f}|>={th_ar_high:.3f}")
+    # Retouching threshold (lower bound - filter retouched/smoothed images)
+    th_retouching = 0
+    if args.retouching_percentile > 0:
+        # skin_smoothnessがinfでないものだけ使う
+        retouch_vals = [r['metrics'].get('skin_smoothness', float('inf')) for r in valid_items]
+        retouch_vals = [v for v in retouch_vals if v != float('inf')]
+        if retouch_vals:
+            th_retouching = np.percentile(retouch_vals, args.retouching_percentile)
+    
+    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}, AR<={th_ar_low:.3f}|>={th_ar_high:.3f}, Retouch>={th_retouching:.1f}")
+    
+    # Mask thresholds (filter top X% - likely mask)
+    th_mask = 999.0
+    if args.mask_percentile > 0:
+        mask_vals = [r['metrics'].get('mask_score', 0) for r in valid_items]
+        if mask_vals:
+            # 高いスコア(マスク疑惑)をカットするので、Top X% を閾値とする
+            # つまり、閾値より低いものを残す
+            th_mask = np.percentile(mask_vals, 100 - args.mask_percentile)
+
+    # Glasses thresholds (filter top X% - likely glasses)
+    th_glasses = 999.0
+    if args.glasses_percentile > 0:
+        gl_vals = [r['metrics'].get('glasses_score', 0) for r in valid_items]
+        if gl_vals:
+             th_glasses = np.percentile(gl_vals, 100 - args.glasses_percentile)
+             
+    logger.info(f"Mask/Glasses Thresh: Mask<={th_mask:.3f}, Glasses<={th_glasses:.3f}")
     
     # --- Filtering & Grouping ---
     grouped = defaultdict(list)
@@ -353,6 +546,9 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             elif args.face_size_percentile_low > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) < th_face_size_low: reason = 'face_size_low_global'
             elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high: reason = 'face_size_high_global'
             elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high): reason = 'aspect_ratio_global'
+            elif args.retouching_percentile > 0 and m.get('skin_smoothness', float('inf')) != float('inf') and m.get('skin_smoothness', float('inf')) < th_retouching: reason = 'retouching_global'
+            elif args.mask_percentile > 0 and m.get('mask_score', 0) > th_mask: reason = 'mask_global'
+            elif args.glasses_percentile > 0 and m.get('glasses_score', 0) > th_glasses: reason = 'glasses_global'
             
             # Personal Check
             elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high): reason = 'eb_eye_high_personal'
@@ -430,6 +626,14 @@ def main():
     # Aspect Ratio
     parser.add_argument("--aspect_ratio_cutoff", type=int, default=0, help="Filter both top/bottom X% outliers in aspect ratio")
     
+    # Retouching (美肌加工・SNSフィルター検出)
+    # Retouching (美肌加工・SNSフィルター検出)
+    parser.add_argument("--retouching_percentile", type=int, default=RETOUCHING_PERCENTILE, help="Filter bottom X% by skin smoothness (retouched images)")
+    
+    # Mask & Glasses
+    parser.add_argument("--mask_percentile", type=int, default=MASK_PERCENTILE, help="Filter top X% by mask likelihood")
+    parser.add_argument("--glasses_percentile", type=int, default=GLASSES_PERCENTILE, help="Filter top X% by glasses likelihood")
+    
     # Grayscale
     parser.add_argument("--grayscale", action="store_true", help="Convert images to grayscale")
     
@@ -454,7 +658,11 @@ def main():
         logger.info(f"  Mouth Pct: {args.mouth_open_percentile}")
         logger.info(f"  Eb-Eye Pct (High/Low): {args.eyebrow_eye_percentile_high} / {args.eyebrow_eye_percentile_low} (PER PERSON)")
         logger.info(f"  Sharpness Pct Low/High: {args.sharpness_percentile_low} / {args.sharpness_percentile_high}")
+        logger.info(f"  Face Size Pct Low/High: {args.face_size_percentile_low} / {args.face_size_percentile_high}")
         logger.info(f"  Aspect Ratio Cutoff: {args.aspect_ratio_cutoff}")
+        logger.info(f"  Retouching Pct: {args.retouching_percentile}")
+        logger.info(f"  Mask Pct: {args.mask_percentile}")
+        logger.info(f"  Glasses Pct: {args.glasses_percentile}")
         logger.info(f"  Grayscale: {args.grayscale}")
         logger.info("=" * 60)
         

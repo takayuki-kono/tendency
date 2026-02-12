@@ -6,7 +6,7 @@ import os
 
 # Allow importing from the same directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from common import get_preprocessing_function, BalancedSparseCategoricalAccuracy
+from common import get_preprocessing_function, BalancedSparseCategoricalAccuracy, MinClassAccuracy
 
 def create_model(model_name, num_classes, img_size, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params):
     model_map = {
@@ -68,7 +68,8 @@ def create_model(model_name, num_classes, img_size, num_dense_layers, dense_unit
     # Metrics
     metrics = [
         'accuracy',
-        BalancedSparseCategoricalAccuracy(num_classes, name='balanced_accuracy')
+        BalancedSparseCategoricalAccuracy(num_classes, name='balanced_accuracy'),
+        MinClassAccuracy(num_classes, name='min_class_accuracy')
     ]
 
     model.compile(

@@ -83,8 +83,18 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - **詳細ログ出力 (2026-02-11):**
         - 検証データに対する全クラスの個別精度（正解数/総数）を出力し、ボトルネックとなっているクラスを特定可能にした。
 
+
+### ステージ 4: SVMパラメータ最適化
+**スクリプト:** `optimize_svm_sequential.py`
+**最適化手法:**
+- **効率ベースの貪欲法 (Efficiency-Based Greedy Integration):**
+    - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。
+    - **効率 (Efficiency) = 精度向上 / (フィルタリング枚数 + 1)** を計算。
+    - 効率が高い順にパラメータをソートし、貪欲法的に適用。適用の可否は、適用後のスコアが現在のベストスコアを上回るかどうかで判定する。
+    - これにより、過度なデータ削除を避けつつ、最大限の精度向上を目指す。
+
 ---
 
 ## Author
-Gemini (Updated 2026-02-11)
+Gemini (Updated 2026-02-12)
 
