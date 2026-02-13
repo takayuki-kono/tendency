@@ -36,12 +36,17 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     -   **キーワード:** 「〇〇 女優」に固定。
     -   **枚数制限:** 各エンジン最大1000枚。
     -   **ドメインフィルタリング:** Malwarebytes等で警告される不正ドメイン（clubberia, xxupなど）からのダウンロードをブロック。
-2.  **Part 1 (`components/part1_setup.py`):**
-    -   **顔検出:** InsightFaceを使用して顔を検出。
-    -   **回転補正:** 顔の向きを正立に補正。
-    -   **クロップ:** **眉毛から顎まで**（インデックス: 49/104 ～ 顎）で切り抜き。
-    -   **パディング:** 制限なし。
-    -   **リサイズ:** `224x224` px に統一。
+2.  **Part 1 (`components/part1_setup.py`):** ※2パス方式
+    -   **パス1: ダウンロード & 顔サイズ収集**
+        -   全画像をダウンロード後、InsightFaceで顔を検出しbbox幅（face_size）を記録。
+        -   画像はstaging領域に一時保持。
+    -   **パス2: 正規化 & 加工**
+        -   全画像のface_sizeから75パーセンタイル（上位25%境界）を算出。
+        -   **Face Size正規化:** face_size > 75pctの画像は、元画像を `scale = 75pct / face_size` で縮小してから処理。(2026-02-12追加)
+        -   **回転補正:** 顔の向きを正立に補正。
+        -   **クロップ:** **眉毛から顎まで**（インデックス: 49/104 ～ 顎）で切り抜き。
+        -   **パディング:** 制限なし。
+        -   **リサイズ:** `224x224` px に統一。
     -   **I/O:** `imread_safe` を使用し、日本語ファイル名に対応。
 3.  **Part 2a (`components/part2a_similarity.py`):**
     -   **重複排除:** 特徴量ベクトルを計算し、DBSCANを用いて「ほぼ同じ画像」を削除。
@@ -84,17 +89,24 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
         - 検証データに対する全クラスの個別精度（正解数/総数）を出力し、ボトルネックとなっているクラスを特定可能にした。
 
 
-### ステージ 4: SVMパラメータ最適化
-**スクリプト:** `optimize_svm_sequential.py`
+### ステージ 4: フィルタリングパラメータ最適化
+**スクリプト:** `optimize_sequential.py` (NN版), `optimize_svm_sequential.py` (SVM版)
 **最適化手法:**
-- **効率ベースの貪欲法 (Efficiency-Based Greedy Integration):**
+- **Phase 1 - 独立パラメータ評価:**
     - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。
     - **効率 (Efficiency) = 精度向上 / (フィルタリング枚数 + 1)** を計算。
-    - 効率が高い順にパラメータをソートし、貪欲法的に適用。適用の可否は、適用後のスコアが現在のベストスコアを上回るかどうかで判定する。
-    - これにより、過度なデータ削除を避けつつ、最大限の精度向上を目指す。
+    - 単体でベストスコアを出したパラメータ (Single Best) を記録。
+- **Phase 2 - 効率ベースの貪欲法 (Efficiency-Based Greedy Integration):**
+    - 効率が高い順にパラメータをソートし、貪欲法的に統合。精度が下がった時点で統合を停止。
+    - **Grayscaleは含めず**、フィルタパラメータのみで実行。
+- **Final Selection:**
+    - Greedy Integration結果、Single Best、Original(全パラメータ適用)を比較し、最高スコアの戦略を選択。
+- **Grayscale Test (最終ベスト決定後):**
+    - Final Selectionで決定したベスト構成に対してのみ、Color vs Grayscaleを比較。
+    - **Grayscaleは最適化プロセスに統合せず、最終結果に対する後処理として評価する。** (2026-02-12 変更)
 
 ---
 
 ## Author
-Gemini (Updated 2026-02-12)
+Claude (Updated 2026-02-12)
 

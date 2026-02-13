@@ -313,21 +313,7 @@ def main():
             global_best_desc = f"Single Best ({param_name}={val})"
             logger.info(f"  [Global Best Update] New best found: {global_best_desc}, Score: {score:.4f}")
 
-    # Grayscale
-    logger.info("\n>>> Optimizing Grayscale <<<")
-    res_color = run_trial(*(list(current_params.values()) + [False, best_model, best_svm_params]))
-    res_gray = run_trial(*(list(current_params.values()) + [True, best_model, best_svm_params]))
-    
-    score_color, score_gray = res_color[0], res_gray[0]
-    
-    if score_gray > score_color:
-        current_params['grayscale'] = True
-        logger.info(f"Grayscale selected ({score_gray:.4f} > {score_color:.4f})")
-    else:
-        current_params['grayscale'] = False
-        logger.info(f"Color selected ({score_color:.4f} >= {score_gray:.4f})")
-        
-    # Phase 2: Efficiency-Based Greedy Integration
+    # Phase 2: Efficiency-Based Greedy Integration (Grayscale無しで実行)
     logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
     
     # 効率順にソート
@@ -338,17 +324,14 @@ def main():
     )
     
     current_greedy_params = {k: 0 for k in current_params}
-    current_greedy_params['grayscale'] = current_params.get('grayscale', False)
     
-    # Base check
+    # Base check (Grayscale=False)
     base_res = run_trial(
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        grayscale=current_greedy_params['grayscale'], model_name=best_model, svm_params=best_svm_params
+        grayscale=False, model_name=best_model, svm_params=best_svm_params
     )
     current_best_score = base_res[0]
     logger.info(f"Base Score: {current_best_score:.4f}")
-    
-    scaled_results = [] # To keep consistent struct
     
     for param_name, info in sorted_params:
         val = info['val']
@@ -363,7 +346,7 @@ def main():
             temp_params['sharpness_low'], temp_params['sharpness_high'],
             temp_params['face_size_low'], temp_params['face_size_high'],
             temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
-            grayscale=temp_params['grayscale'], model_name=best_model, svm_params=best_svm_params
+            grayscale=False, model_name=best_model, svm_params=best_svm_params
         )
         score = res[0]
         
@@ -375,38 +358,98 @@ def main():
             logger.info(f"  -> Rejected (Score: {score:.4f} < {current_best_score:.4f})")
             logger.info("  -> Stopping integration.")
             break
-            
-    scaled_results.append({
-        'name': "Greedy Integration",
-        'params': current_greedy_params,
-        'score': current_best_score,
-        'filtered': 0 # Dummy
-    })
     
-    final_score = current_best_score # For compatibility with later code
-        
+    greedy_score = current_best_score
+    greedy_params = current_greedy_params.copy()
+    
+    # --- Final Selection Phase (Grayscale適用前) ---
+    logger.info("\n>>> Final Selection Phase (without Grayscale) <<<")
+    
+    candidates = []
+    
+    # Greedy Integration
+    candidates.append({'name': "Greedy Integration", 'params': greedy_params, 'score': greedy_score})
+    logger.info(f"Strategy: {'Greedy':<15} Score={greedy_score:.4f}")
+    
+    # Single Best
+    logger.info(f"\n--- Testing Single Best ({global_best_desc}) ---")
+    sb_res = run_trial(
+        global_best_params['pitch'], global_best_params['sym'], global_best_params['y_diff'], global_best_params['mouth_open'],
+        global_best_params['eb_eye_high'], global_best_params['eb_eye_low'],
+        global_best_params['sharpness_low'], global_best_params['sharpness_high'],
+        global_best_params['face_size_low'], global_best_params['face_size_high'],
+        global_best_params['retouching'], global_best_params['mask'], global_best_params['glasses'],
+        grayscale=False, model_name=best_model, svm_params=best_svm_params
+    )
+    sb_score = sb_res[0]
+    candidates.append({'name': f"Single Best ({global_best_desc})", 'params': global_best_params.copy(), 'score': sb_score})
+    logger.info(f"Strategy: {'Single Best':<15} Score={sb_score:.4f}")
+    
+    # ベストを選択 (Score最大)
+    best_candidate = max(candidates, key=lambda x: x['score'])
+    logger.info(f"-> Selected: {best_candidate['name']} (Score: {best_candidate['score']:.4f})")
+    
+    final_params = best_candidate['params'].copy()
+    final_score = best_candidate['score']
+    final_desc = best_candidate['name']
+    
+    # --- Grayscale Test (最終ベストに対してのみ) ---
+    logger.info("\n>>> Grayscale Test (on final best) <<<")
+    
+    res_color = run_trial(
+        final_params['pitch'], final_params['sym'], final_params['y_diff'], final_params['mouth_open'],
+        final_params['eb_eye_high'], final_params['eb_eye_low'],
+        final_params['sharpness_low'], final_params['sharpness_high'],
+        final_params['face_size_low'], final_params['face_size_high'],
+        final_params['retouching'], final_params['mask'], final_params['glasses'],
+        grayscale=False, model_name=best_model, svm_params=best_svm_params
+    )
+    res_gray = run_trial(
+        final_params['pitch'], final_params['sym'], final_params['y_diff'], final_params['mouth_open'],
+        final_params['eb_eye_high'], final_params['eb_eye_low'],
+        final_params['sharpness_low'], final_params['sharpness_high'],
+        final_params['face_size_low'], final_params['face_size_high'],
+        final_params['retouching'], final_params['mask'], final_params['glasses'],
+        grayscale=True, model_name=best_model, svm_params=best_svm_params
+    )
+    
+    score_color, score_gray = res_color[0], res_gray[0]
+    
+    if score_gray > score_color:
+        final_params['grayscale'] = True
+        final_score = score_gray
+        logger.info(f"Grayscale selected ({score_gray:.4f} > {score_color:.4f})")
+    else:
+        final_params['grayscale'] = False
+        final_score = score_color
+        logger.info(f"Color selected ({score_color:.4f} >= {score_gray:.4f})")
+    
     logger.info("="*50)
-    logger.info(f"OPTIMIZATION COMPLETE. Best Score: {current_best_score:.4f}")
-    logger.info(f"Params: {current_greedy_params}")
+    logger.info("OPTIMIZATION COMPLETE.")
+    logger.info(f"Selected Strategy: {final_desc}")
+    logger.info(f"Best Score: {final_score:.4f}")
+    logger.info(f"Baseline Score: {baseline_score:.4f}")
+    logger.info(f"Total Improvement: +{final_score - baseline_score:.4f}")
+    logger.info(f"Params: {final_params}")
     
     # Command Generation
     final_cmd = (
         f"{PYTHON_PREPROCESS} preprocess_multitask.py --out_dir preprocessed_multitask_svm "
-        f"--pitch_percentile {current_greedy_params['pitch']} "
-        f"--symmetry_percentile {current_greedy_params['sym']} "
-        f"--y_diff_percentile {current_greedy_params['y_diff']} "
-        f"--mouth_open_percentile {current_greedy_params['mouth_open']} "
-        f"--eyebrow_eye_percentile_high {current_greedy_params['eb_eye_high']} "
-        f"--eyebrow_eye_percentile_low {current_greedy_params['eb_eye_low']} "
-        f"--sharpness_percentile_low {current_greedy_params['sharpness_low']} "
-        f"--sharpness_percentile_high {current_greedy_params['sharpness_high']} "
-        f"--face_size_percentile_low {current_greedy_params['face_size_low']} "
-        f"--face_size_percentile_high {current_greedy_params['face_size_high']} "
-        f"--retouching_percentile {current_greedy_params['retouching']} "
-        f"--mask_percentile {current_greedy_params['mask']} "
-        f"--glasses_percentile {current_greedy_params['glasses']} "
+        f"--pitch_percentile {final_params['pitch']} "
+        f"--symmetry_percentile {final_params['sym']} "
+        f"--y_diff_percentile {final_params['y_diff']} "
+        f"--mouth_open_percentile {final_params['mouth_open']} "
+        f"--eyebrow_eye_percentile_high {final_params['eb_eye_high']} "
+        f"--eyebrow_eye_percentile_low {final_params['eb_eye_low']} "
+        f"--sharpness_percentile_low {final_params['sharpness_low']} "
+        f"--sharpness_percentile_high {final_params['sharpness_high']} "
+        f"--face_size_percentile_low {final_params['face_size_low']} "
+        f"--face_size_percentile_high {final_params['face_size_high']} "
+        f"--retouching_percentile {final_params['retouching']} "
+        f"--mask_percentile {final_params['mask']} "
+        f"--glasses_percentile {final_params['glasses']} "
     )
-    if current_greedy_params.get('grayscale', False):
+    if final_params.get('grayscale', False):
         final_cmd += "--grayscale "
     logger.info("\nRun this command to apply the best filters:")
     logger.info(final_cmd)

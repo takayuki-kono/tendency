@@ -357,53 +357,8 @@ def main():
             global_best_desc = f"Single Best ({param_name}={val})"
             logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {score:.4f}")
     
-    # 14. Grayscale (Boolean comparison)
-    # Grayscaleは独立試行として扱うか、最後に組み合わせるか。
-    # 既存ロジックに合わせて最後に組み合わせるが、単体のベストと比較する際にも考慮が必要。
-    # ここでは既存通り、current_paramsには含める。
-    logger.info("\n>>> Optimizing Grayscale (True vs False) <<<")
-    result_color = run_trial(
-        current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
-        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'], current_params['sharpness_high'],
-        current_params['face_size_low'], current_params['face_size_high'], current_params['retouching'],
-        current_params['mask'], current_params['glasses'],
-        grayscale=False, model_name=best_model
-    )
-    result_gray = run_trial(
-        current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
-        current_params['eb_eye_high'], current_params['eb_eye_low'], current_params['sharpness_low'], current_params['sharpness_high'],
-        current_params['face_size_low'], current_params['face_size_high'], current_params['retouching'],
-        current_params['mask'], current_params['glasses'],
-        grayscale=True, model_name=best_model
-    )
-    score_color = result_color[0]
-    score_gray = result_gray[0]
-    
-    if score_gray > score_color:
-        current_params['grayscale'] = True
-        logger.info(f"Grayscale selected (Score: {score_gray:.4f} > {score_color:.4f})")
-        # Grayscale単体でのスコアもチェック（他のパラメータが全部盛りの状態での比較なので、純粋なSingle Bestとは違うが、ここでは最終的な構成の一部として扱う）
-        # ただしGlobal Bestの更新は「パラメータ単体」のループで行っているので、ここでは行わない。
-    else:
-        current_params['grayscale'] = False
-        logger.info(f"Color selected (Score: {score_color:.4f} >= {score_gray:.4f})")
-    
-    # Phase 2: Efficiency-Based Scaling
-    logger.info("\n>>> Phase 2: Efficiency-Based Scaling <<<")
-    # 効率の最大値を取得
-    efficiencies = [info['efficiency'] for info in param_efficiency.values()]
-    max_efficiency = max(efficiencies) if efficiencies else 1.0
-    if max_efficiency <= 0: max_efficiency = 1.0 # 0除算防止
-    
-    logger.info(f"Max Efficiency: {max_efficiency:.8f}")
-    
-    # 3つのスケーリング戦略を用意
-    # 3つのスケーリング戦略ではなく、効率順にパラメータを追加していく「Greedy Integration」戦略
-    # ユーザー要望: "精度向上効率が高い順に精度落ちるまで統合"
-    
-    logger.info("\n--- Testing Greedy Integration Strategy ---")
-    
-    scaled_results = [] # Initialize here
+    # Phase 2: Efficiency-Based Greedy Integration (Grayscale無しで実行)
+    logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
     
     # 効率順にソート (効率 > 0 のもののみ)
     sorted_params = sorted(
@@ -412,14 +367,12 @@ def main():
         reverse=True
     )
     
-    current_greedy_params = {k: 0 for k in current_params} # Start empty
-    current_greedy_params['grayscale'] = current_params.get('grayscale', False)
+    current_greedy_params = {k: 0 for k in current_params}
     
-    # ベースライン（何もなし + Grayscale）のスコア計測
-    # (Gray有無ですでにresult_color/result_grayがあるが、念のため今の構成で測る)
+    # ベースライン（Grayscale=False）のスコア計測
     base_res = run_trial(
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        grayscale=current_greedy_params['grayscale'], model_name=best_model
+        grayscale=False, model_name=best_model
     )
     current_best_score = base_res[0]
     logger.info(f"Base Score (No filters): {current_best_score:.4f}")
@@ -430,7 +383,6 @@ def main():
         val = info['val']
         logger.info(f"Trying to add {param_name}={val} (Efficiency: {info['efficiency']:.6f})...")
         
-        # 一時的にパラメータ適用
         temp_params = current_greedy_params.copy()
         temp_params[param_name] = val
         
@@ -440,7 +392,7 @@ def main():
             temp_params['sharpness_low'], temp_params['sharpness_high'],
             temp_params['face_size_low'], temp_params['face_size_high'],
             temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
-            grayscale=temp_params['grayscale'], model_name=best_model
+            grayscale=False, model_name=best_model
         )
         score, total, filtered = res
         
@@ -453,103 +405,124 @@ def main():
             logger.info(f"  -> Rejected (Score: {score:.4f} < {current_best_score:.4f})")
             logger.info("  -> Stopping integration as accuracy dropped.")
             break
-            
-    scaled_results.append({
-        'name': "Greedy Integration",
-        'params': current_greedy_params,
-        'score': current_best_score,
-        'filtered': -1 # Calculate later or ignore
-    })
+    
+    greedy_score = current_best_score
+    greedy_params = current_greedy_params.copy()
 
-    # 元のパラメータでもスコアを確認（比較用）
-    logger.info("\n--- Testing Original Parameters (no scaling) ---")
+    # 元のパラメータでもスコアを確認（比較用、Grayscale無し）
+    logger.info("\n--- Testing Original Parameters (no scaling, no grayscale) ---")
     original_result = run_trial(
         current_params['pitch'], current_params['sym'], current_params['y_diff'], current_params['mouth_open'],
         current_params['eb_eye_high'], current_params['eb_eye_low'],
         current_params['sharpness_low'], current_params['sharpness_high'],
         current_params['face_size_low'], current_params['face_size_high'],
         current_params['retouching'], current_params['mask'], current_params['glasses'],
-        grayscale=current_params['grayscale'], model_name=best_model
+        grayscale=False, model_name=best_model
     )
     original_score, original_total, original_filtered = original_result
-    
-    # 最終比較
-    logger.info("\n>>> Final Selection Phase <<<")
+
+    # --- Final Selection Phase (Grayscale適用前) ---
+    logger.info("\n>>> Final Selection Phase (without Grayscale) <<<")
     
     candidates = []
-    # Scaled Results
-    for res in scaled_results:
-        candidates.append(res)
-        logger.info(f"Strategy: {res['name']:<15} Score={res['score']:.4f}, Filtered={res['filtered']}")
-        
-    # Original
+    
+    # Greedy Integration
+    candidates.append({'name': "Greedy Integration", 'params': greedy_params, 'score': greedy_score})
+    logger.info(f"Strategy: {'Greedy':<15} Score={greedy_score:.4f}")
+    
+    # Original (all Phase 1 params applied)
     candidates.append({
         'name': "Original (No Scale)",
-        'params': current_params,
+        'params': {k: v for k, v in current_params.items()},
         'score': original_score,
-        'filtered': original_filtered
     })
-    logger.info(f"Strategy: {'Original':<15} Score={original_score:.4f}, Filtered={original_filtered}")
+    logger.info(f"Strategy: {'Original':<15} Score={original_score:.4f}")
     
     # Single Best
-    # Grayscaleの結果を反映して再評価する
-    logger.info(f"\n--- Testing Single Best ({global_best_desc}) with Grayscale={current_params.get('grayscale', False)} ---")
-    single_best_params_eval = global_best_params.copy()
-    single_best_params_eval['grayscale'] = current_params.get('grayscale', False)
-    
+    logger.info(f"\n--- Testing Single Best ({global_best_desc}) ---")
     sb_res = run_trial(
-        single_best_params_eval['pitch'], single_best_params_eval['sym'], single_best_params_eval['y_diff'], single_best_params_eval['mouth_open'],
-        single_best_params_eval['eb_eye_high'], single_best_params_eval['eb_eye_low'],
-        single_best_params_eval['sharpness_low'], single_best_params_eval['sharpness_high'],
-        single_best_params_eval['face_size_low'], single_best_params_eval['face_size_high'],
-        single_best_params_eval['retouching'], single_best_params_eval['mask'], single_best_params_eval['glasses'],
-        grayscale=single_best_params_eval['grayscale'], model_name=best_model
+        global_best_params['pitch'], global_best_params['sym'], global_best_params['y_diff'], global_best_params['mouth_open'],
+        global_best_params['eb_eye_high'], global_best_params['eb_eye_low'],
+        global_best_params['sharpness_low'], global_best_params['sharpness_high'],
+        global_best_params['face_size_low'], global_best_params['face_size_high'],
+        global_best_params['retouching'], global_best_params['mask'], global_best_params['glasses'],
+        grayscale=False, model_name=best_model
     )
-    sb_score, sb_total, sb_filtered = sb_res
-    
+    sb_score = sb_res[0]
     candidates.append({
         'name': f"Single Best ({global_best_desc})",
-        'params': single_best_params_eval,
+        'params': global_best_params.copy(),
         'score': sb_score,
-        'filtered': sb_filtered
     })
-    logger.info(f"Strategy: {'Single Best':<15} Score={sb_score:.4f}, Filtered={sb_filtered}")
+    logger.info(f"Strategy: {'Single Best':<15} Score={sb_score:.4f}")
 
     # ベストを選択 (Score最大)
     best_candidate = max(candidates, key=lambda x: x['score'])
+    logger.info(f"-> Selected: {best_candidate['name']} (Score: {best_candidate['score']:.4f})")
     
-    logger.info(f"-> Selected: {best_candidate['name']}")
+    final_params = best_candidate['params'].copy()
+    final_score = best_candidate['score']
+    final_desc = best_candidate['name']
     
-    current_params = best_candidate['params']
-    final_best_score = best_candidate['score']
+    # --- Grayscale Test (最終ベストに対してのみ) ---
+    logger.info("\n>>> Grayscale Test (on final best) <<<")
     
+    res_color = run_trial(
+        final_params['pitch'], final_params['sym'], final_params['y_diff'], final_params['mouth_open'],
+        final_params['eb_eye_high'], final_params['eb_eye_low'],
+        final_params['sharpness_low'], final_params['sharpness_high'],
+        final_params['face_size_low'], final_params['face_size_high'],
+        final_params['retouching'], final_params['mask'], final_params['glasses'],
+        grayscale=False, model_name=best_model
+    )
+    res_gray = run_trial(
+        final_params['pitch'], final_params['sym'], final_params['y_diff'], final_params['mouth_open'],
+        final_params['eb_eye_high'], final_params['eb_eye_low'],
+        final_params['sharpness_low'], final_params['sharpness_high'],
+        final_params['face_size_low'], final_params['face_size_high'],
+        final_params['retouching'], final_params['mask'], final_params['glasses'],
+        grayscale=True, model_name=best_model
+    )
+    
+    score_color, score_gray = res_color[0], res_gray[0]
+    
+    if score_gray > score_color:
+        final_params['grayscale'] = True
+        final_score = score_gray
+        logger.info(f"Grayscale selected ({score_gray:.4f} > {score_color:.4f})")
+    else:
+        final_params['grayscale'] = False
+        final_score = score_color
+        logger.info(f"Color selected ({score_color:.4f} >= {score_gray:.4f})")
+
     logger.info("\n" + "="*50)
     logger.info("OPTIMIZATION COMPLETE")
-    logger.info(f"Final Best Params: {current_params}")
+    logger.info(f"Selected Strategy: {final_desc}")
+    logger.info(f"Final Best Params: {final_params}")
     logger.info(f"Final Best Model: {best_model}")
-    logger.info(f"Final Score: {final_best_score:.4f}")
+    logger.info(f"Final Score: {final_score:.4f}")
     logger.info(f"Baseline Score: {baseline_score:.4f}")
-    logger.info(f"Total Improvement: +{final_best_score - baseline_score:.4f}")
+    logger.info(f"Total Improvement: +{final_score - baseline_score:.4f}")
     logger.info("="*50)
 
     # Generate and print the final preprocessing command
     final_cmd = (
         f"{PYTHON_PREPROCESS} preprocess_multitask.py --out_dir preprocessed_multitask "
-        f"--pitch_percentile {current_params['pitch']} "
-        f"--symmetry_percentile {current_params['sym']} "
-        f"--y_diff_percentile {current_params['y_diff']} "
-        f"--mouth_open_percentile {current_params['mouth_open']} "
-        f"--eyebrow_eye_percentile_high {current_params['eb_eye_high']} "
-        f"--eyebrow_eye_percentile_low {current_params['eb_eye_low']} "
-        f"--sharpness_percentile_low {current_params['sharpness_low']} "
-        f"--sharpness_percentile_high {current_params['sharpness_high']} "
-        f"--face_size_percentile_low {current_params['face_size_low']} "
-        f"--face_size_percentile_high {current_params['face_size_high']} "
-        f"--retouching_percentile {current_params['retouching']} "
-        f"--mask_percentile {current_params['mask']} "
-        f"--glasses_percentile {current_params['glasses']} "
+        f"--pitch_percentile {final_params['pitch']} "
+        f"--symmetry_percentile {final_params['sym']} "
+        f"--y_diff_percentile {final_params['y_diff']} "
+        f"--mouth_open_percentile {final_params['mouth_open']} "
+        f"--eyebrow_eye_percentile_high {final_params['eb_eye_high']} "
+        f"--eyebrow_eye_percentile_low {final_params['eb_eye_low']} "
+        f"--sharpness_percentile_low {final_params['sharpness_low']} "
+        f"--sharpness_percentile_high {final_params['sharpness_high']} "
+        f"--face_size_percentile_low {final_params['face_size_low']} "
+        f"--face_size_percentile_high {final_params['face_size_high']} "
+        f"--retouching_percentile {final_params['retouching']} "
+        f"--mask_percentile {final_params['mask']} "
+        f"--glasses_percentile {final_params['glasses']} "
     )
-    if current_params.get('grayscale', False):
+    if final_params.get('grayscale', False):
         final_cmd += "--grayscale "
     logger.info("\nRun this command to apply the best filters:")
     logger.info(final_cmd)

@@ -113,7 +113,8 @@ def create_dataset(directory, class_names, img_size, batch_size, augment_params=
     
     def parse_image(path, label):
         image = tf.io.read_file(path)
-        image = tf.image.decode_jpeg(image, channels=3)
+        image = tf.image.decode_image(image, channels=3, expand_animations=False)
+        image.set_shape([None, None, 3])
         image = tf.image.resize(image, [img_size, img_size])
         return image, label
 

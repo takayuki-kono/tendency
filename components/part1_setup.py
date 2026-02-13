@@ -123,24 +123,85 @@ def imwrite_safe(path, img):
         logger.warning(f"Failed to write image {path}: {e}")
         return False
 
-def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
-    """画像から顔を検出し、加工して rotated_dir に保存する"""
+def detect_face_size(img_path, face_app):
+    """パス1: 顔を検出してface_size（bbox幅）とfaceオブジェクトを返す。
+    
+    Returns:
+        tuple: (sizes_list, faces_list) - 空の場合は ([], [])
+    """
     img = imread_safe(img_path)
-    if img is None: return 0
+    if img is None: return [], []
 
     try:
         faces = face_app.get(img)
     except Exception as e:
         logger.error(f"Face detection failed for {img_path}: {e}")
-        return 0
+        return [], []
 
     if not faces:
-        # logger.debug(f"No faces found in {img_path}")
+        return [], []
+
+    sizes = []
+    for face in faces:
+        box = face.bbox
+        face_w = box[2] - box[0]
+        sizes.append(int(face_w))
+    return sizes, faces
+
+
+def process_and_save_face(img_path, rotated_dir, face_app, engine_name, 
+                          face_size_threshold=None, target_face_size=None,
+                          predetected_faces=None):
+    """画像から顔を検出し、加工して rotated_dir に保存する。
+    
+    face_size_threshold が指定された場合、顔のbbox幅がthresholdを超える画像は
+    target_face_sizeに合わせて元画像を縮小してから処理する。
+    predetected_faces が指定された場合、初回の顔検出をスキップする。
+    """
+    img = imread_safe(img_path)
+    if img is None: return 0
+
+    if predetected_faces is not None:
+        faces = predetected_faces
+    else:
+        try:
+            faces = face_app.get(img)
+        except Exception as e:
+            logger.error(f"Face detection failed for {img_path}: {e}")
+            return 0
+
+    if not faces:
         return 0
 
     saved_count = 0
     for face_idx, face in enumerate(faces):
         try:
+            # 0. Face Size 正規化 (回転前に実施)
+            # face_sizeが閾値を超える場合、元画像を縮小して顔サイズを正規化
+            work_img = img
+            box = face.bbox
+            face_w = box[2] - box[0]
+            
+            if (face_size_threshold is not None and target_face_size is not None 
+                    and face_w > face_size_threshold):
+                scale = target_face_size / face_w
+                new_w = int(work_img.shape[1] * scale)
+                new_h = int(work_img.shape[0] * scale)
+                if new_w > 10 and new_h > 10:
+                    work_img = cv2.resize(work_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    logger.debug(f"Face size normalized: {int(face_w)} -> {target_face_size} (scale={scale:.2f})")
+                    
+                    # 縮小後の画像で再検出
+                    try:
+                        re_faces = face_app.get(work_img)
+                        if not re_faces:
+                            # 縮小後に顔が検出できない場合は元画像で続行
+                            work_img = img
+                        else:
+                            face = max(re_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
+                    except Exception:
+                        work_img = img
+
             # 1. Rotation Alignment
             lmk = face.landmark_2d_106
             if lmk is None: continue
@@ -149,9 +210,9 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
             dy = lmk[86][1] - lmk[0][1]
             angle = np.arctan2(dx, -dy) * 180 / np.pi
             
-            center = (img.shape[1] / 2, img.shape[0] / 2)
+            center = (work_img.shape[1] / 2, work_img.shape[0] / 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            rotated_img = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]))
+            rotated_img = cv2.warpAffine(work_img, M, (work_img.shape[1], work_img.shape[0]))
             
             # 2. Re-detect on rotated image
             new_faces = face_app.get(rotated_img)
@@ -190,8 +251,8 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
             # 4. Resize to 224x224
             final_resized = cv2.resize(cropped, (IMG_SIZE, IMG_SIZE))
             
-            # 5. Save with size info
-            orig_w = cropped.shape[1]
+            # 5. Save with size info (元のface_size - 正規化前の値を記録)
+            orig_w = int(face_w)
             new_filename = f"{engine_name}_{uuid.uuid4().hex[:8]}_sz{orig_w}.jpg"
             dest_path = os.path.join(rotated_dir, new_filename)
             
@@ -203,9 +264,6 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name):
     return saved_count
 
 def main():
-    # ダウンロード時の無限ハングを防ぐため、20秒でタイムアウト（グローバル設定に移動済み）
-
-    
     if len(sys.argv) != 3:
         print("Usage: python part1_setup.py <keyword> <output_dir>")
         sys.exit(1)
@@ -228,7 +286,16 @@ def main():
         shutil.rmtree(temp_root)
     os.makedirs(temp_root, exist_ok=True)
 
-    total_faces = 0
+    # === 2パス処理 ===
+    # ダウンロードした画像を一旦保持するディレクトリ
+    staging_dir = os.path.join(output_dir, "_staging")
+    os.makedirs(staging_dir, exist_ok=True)
+    
+    # パス1で集めた情報: [(staging_path, engine_name, [face_sizes])]
+    staged_images = []
+
+    # --- パス1: ダウンロード & face_size収集 ---
+    logger.info("=== Pass 1: Download & Face Size Detection ===")
 
     for engine_name in ENGINES:
         logger.info(f"--- Engine: {engine_name} ---")
@@ -246,10 +313,8 @@ def main():
                 
                 # --- Domain Filtering ---
                 if image_infos:
-                    # Attempt to identify the URL key dynamically
                     url_key = None
                     sample = image_infos[0]
-                    # Common keys for URL in crawlers
                     candidates = ['link', 'image_link', 'file_url', 'original_link', 'source_link']
                     for k in candidates:
                         if k in sample:
@@ -257,7 +322,6 @@ def main():
                             break
                     
                     if url_key is None:
-                        # Fallback: look for http string values
                         for k, v in sample.items():
                             if isinstance(v, str) and v.startswith('http'):
                                 url_key = k
@@ -271,12 +335,9 @@ def main():
                             url = info.get(url_key, "")
                             if any(blocked in url for blocked in BLOCKED_DOMAINS):
                                 continue
-                            
-                            # Filter suspicious extensions
                             url_clean = url.split('?')[0].lower()
                             if url_clean.endswith(SUSPICIOUS_EXTENSIONS):
                                 continue
-                                
                             filtered_infos.append(info)
                         
                         image_infos = filtered_infos
@@ -287,12 +348,26 @@ def main():
                 
                 downloaded = client.download(image_infos)
                 if downloaded:
-                    logger.info(f"Processing {len(downloaded)} images from {engine_name} for '{skey}'")
+                    logger.info(f"Scanning {len(downloaded)} images from {engine_name} for '{skey}'")
                     for info in downloaded:
                         src_path = info['file_path']
                         if os.path.exists(src_path):
-                            total_faces += process_and_save_face(src_path, rotated_dir, face_app, engine_name)
-                            os.remove(src_path)
+                            # 顔サイズとfaceオブジェクトを検出
+                            sizes, faces = detect_face_size(src_path, face_app)
+                            if sizes:
+                                # staging_dirに移動して保持
+                                staging_name = f"{engine_name}_{uuid.uuid4().hex[:12]}{os.path.splitext(src_path)[1]}"
+                                staging_path = os.path.join(staging_dir, staging_name)
+                                try:
+                                    shutil.move(src_path, staging_path)
+                                    staged_images.append((staging_path, engine_name, sizes, faces))
+                                except Exception as e:
+                                    logger.warning(f"Failed to stage {src_path}: {e}")
+                                    if os.path.exists(src_path):
+                                        os.remove(src_path)
+                            else:
+                                # 顔が検出できない画像は削除
+                                os.remove(src_path)
                 
                 # Cleanup engine temp folder
                 if downloaded:
@@ -303,6 +378,43 @@ def main():
 
     if os.path.exists(temp_root):
         shutil.rmtree(temp_root, ignore_errors=True)
+
+    # --- face_size統計計算 ---
+    all_face_sizes = []
+    for _, _, sizes, _ in staged_images:
+        all_face_sizes.extend(sizes)
+    
+    if all_face_sizes:
+        p75 = np.percentile(all_face_sizes, 75)  # 上位25%の境界
+        median = np.median(all_face_sizes)
+        logger.info(f"Face size stats: count={len(all_face_sizes)}, "
+                     f"median={median:.0f}, 75th_pct={p75:.0f}, "
+                     f"min={min(all_face_sizes)}, max={max(all_face_sizes)}")
+        logger.info(f"Face size normalization: faces > {p75:.0f}px will be scaled to {p75:.0f}px")
+        face_size_threshold = p75
+        target_face_size = p75
+    else:
+        logger.warning("No face sizes detected. Skipping normalization.")
+        face_size_threshold = None
+        target_face_size = None
+
+    # --- パス2: face_size正規化 & 回転・クロップ処理 ---
+    logger.info(f"=== Pass 2: Processing {len(staged_images)} images with face size normalization ===")
+    
+    total_faces = 0
+    for staging_path, engine_name, _, faces in staged_images:
+        if os.path.exists(staging_path):
+            total_faces += process_and_save_face(
+                staging_path, rotated_dir, face_app, engine_name,
+                face_size_threshold=face_size_threshold,
+                target_face_size=target_face_size,
+                predetected_faces=faces
+            )
+            os.remove(staging_path)
+
+    # staging_dirクリーンアップ
+    if os.path.exists(staging_dir):
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     logger.info(f"Part 1 finished. Total faces extracted: {total_faces}")
 

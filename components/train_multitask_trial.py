@@ -155,7 +155,8 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
             labels = tuple(label_tables[i].lookup(chars[i]) for i in range(len(task_labels)))
             
         image = tf.io.read_file(path)
-        image = tf.image.decode_jpeg(image, channels=3)
+        image = tf.image.decode_image(image, channels=3, expand_animations=False)
+        image.set_shape([None, None, 3])
         image = tf.image.resize(image, [IMG_SIZE, IMG_SIZE])
         return image, labels
 
@@ -209,7 +210,16 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
         return img_mix, lab_mix
 
     AUTOTUNE = tf.data.AUTOTUNE
-    list_ds = tf.data.Dataset.list_files(f'{directory}/*/*.jpg', shuffle=True, seed=42)
+    # 複数拡張子に対応
+    import glob as glob_module
+    image_files = []
+    for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+        image_files.extend(glob_module.glob(os.path.join(directory, '*', ext)))
+    if not image_files:
+        raise ValueError(f"No image files found in {directory}")
+    list_ds = tf.data.Dataset.from_tensor_slices(image_files)
+    if True:  # Always shuffle for training consistency
+        list_ds = list_ds.shuffle(buffer_size=len(image_files), seed=42)
     ds = list_ds.map(parse_path, num_parallel_calls=AUTOTUNE)
     ds = ds.cache() # Cache raw images before weights/mixup
     ds = ds.map(apply_weights, num_parallel_calls=AUTOTUNE)
