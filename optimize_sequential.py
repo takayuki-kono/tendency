@@ -135,27 +135,29 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     return best_epoch, score
 
 
-def calibrate_base_lr(model_name, initial_lr, target_epoch=10, cal_epochs=5):
+def calibrate_base_lr(model_name, initial_lr, cal_epochs=10):
     """
-    5 epochの短い学習を繰り返し、epoch {target_epoch} でベストになるLRを探す。
+    cal_epochs の学習を繰り返し、中間 epoch でベストになるLRを探す。
     
     原理:
-    - 5 epoch中の中間（2.5）でベスト → 20 epoch中の中間（10）でベストに相当
+    - 10 epoch中の中間（5）でベスト → 適切な収束速度
     - best_epoch < target → LR高すぎ → 下げる
     - best_epoch > target → LR低すぎ → 上げる
     - best_epoch / target_in_cal の比率でLRをスケーリング
     
     preprocessed_multitask が既に準備されている前提で呼ぶこと。
+    
+    Returns:
+        tuple: (calibrated_lr, final_score)
     """
     # cal_epochs中での目標ベストepoch（中間）
-    target_in_cal = cal_epochs / 2.0  # 5 epochなら2.5
+    target_in_cal = cal_epochs / 2.0  # 10 epochなら5
     
     current_lr = initial_lr
     
     logger.info(f"\n{'='*50}")
     logger.info(f"LR Calibration Start")
-    logger.info(f"  target_epoch={target_epoch}, cal_epochs={cal_epochs}")
-    logger.info(f"  target_best_in_{cal_epochs}_epochs = {target_in_cal:.1f}")
+    logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch={target_in_cal:.0f}")
     logger.info(f"  initial_lr = {initial_lr:.8f}")
     logger.info(f"{'='*50}")
     
@@ -181,9 +183,9 @@ def calibrate_base_lr(model_name, initial_lr, target_epoch=10, cal_epochs=5):
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         current_lr = new_lr
     
-    logger.info(f"\nCalibrated Base LR: {current_lr:.8f}")
+    logger.info(f"\nCalibrated Base LR: {current_lr:.8f}, Final Score: {score:.4f}")
     logger.info(f"{'='*50}")
-    return current_lr
+    return current_lr, score
 
 
 def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='EfficientNetV2B0'):
@@ -296,11 +298,11 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         
         cmd_train.extend(["--learning_rate", str(adjusted_lr)])
         
-        # 評価用なのでFine-tuningはOff、Epochsは20
-        cmd_train.extend(["--epochs", "20"])
+        # 評価用なのでFine-tuningはOff、Epochsは10
+        cmd_train.extend(["--epochs", "10"])
         cmd_train.extend(["--fine_tune", "False"])
 
-        logger.info(f"Running training with {model_name} (epochs=20, fine_tune=False)...")
+        logger.info(f"Running training with {model_name} (epochs=10, fine_tune=False)...")
         
         # Popenでリアルタイム出力 + スコア抽出
         process = subprocess.Popen(
@@ -467,7 +469,7 @@ def main():
     # 効率情報を記録する辞書
     param_efficiency = {}
     
-    # --- LR Calibration: epoch 10 でベストになるbase LRを決定 ---
+    # --- LR Calibration: epoch中間でベストになるbase LRを決定 ---
     logger.info("\n>>> LR Calibration: Finding optimal base learning rate <<<")
     
     # まずフィルタなしで前処理（キャリブレーション用データ準備）
@@ -485,20 +487,23 @@ def main():
     logger.info("Preprocessing for LR calibration (no filters)...")
     subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
     
-    # LRキャリブレーション実行
+    # LRキャリブレーション実行（10 epoch、epoch 5でベストをターゲット）
     best_params = load_best_train_params()
     initial_lr = best_params.get('learning_rate', 0.0001)
-    CALIBRATED_BASE_LR = calibrate_base_lr('EfficientNetV2B0', initial_lr, target_epoch=10, cal_epochs=5)
+    CALIBRATED_BASE_LR, cal_score = calibrate_base_lr('EfficientNetV2B0', initial_lr, cal_epochs=10)
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}")
     
     # --- Step 0: Model Architecture Selection & Baseline ---
+    # キャリブレーション最終結果をB0のベースラインとして流用
     logger.info("\n>>> Step 0: Model Architecture Selection & Baseline <<<")
-    candidate_models = ['EfficientNetV2B0', 'EfficientNetV2S']
     best_model = 'EfficientNetV2B0'
-    best_model_score = -1.0
-    baseline_filtered = 0
+    best_model_score = cal_score
+    baseline_filtered = 0  # キャリブレーションはフィルタなし
+    logger.info(f"B0 Baseline from calibration: Score={cal_score:.4f}")
     
-    for m in candidate_models:
+    # 他のモデル候補をテスト
+    other_models = ['EfficientNetV2S']
+    for m in other_models:
         logger.info(f"Testing Model: {m}")
         raw_score, total_images, filtered_count = run_trial(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, model_name=m)
         if raw_score > best_model_score:
