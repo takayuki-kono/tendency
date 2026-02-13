@@ -17,4 +17,5 @@ Behavior requirements:
 3. If both are missing, continue normally and ask only when guidance is truly needed.
 4. When instructions conflict, prioritize direct user requests, then stricter safety/system constraints, then these context files.
 5. For git operations, do not auto-run `git add`, `git commit`, or `git push` unless the user explicitly asks for execution. Default behavior is to share the exact commands for the user to run.
+6. Default interaction style for terminal operations is command-sharing first: provide exact executable commands and wait for explicit execution request.
 
