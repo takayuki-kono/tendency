@@ -101,7 +101,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - 調整式: `new_lr = current_lr × (best_epoch / 5)`
     - 得られた `calibrated_base_lr` を全後続trialで使用。
     - キャリブレーション最終結果をB0のベースラインスコアとして流用（重複排除）。
-    - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / (saved/total)` で除算。
+    - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / sqrt(saved/total)` で除算。
     - 各trial: 10 epoch、Fine-tuning Off で評価。
 - **Phase 1 - 独立パラメータ評価:**
     - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。

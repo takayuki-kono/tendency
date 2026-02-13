@@ -7,6 +7,7 @@ import time
 import json
 import hashlib
 import winsound
+import math
 
 # --- 設定 ---
 # Python実行環境のパス
@@ -286,9 +287,10 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         # 学習率の設定: キャリブレーション済みLR / フィルタリング残り割合
         if CALIBRATED_BASE_LR is not None and total_images > 0 and saved_images > 0:
             ratio = saved_images / total_images
-            safe_ratio = max(ratio, 0.1)  # 下限10%（LR最大10倍まで）
-            adjusted_lr = CALIBRATED_BASE_LR / safe_ratio
-            logger.info(f"LR (Calibrated/Ratio): {CALIBRATED_BASE_LR:.8f} / {ratio:.2f} -> {adjusted_lr:.8f}")
+            safe_ratio = max(ratio, 0.01)  # 下限1%（sqrt後のLR最大10倍まで）
+            scale_factor = math.sqrt(safe_ratio)
+            adjusted_lr = CALIBRATED_BASE_LR / scale_factor
+            logger.info(f"LR (SqrtRatio): {CALIBRATED_BASE_LR:.8f} / sqrt({safe_ratio:.2f})={scale_factor:.2f} -> {adjusted_lr:.8f}")
         elif CALIBRATED_BASE_LR is not None:
             adjusted_lr = CALIBRATED_BASE_LR
             logger.info(f"LR (Calibrated): {adjusted_lr:.8f}")
