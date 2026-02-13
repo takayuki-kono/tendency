@@ -239,16 +239,48 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     best_score = baseline_score
     best_filtered = baseline_filtered
     
+    # 各探索点のスコアを記録（二分探索用）
+    scores = {}
+    
     for p in points:
         logger.info(f"Testing {target_name}={p}...")
         raw_score, total_images, filtered_count = evaluate_wrapper(p)
         logger.info(f"  {target_name}={p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
+        scores[p] = (raw_score, total_images, filtered_count)
         
         if raw_score > best_score:
             best_score = raw_score
             best_val = p
             best_filtered = filtered_count
             logger.info(f"  [NEW BEST] {target_name}={p} (Score: {raw_score:.4f})")
+    
+    # --- 二分探索 Refinement ---
+    # best_valが0以外の場合、隣接する探索点との中間値を試す
+    if best_val > 0:
+        sorted_points = sorted(scores.keys())
+        best_idx = sorted_points.index(best_val)
+        
+        # 隣接点との中間値を計算
+        refinement_points = []
+        if best_idx > 0:
+            mid_low = (sorted_points[best_idx - 1] + best_val) // 2
+            if mid_low not in scores and mid_low != sorted_points[best_idx - 1] and mid_low != best_val:
+                refinement_points.append(mid_low)
+        if best_idx < len(sorted_points) - 1:
+            mid_high = (best_val + sorted_points[best_idx + 1]) // 2
+            if mid_high not in scores and mid_high != best_val and mid_high != sorted_points[best_idx + 1]:
+                refinement_points.append(mid_high)
+        
+        if refinement_points:
+            logger.info(f"  [Refinement] Testing midpoints: {refinement_points}")
+            for mid_p in refinement_points:
+                raw_score, total_images, filtered_count = evaluate_wrapper(mid_p)
+                logger.info(f"  {target_name}={mid_p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
+                if raw_score > best_score:
+                    best_score = raw_score
+                    best_val = mid_p
+                    best_filtered = filtered_count
+                    logger.info(f"  [REFINED BEST] {target_name}={mid_p} (Score: {raw_score:.4f})")
     
     # Efficiency calculation
     improvement = best_score - baseline_score
