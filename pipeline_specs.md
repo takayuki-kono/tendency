@@ -83,6 +83,9 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - 従来の `Balanced Accuracy` (平均再現率) に代わり、**`MinClassAccuracy` (最低クラス精度)** を採用。
     - 各クラスの再現率（Recall）のうち、**最も低い値**を最大化するように学習・最適化を行う。
     - これにより、難易度の高いクラスや少数派クラスの放置を防ぎ、全てのクラスで一定以上の精度を保証することを目指す。
+- **学習率キャリブレーション (2026-02-13):**
+    - `train_multitask_trial.py` に `--auto_lr_target_epoch` オプションあり（スタンドアロン用）。
+    - `BEST_EPOCH: N` を標準出力し、キャリブレーション時に利用可能。
 - **Fine-tuning:**
     - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
     - **詳細ログ出力 (2026-02-11):**
@@ -92,6 +95,14 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ### ステージ 4: フィルタリングパラメータ最適化
 **スクリプト:** `optimize_sequential.py` (NN版), `optimize_svm_sequential.py` (SVM版)
 **最適化手法:**
+- **LRキャリブレーション (Step -1):** (2026-02-13)
+    - 最適化開始前に、フィルタなしデータで5 epochの短い学習を最大3回繰り返す。
+    - Best epochが中間（2-3）に来るようLRを二分探索で調整。
+    - 5 epoch中の中間でベスト → 20 epoch中のepoch 10でベストに対応。
+    - 調整式: `new_lr = current_lr × (best_epoch / target_in_cal)`
+    - 得られた `calibrated_base_lr` を全後続trialで使用。
+    - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / (saved/total)` で除算。
+      フィルタによりデータが減った分、LRを上げて収束速度を維持する。
 - **Phase 1 - 独立パラメータ評価:**
     - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。
     - **効率 (Efficiency) = 精度向上 / (フィルタリング枚数 + 1)** を計算。
@@ -108,5 +119,5 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ---
 
 ## Author
-Claude (Updated 2026-02-12)
+Claude (Updated 2026-02-13)
 

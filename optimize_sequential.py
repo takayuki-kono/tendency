@@ -27,6 +27,9 @@ BEST_TRAIN_PARAMS_FILE = "outputs/best_train_params.json"
 # 効率が低いパラメータは自動的にスケールダウンまたは除外される
 MIN_EFFICIENCY_THRESHOLD = 0.00001  # 最小効率閾値（これ以下は除外候補）
 
+# LRキャリブレーション結果（main()で設定される）
+CALIBRATED_BASE_LR = None
+
 # パスが存在しない場合はデフォルトを使用
 if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
 if not os.path.exists(PYTHON_TRAIN): PYTHON_TRAIN = "python"
@@ -85,6 +88,104 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
+def run_calibration_trial(model_name, lr, cal_epochs=5):
+    """
+    LRキャリブレーション用: 前処理済みデータで学習のみ実行し、BEST_EPOCHを返す。
+    preprocessed_multitask が既に準備されている前提で呼ぶこと。
+    
+    Returns:
+        tuple: (best_epoch, score)
+    """
+    best_params = load_best_train_params()
+    
+    cmd_train = [PYTHON_TRAIN, "components/train_multitask_trial.py", "--model_name", model_name]
+    for k, v in best_params.items():
+        if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch']:
+            cmd_train.extend([f"--{k}", str(v)])
+    cmd_train.extend(["--learning_rate", str(lr)])
+    cmd_train.extend(["--epochs", str(cal_epochs)])
+    cmd_train.extend(["--fine_tune", "False"])
+    
+    logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
+    
+    process = subprocess.Popen(
+        cmd_train, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace'
+    )
+    
+    output_lines = []
+    for line in process.stdout:
+        line = line.rstrip()
+        output_lines.append(line)
+        if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'MinClassAcc', 'Avg=']):
+            logger.info(f"  [Cal] {line}")
+    
+    process.wait()
+    full_output = "\n".join(output_lines)
+    
+    # BEST_EPOCH抽出
+    match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
+    best_epoch = int(match_epoch.group(1)) if match_epoch else cal_epochs
+    
+    # スコア抽出
+    match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
+    score = float(match_score.group(1)) if match_score else 0.0
+    
+    logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+    return best_epoch, score
+
+
+def calibrate_base_lr(model_name, initial_lr, target_epoch=10, cal_epochs=5):
+    """
+    5 epochの短い学習を繰り返し、epoch {target_epoch} でベストになるLRを探す。
+    
+    原理:
+    - 5 epoch中の中間（2.5）でベスト → 20 epoch中の中間（10）でベストに相当
+    - best_epoch < target → LR高すぎ → 下げる
+    - best_epoch > target → LR低すぎ → 上げる
+    - best_epoch / target_in_cal の比率でLRをスケーリング
+    
+    preprocessed_multitask が既に準備されている前提で呼ぶこと。
+    """
+    # cal_epochs中での目標ベストepoch（中間）
+    target_in_cal = cal_epochs / 2.0  # 5 epochなら2.5
+    
+    current_lr = initial_lr
+    
+    logger.info(f"\n{'='*50}")
+    logger.info(f"LR Calibration Start")
+    logger.info(f"  target_epoch={target_epoch}, cal_epochs={cal_epochs}")
+    logger.info(f"  target_best_in_{cal_epochs}_epochs = {target_in_cal:.1f}")
+    logger.info(f"  initial_lr = {initial_lr:.8f}")
+    logger.info(f"{'='*50}")
+    
+    for iteration in range(3):  # 最大3回
+        best_epoch, score = run_calibration_trial(model_name, current_lr, cal_epochs)
+        
+        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        
+        # 許容範囲内なら終了 (±1 epoch)
+        if abs(best_epoch - target_in_cal) <= 1.0:
+            logger.info(f"Calibration converged! Calibrated LR={current_lr:.8f}")
+            break
+        
+        # LRスケーリング: best_epoch / target で比率を計算
+        # best_epoch=2, target=2.5 → scale=0.8 → LRを下げる
+        # best_epoch=4, target=2.5 → scale=1.6 → LRを上げる
+        scale = best_epoch / target_in_cal
+        # 極端な変更を防ぐ (0.2倍〜5倍)
+        scale = max(0.2, min(scale, 5.0))
+        new_lr = current_lr * scale
+        
+        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, scale={scale:.2f}")
+        logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
+        current_lr = new_lr
+    
+    logger.info(f"\nCalibrated Base LR: {current_lr:.8f}")
+    logger.info(f"{'='*50}")
+    return current_lr
+
+
 def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='EfficientNetV2B0'):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
@@ -96,7 +197,9 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
     logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Grayscale={grayscale}")
     
     file_count = count_files("train") + count_files("validation")
-    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}_cnt={file_count}"
+    # キャッシュキーにLR情報を含める（キャリブレーション後はLRが変わるため）
+    lr_tag = f"_clr={CALIBRATED_BASE_LR:.8f}" if CALIBRATED_BASE_LR else ""
+    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}{lr_tag}_cnt={file_count}"
     
     cache = load_cache()
     if cache_key in cache:
@@ -172,31 +275,28 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         cmd_train = [PYTHON_TRAIN, train_script, "--model_name", model_name]
         
         # Load best params and append to command
-        # epochs, fine_tune, model_name は明示的に設定するので除外
+        # epochs, fine_tune, model_name, learning_rate は明示的に設定するので除外
         best_params = load_best_train_params()
         for k, v in best_params.items():
-            if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate']:
+            if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch']:
                 cmd_train.extend([f"--{k}", str(v)])
         
-        # Dynamic Learning Rate Adjustment (Inverse Proportional)
-        # データ数が減る（Step数が減る）分、1Stepあたりの学習率を上げて、
-        # 1Epochあたりの重み更新総量を維持するアプローチ（除算）
-        base_lr = best_params.get('learning_rate', 0.0001)
-        
-        if total_images > 0 and saved_images > 0:
+        # 学習率の設定: キャリブレーション済みLR / フィルタリング残り割合
+        if CALIBRATED_BASE_LR is not None and total_images > 0 and saved_images > 0:
             ratio = saved_images / total_images
-            # データが1/10になったら LRは10倍
-            # ただし、極端に少なくなると跳ね上がるので、上限（例: 0.001程度まで）や下限ratioを設けるのが安全
-            # ここでは ratio < 0.1 (LR10倍) を上限として計算
-            safe_ratio = max(ratio, 0.1) 
-            adjusted_lr = base_lr / safe_ratio
-            
-            logger.info(f"Adjusting LR (Division): {base_lr} / {ratio:.2f} -> {adjusted_lr:.6f}")
-            cmd_train.extend(["--learning_rate", str(adjusted_lr)])
+            safe_ratio = max(ratio, 0.1)  # 下限10%（LR最大10倍まで）
+            adjusted_lr = CALIBRATED_BASE_LR / safe_ratio
+            logger.info(f"LR (Calibrated/Ratio): {CALIBRATED_BASE_LR:.8f} / {ratio:.2f} -> {adjusted_lr:.8f}")
+        elif CALIBRATED_BASE_LR is not None:
+            adjusted_lr = CALIBRATED_BASE_LR
+            logger.info(f"LR (Calibrated): {adjusted_lr:.8f}")
         else:
-            cmd_train.extend(["--learning_rate", str(base_lr)])
+            adjusted_lr = best_params.get('learning_rate', 0.0001)
+            logger.info(f"LR (Fallback): {adjusted_lr:.8f}")
         
-        # 評価用なのでFine-tuningはOff、Epochsは少し長めに（20）
+        cmd_train.extend(["--learning_rate", str(adjusted_lr)])
+        
+        # 評価用なのでFine-tuningはOff、Epochsは20
         cmd_train.extend(["--epochs", "20"])
         cmd_train.extend(["--fine_tune", "False"])
 
@@ -354,6 +454,7 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     return best_val, best_score, improvement, filtered_diff, efficiency
 
 def main():
+    global CALIBRATED_BASE_LR
     logger.info("Starting Sequential Optimization (Efficiency-Based)")
     
     # Initial Params
@@ -364,8 +465,31 @@ def main():
     }
     
     # 効率情報を記録する辞書
-    # {param_name: {'val': value, 'improvement': float, 'filtered_diff': int, 'efficiency': float}}
     param_efficiency = {}
+    
+    # --- LR Calibration: epoch 10 でベストになるbase LRを決定 ---
+    logger.info("\n>>> LR Calibration: Finding optimal base learning rate <<<")
+    
+    # まずフィルタなしで前処理（キャリブレーション用データ準備）
+    cmd_pre_cal = [
+        PYTHON_PREPROCESS, "preprocess_multitask.py",
+        "--out_dir", "preprocessed_multitask",
+        "--pitch_percentile", "0", "--symmetry_percentile", "0",
+        "--y_diff_percentile", "0", "--mouth_open_percentile", "0",
+        "--eyebrow_eye_percentile_high", "0", "--eyebrow_eye_percentile_low", "0",
+        "--sharpness_percentile_low", "0", "--sharpness_percentile_high", "0",
+        "--face_size_percentile_low", "0", "--face_size_percentile_high", "0",
+        "--retouching_percentile", "0", "--mask_percentile", "0",
+        "--glasses_percentile", "0"
+    ]
+    logger.info("Preprocessing for LR calibration (no filters)...")
+    subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    
+    # LRキャリブレーション実行
+    best_params = load_best_train_params()
+    initial_lr = best_params.get('learning_rate', 0.0001)
+    CALIBRATED_BASE_LR = calibrate_base_lr('EfficientNetV2B0', initial_lr, target_epoch=10, cal_epochs=5)
+    logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}")
     
     # --- Step 0: Model Architecture Selection & Baseline ---
     logger.info("\n>>> Step 0: Model Architecture Selection & Baseline <<<")

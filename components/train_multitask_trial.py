@@ -462,6 +462,10 @@ def main():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--unfreeze_layers', type=int, default=40)
     parser.add_argument('--single_task_mode', type=str, default='False') # "True" or "False"
+    
+    # 学習率自動調整: 指定したepochでベストになるようLRをデータ枚数に基づき自動算出
+    # 0 = 無効（--learning_rate をそのまま使用）、>0 = target epoch
+    parser.add_argument('--auto_lr_target_epoch', type=int, default=0)
 
     args = parser.parse_args()
     
@@ -495,30 +499,84 @@ def main():
     val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, task_labels, weight_tables=val_weight_tables, augment_params=None, single_task_mode=single_task_mode)\
         .batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
+    # --- 学習率の自動算出 (auto_lr_target_epoch > 0 の場合) ---
+    effective_lr = args.learning_rate
+    if args.auto_lr_target_epoch > 0:
+        # 訓練画像の枚数をカウント
+        import glob as glob_count
+        train_image_count = 0
+        for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+            train_image_count += len(glob_count.glob(os.path.join(PREPROCESSED_TRAIN_DIR, '*', ext)))
+        
+        steps_per_epoch = max(train_image_count / BATCH_SIZE, 1)
+        
+        # 学習率スケーリング: sqrt（平方根）ベース
+        # 
+        # 「1 epochあたりの総学習量 ∝ steps_per_epoch × learning_rate」
+        # を一定に保つなら線形（LR × reference/actual）だが、
+        # 実際のNNの学習ではSGDノイズの蓄積やモーメンタムの効果があるため
+        # 線形だと小データ時にLRが大きくなりすぎて不安定化する。
+        # 
+        # sqrt(reference / actual) を使うことで:
+        #   - データ640枚(steps≈20) に対し reference=20 → scale=1.0（変化なし）
+        #   - データ320枚(steps≈10) に対し → scale=sqrt(2)≈1.41（穏やかな増加）
+        #   - データ3200枚(steps≈100) に対し → scale=sqrt(0.2)≈0.45（穏やかな減少）
+        #
+        # 基準: steps_per_epoch=20（画像約640枚/batch32）で base_lr がそのまま適用
+        REFERENCE_STEPS_PER_EPOCH = 20.0
+        lr_scale = np.sqrt(REFERENCE_STEPS_PER_EPOCH / steps_per_epoch)
+        
+        # 極端なスケーリングを防止 (0.3倍〜3.0倍の範囲に制限)
+        lr_scale = max(0.3, min(lr_scale, 3.0))
+        
+        effective_lr = args.learning_rate * lr_scale
+        
+        logger.info(f"[Auto LR] target_best_epoch={args.auto_lr_target_epoch}")
+        logger.info(f"[Auto LR] train_images={train_image_count}, batch_size={BATCH_SIZE}, steps_per_epoch={steps_per_epoch:.1f}")
+        logger.info(f"[Auto LR] reference_steps={REFERENCE_STEPS_PER_EPOCH}, scale={lr_scale:.4f} (sqrt-based)")
+        logger.info(f"[Auto LR] base_lr={args.learning_rate} -> effective_lr={effective_lr:.8f}")
+
     model = create_model(
         args.model_name, 
         args.num_dense_layers, 
         args.dense_units, 
         args.dropout, 
         args.head_dropout,
-        args.learning_rate,
+        effective_lr,
         augment_params,
         task_labels
     )
 
     # コールバック生成関数 (Balanced Accuracyを監視 + Cosine Decay)
-    def create_callbacks(total_epochs, initial_lr):
+    def create_callbacks(total_epochs, initial_lr, target_epoch=0):
         def cosine_decay(epoch):
             if total_epochs == 0: return initial_lr
+            
+            if target_epoch > 0:
+                # target_epoch付近でベストになるよう調整されたcosine decay
+                # decay_length = total_epochs（target epochの2倍）を使い、
+                # target_epochの時点でcos(pi * target/total) ≈ cos(pi/2) = 0 → LRが初期値の約50%
+                # これにより、target_epoch付近でまだ十分な学習率を保ちつつ
+                # 過学習が始まる直前のスイートスポットに到達する
+                decay_length = total_epochs
+            else:
+                decay_length = total_epochs
+            
             # Cosine Decay with minimum LR (initial_lrの1%を下限とする)
             min_lr = initial_lr * 0.01
-            return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
+            return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * epoch / decay_length))
 
         # Early Stopping Monitor
         if len(task_labels) == 1:
             monitor_metric = 'val_min_class_accuracy'
         else:
             monitor_metric = 'val_task_a_output_min_class_accuracy'
+
+        # patience: target_epochの半分を目安にする（ただし最低3）
+        if target_epoch > 0:
+            patience = max(3, target_epoch // 2)
+        else:
+            patience = 5
 
         # エポックごとの精度サマリー出力
         class EpochSummaryCallback(tf.keras.callbacks.Callback):
@@ -549,7 +607,7 @@ def main():
                 logger.info(" | ".join(parts))
 
         return [
-            EarlyStopping(monitor=monitor_metric, patience=5, restore_best_weights=True, verbose=1, mode='max'),
+            EarlyStopping(monitor=monitor_metric, patience=patience, restore_best_weights=True, verbose=1, mode='max'),
             LearningRateScheduler(cosine_decay, verbose=1),
             EpochSummaryCallback()
         ]
@@ -558,17 +616,22 @@ def main():
     if args.fine_tune.lower() == 'true':
         phase1_epochs = 5 # Fine-tuning前のWarmupは短めに固定
     else:
-        phase1_epochs = args.epochs # Fine-tuningなしの場合は指定されたEpoch数で学習
+        if args.auto_lr_target_epoch > 0:
+            # auto_lr有効時: target_epochの2倍を上限にしてEarlyStoppingに任せる
+            phase1_epochs = args.auto_lr_target_epoch * 2
+            logger.info(f"[Auto LR] epochs set to {phase1_epochs} (target={args.auto_lr_target_epoch} x 2)")
+        else:
+            phase1_epochs = args.epochs # Fine-tuningなしの場合は指定されたEpoch数で学習
     if args.fine_tune.lower() == 'true':
         logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
     else:
-        logger.info(f"--- Training (Head only, {phase1_epochs} epochs) ---")
+        logger.info(f"--- Training (Head only, {phase1_epochs} epochs, effective_lr={effective_lr:.8f}) ---")
 
     history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=phase1_epochs,
-        callbacks=create_callbacks(phase1_epochs, args.learning_rate),
+        callbacks=create_callbacks(phase1_epochs, effective_lr, target_epoch=args.auto_lr_target_epoch),
         verbose=2
     )
     
@@ -629,7 +692,10 @@ def main():
                     avg_scores.append(epoch_sum_fallback / len(task_acc_keys))
 
             warmup_best_score = max(avg_scores)
-            logger.info(f"Phase 1 Best Average Min-Class Score: {warmup_best_score:.4f}")
+            best_epoch_idx = avg_scores.index(warmup_best_score)
+            best_epoch = best_epoch_idx + 1  # 1-indexed
+            print(f"BEST_EPOCH: {best_epoch}")
+            logger.info(f"Phase 1 Best Average Min-Class Score: {warmup_best_score:.4f} (at epoch {best_epoch}/{num_epochs})")
         else:
             logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
     
