@@ -190,13 +190,10 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
         w2 = entry2[2] if len(entry2) > 2 else None
         
         alpha = augment_params['mixup_alpha']
-        l = tf.random.gamma([], alpha, 1.0)
-        l = tf.math.reduce_max([l, 1-l]) # force > 0.5 to keep dominant label if we were using it, but for soft mix it's symmetric
-        # Beta distribution is better: np.random.beta(alpha, alpha)
-        # But tf doesn't have beta easily accessible without tfp. 
-        # Approx with uniform if alpha=1, or just 1.0 if placeholder.
-        # Let's use simple linear blend with random ratio
-        ratio = tf.random.uniform([], 0, 1)
+        # Beta(alpha, alpha) 分布をGamma分布2つから構築
+        g1 = tf.random.gamma([], alpha)
+        g2 = tf.random.gamma([], alpha)
+        ratio = g1 / (g1 + g2 + 1e-8)
 
         img_mix = ratio * img1 + (1 - ratio) * img2
         
@@ -383,8 +380,12 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(head_dropout)(x)
 
+    # Weight Decay: L2正則化で実装（AdamWが使えない環境向け）
+    wd = augment_params.get('weight_decay', 0.0)
+    kernel_reg = tf.keras.regularizers.l2(wd) if wd > 0 else None
+
     for _ in range(num_dense_layers):
-        x = layers.Dense(dense_units)(x)
+        x = layers.Dense(dense_units, kernel_regularizer=kernel_reg)(x)
         x = layers.BatchNormalization()(x)
         x = layers.Activation('relu')(x)
         x = layers.Dropout(dropout)(x)
@@ -421,16 +422,11 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
         metrics_dict[name] = metrics_list
 
-    wd = augment_params.get('weight_decay', 0.0)
-    if wd > 0:
-        # Use legacy AdamW for mixed precision compatibility
-        try:
-            optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate)
-            # Note: weight_decay via legacy Adam not supported, use kernel regularization instead
-        except AttributeError:
-            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    else:
+    # Optimizer: Weight DecayはDense層のkernel_regularizerで適用済み
+    try:
         optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate)
+    except AttributeError:
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
     model.compile(
         optimizer=optimizer,
@@ -494,7 +490,8 @@ def main():
 
     train_ds = create_dataset(PREPROCESSED_TRAIN_DIR, task_labels, weight_tables=weight_tables, augment_params=augment_params, single_task_mode=single_task_mode)\
         .shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-    val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, task_labels, weight_tables=val_weight_tables, augment_params=augment_params, single_task_mode=single_task_mode)\
+    # 検証データにはMixup/Label Smoothingを適用しない（生データで正しく評価）
+    val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, task_labels, weight_tables=val_weight_tables, augment_params=None, single_task_mode=single_task_mode)\
         .batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
     model = create_model(
@@ -512,8 +509,9 @@ def main():
     def create_callbacks(total_epochs, initial_lr):
         def cosine_decay(epoch):
             if total_epochs == 0: return initial_lr
-            # Cosine Decay: 0.5 * (1 + cos(pi * epoch / total_epochs)) * initial_lr
-            return initial_lr * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
+            # Cosine Decay with minimum LR (initial_lrの1%を下限とする)
+            min_lr = initial_lr * 0.01
+            return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
 
         # Early Stopping Monitor
         if len(task_labels) == 1:

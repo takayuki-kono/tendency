@@ -30,6 +30,7 @@
 3.  **全体スケーリング (Global Scaling)**:
     - 上記で得られた「各パラメータの比率」を保ったまま、強度を一律に調整。
     - **係数**: `[1.0, 0.5, 0.25]` (例: 係数0.5なら、各カット率を半分にする)。
+    - スコアが低下するパラメータはスキップし、残りの候補も継続して試す（途中で打ち切らない）。
 4.  **結果出力**: 最適化されたパラメータを用いた `preprocess_multitask.py` の実行コマンドを表示。
 
 ### 手法B: CNNベース最適化 (高精度・低速)
@@ -92,8 +93,12 @@
     - Task A: `Dense(2, activation='softmax')` (傾向: a, b)
     - Task B: `Dense(2, ...)` (d, e)
     - ...
-- **損失関数**: `SparseCategoricalCrossentropy`
+- **損失関数**: `SparseCategoricalCrossentropy` (Mixup/LabelSmoothing使用時は `CategoricalCrossentropy`)
 - **評価指標**: `BalancedSparseCategoricalAccuracy` (自作指標。データ不均衡に頑健)
+- **学習率スケジュール**: Cosine Decay (最低LR = initial_lr × 0.01。ゼロにはしない)
+- **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
+- **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
+- **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`
