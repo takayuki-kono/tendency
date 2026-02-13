@@ -520,9 +520,38 @@ def main():
         else:
             monitor_metric = 'val_task_a_output_min_class_accuracy'
 
+        # エポックごとの精度サマリー出力
+        class EpochSummaryCallback(tf.keras.callbacks.Callback):
+            def on_epoch_end(self, epoch, logs=None):
+                if logs is None:
+                    return
+                parts = [f"Epoch {epoch+1}/{total_epochs}"]
+                # 各タスクのMinClassAccuracy
+                if len(task_labels) == 1:
+                    val_min = logs.get('val_min_class_accuracy', None)
+                    if val_min is not None:
+                        parts.append(f"MinClassAcc={val_min:.4f}")
+                else:
+                    task_mins = []
+                    for i in range(len(task_labels)):
+                        key = f"val_task_{chr(ord('a')+i)}_output_min_class_accuracy"
+                        val = logs.get(key, None)
+                        if val is not None:
+                            parts.append(f"Task{chr(65+i)}={val:.4f}")
+                            task_mins.append(val)
+                    if task_mins:
+                        avg = sum(task_mins) / len(task_mins)
+                        parts.append(f"Avg={avg:.4f}")
+                # Loss
+                val_loss = logs.get('val_loss', None)
+                if val_loss is not None:
+                    parts.append(f"Loss={val_loss:.4f}")
+                logger.info(" | ".join(parts))
+
         return [
             EarlyStopping(monitor=monitor_metric, patience=5, restore_best_weights=True, verbose=1, mode='max'),
-            LearningRateScheduler(cosine_decay, verbose=1)
+            LearningRateScheduler(cosine_decay, verbose=1),
+            EpochSummaryCallback()
         ]
 
     # --- Phase 1: 初期学習 (Headのみ) ---
