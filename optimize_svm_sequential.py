@@ -300,6 +300,28 @@ def main():
     else:
         logger.info("Using default SVM params (no best params found)")
 
+    # --- Step -1: SVM Hyperparameter Search ---
+    logger.info("\n>>> Step -1: SVM Hyperparameter Search <<<")
+    svm_candidates = [
+        {'C': 1.0, 'gamma': 'scale'},
+        {'C': 10.0, 'gamma': 'scale'},
+        {'C': 0.1, 'gamma': 'scale'},
+        {'C': 1.0, 'gamma': 'auto'},
+        {'C': 10.0, 'gamma': 'auto'},
+    ]
+    
+    best_svm_score = -1.0
+    for candidate in svm_candidates:
+        logger.info(f"Testing SVM params: {candidate}")
+        score, _, _ = run_trial(0,0,0,0,0,0,0,0,0,0,0,0,0, model_name="SVM", svm_params=candidate)
+        logger.info(f"  -> Score: {score:.4f}")
+        if score > best_svm_score:
+            best_svm_score = score
+            best_svm_params = candidate
+            logger.info(f"  [NEW BEST SVM] {candidate} (Score: {score:.4f})")
+    
+    logger.info(f"Best SVM Params: {best_svm_params} (Score: {best_svm_score:.4f})")
+
     # Initial Params
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,

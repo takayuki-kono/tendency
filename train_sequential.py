@@ -252,11 +252,14 @@ def main():
     logger.info(f"Best Params before FT: {current_params}")
     logger.info("="*50)
     
-    # --- Step 4: Final Fine-Tuning ---
+    # --- Step 4: Unfreeze Layers Optimization ---
     current_params['fine_tune'] = 'True'
-    current_params['epochs'] = 50 # エポック数を増やす
+    current_params['epochs'] = 50
     
-    # ファインチューニングは1回だけ実行（最適化されたパラメータで）
+    best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
+    current_params['unfreeze_layers'] = best_unfreeze
+    
+    # ファインチューニングは最適化されたパラメータで実行済み
     final_ft_score = run_trial(current_params)
     
     logger.info("\n" + "="*50)

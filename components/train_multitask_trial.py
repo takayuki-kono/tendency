@@ -460,6 +460,7 @@ def main():
     # Mode
     parser.add_argument('--fine_tune', type=str, default='False')
     parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--unfreeze_layers', type=int, default=40)
     parser.add_argument('--single_task_mode', type=str, default='False') # "True" or "False"
 
     args = parser.parse_args()
@@ -525,8 +526,7 @@ def main():
         ]
 
     # --- Phase 1: 初期学習 (Headのみ) ---
-    # 探索時と条件を合わせるため、Warmupは常に10エポック確保する
-    phase1_epochs = 10
+    phase1_epochs = 5
     if args.fine_tune.lower() == 'true':
         logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
     else:
@@ -621,9 +621,11 @@ def main():
         
         if base_model_layer:
             base_model_layer.trainable = True
-            # 下位層は再固定
-            for layer in base_model_layer.layers[:-40]:
-                layer.trainable = False
+            # 下位層は再固定 (unfreeze_layers で制御)
+            if args.unfreeze_layers < len(base_model_layer.layers):
+                for layer in base_model_layer.layers[:-args.unfreeze_layers]:
+                    layer.trainable = False
+            logger.info(f"Unfreezing top {args.unfreeze_layers} layers of {len(base_model_layer.layers)} total")
             
             output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
             
@@ -649,15 +651,11 @@ def main():
                 metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
                 metrics_dict[name] = metrics_list
             
-            # 再コンパイル (学習率をさらに下げる: 1/10 -> 1/100)
-            wd = augment_params.get('weight_decay', 0.0)
-            if wd > 0:
-                try:
-                    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=args.learning_rate / 100)
-                except AttributeError:
-                    optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate / 100)
-            else:
+            # 再コンパイル (学習率をさらに下げる: 1/100)
+            try:
                 optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=args.learning_rate / 100)
+            except AttributeError:
+                optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate / 100)
 
             model.compile(
                 optimizer=optimizer,
