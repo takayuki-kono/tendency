@@ -178,11 +178,11 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             if k not in ['model_name', 'fine_tune', 'epochs']:
                 cmd_train.extend([f"--{k}", str(v)])
         
-        # 評価用なのでFine-tuningはOff、Epochsは短め（5）
-        cmd_train.extend(["--epochs", "5"])
+        # 評価用なのでFine-tuningはOff、Epochsは少し長めに（10）
+        cmd_train.extend(["--epochs", "10"])
         cmd_train.extend(["--fine_tune", "False"])
 
-        logger.info(f"Running training with {model_name} (epochs=5, fine_tune=False)...")
+        logger.info(f"Running training with {model_name} (epochs=10, fine_tune=False)...")
         
         # Popenでリアルタイム出力 + スコア抽出
         process = subprocess.Popen(

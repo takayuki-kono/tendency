@@ -555,7 +555,10 @@ def main():
         ]
 
     # --- Phase 1: 初期学習 (Headのみ) ---
-    phase1_epochs = 5
+    if args.fine_tune.lower() == 'true':
+        phase1_epochs = 5 # Fine-tuning前のWarmupは短めに固定
+    else:
+        phase1_epochs = args.epochs # Fine-tuningなしの場合は指定されたEpoch数で学習
     if args.fine_tune.lower() == 'true':
         logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
     else:
