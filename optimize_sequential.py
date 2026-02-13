@@ -175,14 +175,32 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         # epochs, fine_tune, model_name は明示的に設定するので除外
         best_params = load_best_train_params()
         for k, v in best_params.items():
-            if k not in ['model_name', 'fine_tune', 'epochs']:
+            if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate']:
                 cmd_train.extend([f"--{k}", str(v)])
         
-        # 評価用なのでFine-tuningはOff、Epochsは少し長めに（10）
-        cmd_train.extend(["--epochs", "10"])
+        # Dynamic Learning Rate Adjustment (Inverse Proportional)
+        # データ数が減る（Step数が減る）分、1Stepあたりの学習率を上げて、
+        # 1Epochあたりの重み更新総量を維持するアプローチ（除算）
+        base_lr = best_params.get('learning_rate', 0.0001)
+        
+        if total_images > 0 and saved_images > 0:
+            ratio = saved_images / total_images
+            # データが1/10になったら LRは10倍
+            # ただし、極端に少なくなると跳ね上がるので、上限（例: 0.001程度まで）や下限ratioを設けるのが安全
+            # ここでは ratio < 0.1 (LR10倍) を上限として計算
+            safe_ratio = max(ratio, 0.1) 
+            adjusted_lr = base_lr / safe_ratio
+            
+            logger.info(f"Adjusting LR (Division): {base_lr} / {ratio:.2f} -> {adjusted_lr:.6f}")
+            cmd_train.extend(["--learning_rate", str(adjusted_lr)])
+        else:
+            cmd_train.extend(["--learning_rate", str(base_lr)])
+        
+        # 評価用なのでFine-tuningはOff、Epochsは少し長めに（20）
+        cmd_train.extend(["--epochs", "20"])
         cmd_train.extend(["--fine_tune", "False"])
 
-        logger.info(f"Running training with {model_name} (epochs=10, fine_tune=False)...")
+        logger.info(f"Running training with {model_name} (epochs=20, fine_tune=False)...")
         
         # Popenでリアルタイム出力 + スコア抽出
         process = subprocess.Popen(
