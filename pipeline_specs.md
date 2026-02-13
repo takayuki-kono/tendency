@@ -99,6 +99,8 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - 最適化開始前に、フィルタなしデータで10 epochの学習を最大3回繰り返す。
     - Best epochが中間（epoch 5）に来るようLRを二分探索で調整。
     - 調整式: `new_lr = current_lr × (best_epoch / 5)`
+    - 収束条件は `BestEpoch==5` を厳密採用（許容誤差0）。一致しない場合は最大5回まで調整を継続。
+    - 各試行の候補から「epoch5への距離最小（同距離ならスコア高い方）」を最終採用。
     - 得られた `calibrated_base_lr` を全後続trialで使用。
     - キャリブレーション最終結果をB0のベースラインスコアとして流用（重複排除）。
     - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / sqrt(saved/total)` で除算。

@@ -136,7 +136,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     return best_epoch, score
 
 
-def calibrate_base_lr(model_name, initial_lr, cal_epochs=10):
+def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=None, tolerance=0):
     """
     cal_epochs の学習を繰り返し、中間 epoch でベストになるLRを探す。
     
@@ -151,8 +151,12 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10):
     Returns:
         tuple: (calibrated_lr, final_score)
     """
-    # cal_epochs中での目標ベストepoch（中間）
-    target_in_cal = cal_epochs / 2.0  # 10 epochなら5
+    # cal_epochs中での目標ベストepoch
+    # 既定は "前半の中間" を採用（10 epoch -> 5）
+    if target_best_epoch is None:
+        target_in_cal = float(max(1, cal_epochs // 2))
+    else:
+        target_in_cal = float(target_best_epoch)
     
     current_lr = initial_lr
     
@@ -162,13 +166,19 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10):
     logger.info(f"  initial_lr = {initial_lr:.8f}")
     logger.info(f"{'='*50}")
     
-    for iteration in range(3):  # 最大3回
+    best_candidate = None  # (distance, -score, lr, best_epoch, score)
+    max_iterations = 5
+    for iteration in range(max_iterations):
         best_epoch, score = run_calibration_trial(model_name, current_lr, cal_epochs)
+        distance = abs(best_epoch - target_in_cal)
+        candidate = (distance, -score, current_lr, best_epoch, score)
+        if best_candidate is None or candidate < best_candidate:
+            best_candidate = candidate
         
         logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
         
-        # 許容範囲内なら終了 (±1 epoch)
-        if abs(best_epoch - target_in_cal) <= 1.0:
+        # 許容範囲内なら終了（既定: 0 = 目標epochに一致）
+        if distance <= float(tolerance):
             logger.info(f"Calibration converged! Calibrated LR={current_lr:.8f}")
             break
         
@@ -176,14 +186,26 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10):
         # best_epoch=2, target=2.5 → scale=0.8 → LRを下げる
         # best_epoch=4, target=2.5 → scale=1.6 → LRを上げる
         scale = best_epoch / target_in_cal
-        # 極端な変更を防ぐ (0.2倍〜5倍)
-        scale = max(0.2, min(scale, 5.0))
+        # 極端な変更を防ぐ（収束しやすいように少し保守的）
+        scale = max(0.5, min(scale, 2.0))
         new_lr = current_lr * scale
         
         logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, scale={scale:.2f}")
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
+        # 変化が小さすぎる場合は停滞とみなし終了
+        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
+            logger.info("Calibration update became too small; stopping early.")
+            break
         current_lr = new_lr
-    
+
+    if best_candidate is not None:
+        _, _, chosen_lr, chosen_epoch, chosen_score = best_candidate
+        logger.info(
+            f"Calibration selected best candidate: LR={chosen_lr:.8f}, "
+            f"BestEpoch={chosen_epoch}/{cal_epochs}, Score={chosen_score:.4f}"
+        )
+        current_lr, score = chosen_lr, chosen_score
+
     logger.info(f"\nCalibrated Base LR: {current_lr:.8f}, Final Score: {score:.4f}")
     logger.info(f"{'='*50}")
     return current_lr, score
@@ -492,7 +514,13 @@ def main():
     # LRキャリブレーション実行（10 epoch、epoch 5でベストをターゲット）
     best_params = load_best_train_params()
     initial_lr = best_params.get('learning_rate', 0.0001)
-    CALIBRATED_BASE_LR, cal_score = calibrate_base_lr('EfficientNetV2B0', initial_lr, cal_epochs=10)
+    CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
+        'EfficientNetV2B0',
+        initial_lr,
+        cal_epochs=10,
+        target_best_epoch=5,
+        tolerance=0
+    )
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}")
     
     # --- Step 0: Model Architecture Selection & Baseline ---

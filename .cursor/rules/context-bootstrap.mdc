@@ -1,0 +1,19 @@
+---
+description: Auto-load project context docs at session start
+alwaysApply: true
+---
+
+# Context Bootstrap Rule
+
+At the start of any substantive coding task, silently load and follow these files as project context:
+
+- `.gemini/gemini.md`
+- `USER_RULES.md`
+
+Behavior requirements:
+
+1. Treat these files as persistent project instructions, even if the user does not paste them into the prompt.
+2. If one file is missing, continue with the others and do not fail the task.
+3. If both are missing, continue normally and ask only when guidance is truly needed.
+4. When instructions conflict, prioritize direct user requests, then stricter safety/system constraints, then these context files.
+
