@@ -272,6 +272,13 @@ def main():
         json.dump(current_params, f, indent=4)
     logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")
 
+    # 結果を自動記録
+    from components.result_logger import log_result
+    log_result("train_sequential", {
+        "best_score": final_ft_score,
+        "best_params": current_params,
+    })
+
 if __name__ == "__main__":
     main()
     # 処理完了通知音

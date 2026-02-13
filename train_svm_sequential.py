@@ -179,6 +179,13 @@ def main():
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
         json.dump(current_params, f, indent=4)
 
+    # 結果を自動記録
+    from components.result_logger import log_result
+    log_result("train_svm_sequential", {
+        "best_score": final_score,
+        "best_params": current_params,
+    })
+
 if __name__ == "__main__":
     main()
     winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)

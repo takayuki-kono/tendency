@@ -535,6 +535,19 @@ def main():
     logger.info(f"Total Improvement: +{final_score - baseline_score:.4f}")
     logger.info("="*50)
 
+    # 結果を自動記録
+    from components.result_logger import log_result
+    log_result("optimize_sequential", {
+        "baseline_score": round(baseline_score, 4),
+        "best_score": round(final_score, 4),
+        "improvement": round(final_score - baseline_score, 4),
+        "strategy": final_desc,
+        "model": best_model,
+        "filter_params": {k: v for k, v in final_params.items() if k != 'grayscale'},
+        "grayscale": final_params.get('grayscale', False),
+        "param_efficiency": {k: {ek: round(ev, 6) if isinstance(ev, float) else ev for ek, ev in v.items()} for k, v in param_efficiency.items()},
+    })
+
     # Generate and print the final preprocessing command
     final_cmd = (
         f"{PYTHON_PREPROCESS} preprocess_multitask.py --out_dir preprocessed_multitask "
