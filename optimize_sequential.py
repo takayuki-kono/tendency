@@ -183,31 +183,46 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         cmd_train.extend(["--fine_tune", "False"])
 
         logger.info(f"Running training with {model_name} (epochs=5, fine_tune=False)...")
-        ret_train = subprocess.run(cmd_train, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
-        if ret_train.returncode != 0:
-            logger.error(f"Training failed: {ret_train.stderr}")
+        # Popenでリアルタイム出力 + スコア抽出
+        process = subprocess.Popen(
+            cmd_train, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding='utf-8', errors='replace'
+        )
+        
+        train_output = []
+        for line in process.stdout:
+            line = line.rstrip()
+            train_output.append(line)
+            # エポック情報やスコアを含む行のみ表示
+            if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=']):
+                logger.info(f"  [Train] {line}")
+        
+        process.wait()
+        
+        if process.returncode != 0:
+            logger.error(f"Training failed (returncode={process.returncode})")
             return (0.0, 0, 0)
+        
+        full_output = "\n".join(train_output)
 
         # Extract Score
-        match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", ret_train.stdout)
+        match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
         if match:
             raw_score = float(match.group(1))
             
             # 各タスクのスコアを抽出してログに出力
             for char_code in range(ord('A'), ord('Z') + 1):
                 task_label = chr(char_code)
-                # NNスクリプトは "TASK_A_ACCURACY: x.xxx (Balanced)" のような形式
-                match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*([\d\.]+)", ret_train.stdout)
+                match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*([\d\.]+)", full_output)
                 if match_task:
                     logger.info(f"  Task {task_label}: {float(match_task.group(1)):.4f}")
 
             # 詳細なクラス別精度をログに転記
-            details_match = re.search(r"--- Task [A-Z] Details.*", ret_train.stdout, re.DOTALL)
+            details_match = re.search(r"--- Task [A-Z] Details.*", full_output, re.DOTALL)
             if details_match:
                 logger.info("\n[Detailed Class Accuracy]")
                 logger.info(details_match.group(0).strip())
-
 
             logger.info(f"Result: RawScore={raw_score:.4f} (Average), Total={total_images}, Filtered={filtered_count}")
             
@@ -218,7 +233,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             return (raw_score, total_images, filtered_count)
         else:
             logger.error("Score not found in training output.")
-            logger.error(f"STDOUT:\n{ret_train.stdout}")
+            logger.error(f"STDOUT:\n{full_output}")
             return (0.0, 0, 0)
 
     except Exception as e:
