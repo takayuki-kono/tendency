@@ -402,9 +402,7 @@ def main():
             current_greedy_params[param_name] = val
             greedy_history.append((param_name, val, score))
         else:
-            logger.info(f"  -> Rejected (Score: {score:.4f} < {current_best_score:.4f})")
-            logger.info("  -> Stopping integration as accuracy dropped.")
-            break
+            logger.info(f"  -> Skipped (Score: {score:.4f} < {current_best_score:.4f})")
     
     greedy_score = current_best_score
     greedy_params = current_greedy_params.copy()
