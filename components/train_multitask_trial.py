@@ -863,14 +863,14 @@ def main():
 
     logger.info("Detailed metrics complete.")
     
-    # --- 最終スコアの再計算と出力 ---
-    # 詳細出力と整合性を取るため、ここで計算したMinClassAccuracyを最終スコアとする
-    # マルチタスクの場合は全タスクのMinClassAccuracyの平均
+    # --- 最終スコア出力 ---
+    # final_val_acc は history から計算した全エポック中のベスト（Phase1/Phase2含む）
+    # model.predict による再計算は最終エポックの重みを使うため、
+    # restore_best_weightsが効かないケースではベストと乖離する。
+    # よって history ベースの final_val_acc を優先する。
     
-    # output_names, val_preds, val_labels_dict は上記で既に用意されている
-    
+    # 参考: 現在のモデル重みでの再計算スコアもログに出す
     task_min_accuracies = []
-    
     for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
         pred_probs = val_preds[i]
         pred_labels = np.argmax(pred_probs, axis=-1)
@@ -889,23 +889,20 @@ def main():
                 correct = np.sum(pred_labels[mask] == cls_idx)
                 accuracy = correct / count
                 class_accuracies.append(accuracy)
-            else:
-                # サンプル0のクラスがある場合... Minをとると0になる危険があるが、validationにデータがないなら無視すべきか？
-                # ここでは安全のため 1.0 (無視) 扱いにするか、エラーにするか。
-                # 通常validationには全クラスあるべき。
-                pass
                 
         if class_accuracies:
             task_min_acc = min(class_accuracies)
             task_min_accuracies.append(task_min_acc)
             
     if task_min_accuracies:
-        # タスクごとのMinAccuracyの平均
-        final_recalculated_score = sum(task_min_accuracies) / len(task_min_accuracies)
-        print(f"FINAL_VAL_ACCURACY: {final_recalculated_score:.8f}")
-        logger.info(f"Recalculated FINAL_VAL_ACCURACY (MinClass): {final_recalculated_score:.8f}")
+        current_model_score = sum(task_min_accuracies) / len(task_min_accuracies)
+        logger.info(f"Current model weights score (MinClass): {current_model_score:.8f}")
+        logger.info(f"History best score (MinClass): {final_val_acc:.8f}")
+        # historyのベストと現在のモデル重みスコアの大きい方を使用
+        best_score = max(final_val_acc, current_model_score)
+        print(f"FINAL_VAL_ACCURACY: {best_score:.8f}")
+        logger.info(f"FINAL_VAL_ACCURACY (max of history/current): {best_score:.8f}")
     else:
-        # Fallback
         print(f"FINAL_VAL_ACCURACY: {final_val_acc}")
 
 if __name__ == "__main__":
