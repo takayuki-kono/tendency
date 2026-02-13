@@ -306,13 +306,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch']:
                 cmd_train.extend([f"--{k}", str(v)])
         
-        # 学習率の設定: キャリブレーション済みLR / フィルタリング残り割合
+        # 学習率の設定: キャリブレーション済みLR / (フィルタ残り割合 ^ 0.75)
         if CALIBRATED_BASE_LR is not None and total_images > 0 and saved_images > 0:
             ratio = saved_images / total_images
-            safe_ratio = max(ratio, 0.01)  # 下限1%（sqrt後のLR最大10倍まで）
-            scale_factor = math.sqrt(safe_ratio)
+            # 下限1%（pow=0.75後のLR最大約31.6倍まで）
+            safe_ratio = max(ratio, 0.01)
+            scale_factor = safe_ratio ** 0.75
             adjusted_lr = CALIBRATED_BASE_LR / scale_factor
-            logger.info(f"LR (SqrtRatio): {CALIBRATED_BASE_LR:.8f} / sqrt({safe_ratio:.2f})={scale_factor:.2f} -> {adjusted_lr:.8f}")
+            logger.info(f"LR (PowRatio 0.75): {CALIBRATED_BASE_LR:.8f} / ({safe_ratio:.2f}^0.75)={scale_factor:.4f} -> {adjusted_lr:.8f}")
         elif CALIBRATED_BASE_LR is not None:
             adjusted_lr = CALIBRATED_BASE_LR
             logger.info(f"LR (Calibrated): {adjusted_lr:.8f}")
