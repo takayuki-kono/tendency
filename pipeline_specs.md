@@ -104,17 +104,17 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ### ステージ 4: フィルタリングパラメータ最適化
 **スクリプト:** `optimize_sequential.py` (NN版), `optimize_svm_sequential.py` (SVM版)
 **最適化手法:**
-- **LRキャリブレーション (Step -1):** (2026-02-13)
-    - 最適化開始前に、フィルタなしデータで10 epochの学習を最大3回繰り返す。
-    - Best epochが中間（epoch 5）に来るようLRを二分探索で調整。
-    - 調整式: `new_lr = current_lr × (best_epoch / 5)`
-    - 収束条件は `BestEpoch==5` を厳密採用（許容誤差0）。一致しない場合は最大5回まで調整を継続。
-    - 各試行の候補から「epoch5への距離最小（同距離ならスコア高い方）」を最終採用。
+- **LRキャリブレーション (Step -1):** (2026-02-14)
+    - 最適化開始前に、フィルタなしデータで20 epochの学習を最大5回繰り返す。
+    - Best epochが中間（epoch 10）に来るようLRを二分探索で調整。
+    - 調整式: `new_lr = current_lr × (best_epoch / 10)`
+    - 収束条件は `BestEpoch==10` を厳密採用（許容誤差0）。一致しない場合は最大5回まで調整を継続。
+    - 各試行の候補から「epoch10への距離最小（同距離ならスコア高い方）」を最終採用。
     - 得られた `calibrated_base_lr` を全後続trialで使用。
     - キャリブレーション最終結果をB0のベースラインスコアとして流用（重複排除）。
     - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / ((saved/total)^0.75)` で除算。
     - 学習率スケジューラは前半5epochを固定LRとし、6epoch目からCosine Decayを開始。
-    - 各trial: 10 epoch、Fine-tuning Off で評価。
+    - 各trial: 20 epoch、Fine-tuning Off で評価。
 - **Phase 1 - 独立パラメータ評価:**
     - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。
     - **効率 (Efficiency) = 精度向上 / (フィルタリング枚数 + 1)** を計算。
