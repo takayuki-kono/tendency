@@ -574,9 +574,10 @@ def main():
             progress = (epoch - hold_epochs + 1) / decay_length
             progress = min(1.0, max(0.0, progress))
 
-            # Cosine Decay with minimum LR (initial_lrの1%を下限とする)
+            # Sqrt Decay: 1 - sqrt(progress) で穏やかに減衰（cosineより後半の減衰が緩い）
             min_lr = initial_lr * 0.01
-            return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
+            decay = 1.0 - np.sqrt(progress)  # progress=0→1.0, progress=0.25→0.5, progress=1→0.0
+            return min_lr + (initial_lr - min_lr) * decay
 
         # Early Stopping Monitor
         if len(task_labels) == 1:
