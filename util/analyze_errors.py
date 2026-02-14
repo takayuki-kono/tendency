@@ -18,7 +18,7 @@ import json
 
 # --- 設定 ---
 # 分析対象のモデル
-DEFAULT_MODEL_PATH = 'best_sequential_model.keras'
+DEFAULT_MODEL_PATH = 'outputs/models/best_sequential_model.keras'
 # 検証データのディレクトリ
 VALIDATION_DIR = 'preprocessed_multitask/validation'
 # 出力ディレクトリ
