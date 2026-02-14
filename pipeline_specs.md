@@ -110,7 +110,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ### ステージ 4: フィルタリングパラメータ最適化
 **スクリプト:** `optimize_sequential.py` (NN版), `optimize_svm_sequential.py` (SVM版)
 **最適化手法:**
-- **LRキャリブレーション (Step -1):** (2026-02-14)
+- **LRキャリブレーション (Step -1):** (2026-02-14 / 2026-02-14更新)
     - 最適化開始前に、フィルタなしデータで20 epochの学習を最大5回繰り返す。
     - Best epochが中間（epoch 10）に来るようLRを二分探索で調整。
     - 調整式: `new_lr = current_lr × (best_epoch / 10)`
@@ -118,7 +118,10 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - 各試行の候補から「epoch10への距離最小（同距離ならスコア高い方）」を最終採用。
     - 得られた `calibrated_base_lr` を全後続trialで使用。
     - キャリブレーション最終結果をB0のベースラインスコアとして流用（重複排除）。
-    - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / ((saved/total)^0.75)` で除算。
+    - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / (((saved/total)^2)^exponent)` で除算（= `calibrated_base_lr / ((saved/total)^(2*exponent))`）。
+    - `calibrate_lr_scaling.py` でフィルタ `[0, 5, 40, 80]%` を評価し、`exponent` を二分探索で決定。
+    - 評価スコアは `weighted_score = raw_score / ((abs(best_epoch-10)+1)^exponent)` を使用し、best epoch が 10 に近いほど高評価とする。
+    - `exponent` の探索範囲は `0.5〜0.8`（`ratio^2` に対する乗数として探索）。
     - 学習率スケジューラは前半5epochを固定LRとし、6epoch目からCosine Decayを開始。
     - 各trial: 20 epoch、Fine-tuning Off で評価。
 - **Phase 1 - 独立パラメータ評価:**
