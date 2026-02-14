@@ -411,7 +411,30 @@ def main():
     else:
         logger.info(f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<")
     
-    # ファインチューニングは最適化されたパラメータで実行済み
+    # --- Step 4.6: FT条件での正則化パラメータ再最適化 ---
+    logger.info("\n>>> Step 4.6: Re-optimizing regularization under FT conditions <<<")
+    
+    # Dropout
+    best_dropout_ft, _ = optimize_param('dropout', [0.3, 0.5], current_params)
+    current_params['dropout'] = best_dropout_ft
+    
+    # Head Dropout (frozen phaseでは未最適化だったパラメータ)
+    best_head_dropout, _ = optimize_param('head_dropout', [0.2, 0.3, 0.5], current_params)
+    current_params['head_dropout'] = best_head_dropout
+    
+    # Weight Decay
+    best_wd_ft, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params)
+    current_params['weight_decay'] = best_wd_ft
+    
+    # --- Step 4.7: Final FT LR Calibration (正則化変更後) ---
+    logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
+    final_lr, _ = calibrate_base_lr(
+        current_params, initial_lr=current_params['learning_rate'],
+        cal_epochs=50, target_best_epoch=25, tolerance=0
+    )
+    current_params['learning_rate'] = final_lr
+    
+    # 最終実行
     final_ft_score = run_trial(current_params)
     
     logger.info("\n" + "="*50)
