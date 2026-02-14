@@ -91,10 +91,14 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
         - 調整式: `new_lr = current_lr × (best_epoch / 10)`、クランプ: 0.5〜2.0倍。
         - 収束条件は `BestEpoch==10` を厳密採用（許容誤差0）。
         - 各試行の候補から「epoch10への距離最小（同距離ならスコア高い方）」を最終採用。
-    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前に50 epoch用のLRキャリブレーションを実施。
-        - 50 epoch の学習を最大5回繰り返し、Best epochが epoch 25 に来るようLRを調整。
+    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前に20 epoch用のLRキャリブレーションを実施。
+        - 20 epoch の学習を最大5回繰り返し、Best epochが epoch 10 に来るようLRを調整。
         - `unfreeze_layers=60` を暫定値として使用し、キャリブレーション後にunfreeze_layersを最適化。
         - Step 1で決定したLRを初期値として開始。
+    - **Step 4.5-4.7 (FT後の再最適化):**
+        - unfreeze_layers確定後、暫定値と異なる場合はFT LRを再キャリブレーション。
+        - FT条件下でdropout, head_dropout, weight_decayを再最適化。
+        - 正則化パラメータ変更後にFinal LR Calibrationを実施。
 - **Fine-tuning:**
     - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
     - **詳細ログ出力 (2026-02-11):**

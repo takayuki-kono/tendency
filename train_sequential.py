@@ -386,13 +386,13 @@ def main():
     logger.info("="*50)
     
     # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # 50 epoch中のepoch 25でベストになるLRをキャリブレーション
+    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
     current_params['fine_tune'] = 'True'
-    current_params['epochs'] = 50
+    current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=50, target_best_epoch=25, tolerance=0
+        cal_epochs=20, target_best_epoch=10, tolerance=0
     )
     current_params['learning_rate'] = ft_lr
     
@@ -405,7 +405,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=50, target_best_epoch=25, tolerance=0
+            cal_epochs=20, target_best_epoch=10, tolerance=0
         )
         current_params['learning_rate'] = ft_lr2
     else:
@@ -430,7 +430,7 @@ def main():
     logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
     final_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=50, target_best_epoch=25, tolerance=0
+        cal_epochs=20, target_best_epoch=10, tolerance=0
     )
     current_params['learning_rate'] = final_lr
     
