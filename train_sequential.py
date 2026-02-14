@@ -224,7 +224,7 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     return best_epoch, score
 
 
-def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None, tolerance=0):
+def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None):
     """
     cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを探す。
     
@@ -250,19 +250,27 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
     logger.info(f"{'='*50}")
     
     best_candidate = None  # (distance, -score, lr, best_epoch, score)
+    epoch_history = []  # 中央値ベースの収束判定用
     max_iterations = 5
     for iteration in range(max_iterations):
         best_epoch, score = run_calibration_trial(current_params, current_lr, cal_epochs)
+        epoch_history.append(best_epoch)
         distance = abs(best_epoch - target_in_cal)
         candidate = (distance, -score, current_lr, best_epoch, score)
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
         
-        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        # 中央値を計算
+        sorted_epochs = sorted(epoch_history)
+        median_epoch = sorted_epochs[len(sorted_epochs) // 2]
+        median_distance = abs(median_epoch - target_in_cal)
         
-        # 許容範囲内なら終了
-        if distance <= float(tolerance):
-            logger.info(f"Calibration converged! Calibrated LR={current_lr:.8f}")
+        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}, median_dist={median_distance:.0f}")
+        
+        # 中央値がターゲットに一致したら収束
+        if median_epoch == target_in_cal:
+            logger.info(f"Calibration converged! median={median_epoch} == target={target_in_cal:.0f}")
             break
         
         # LRスケーリング: sqrt(best_epoch / target) で比率を計算（穏やかな収束）
@@ -319,7 +327,7 @@ def main():
     # 10 epoch中のepoch 5でベストになるLRをキャリブレーション
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
-        cal_epochs=10, target_best_epoch=5, tolerance=0
+        cal_epochs=10, target_best_epoch=5
     )
     current_params['learning_rate'] = calibrated_lr
     head_lr = calibrated_lr  # Phase 1 warmup用に保存
@@ -400,7 +408,7 @@ def main():
     current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=10, target_best_epoch=5, tolerance=0
+        cal_epochs=10, target_best_epoch=5
     )
     current_params['learning_rate'] = ft_lr
     
@@ -413,7 +421,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=10, target_best_epoch=5, tolerance=0
+            cal_epochs=10, target_best_epoch=5
         )
         current_params['learning_rate'] = ft_lr2
     else:
@@ -438,7 +446,7 @@ def main():
     logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
     final_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=10, target_best_epoch=5, tolerance=0
+        cal_epochs=10, target_best_epoch=5
     )
     current_params['learning_rate'] = final_lr
     

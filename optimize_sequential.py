@@ -136,7 +136,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     return best_epoch, score
 
 
-def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=None, tolerance=0):
+def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=None):
     """
     cal_epochs の学習を繰り返し、中間 epoch でベストになるLRを探す。
     
@@ -167,19 +167,26 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     logger.info(f"{'='*50}")
     
     best_candidate = None  # (distance, -score, lr, best_epoch, score)
+    epoch_history = []  # 中央値ベースの収束判定用
     max_iterations = 5
     for iteration in range(max_iterations):
         best_epoch, score = run_calibration_trial(model_name, current_lr, cal_epochs)
+        epoch_history.append(best_epoch)
         distance = abs(best_epoch - target_in_cal)
         candidate = (distance, -score, current_lr, best_epoch, score)
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
         
-        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        # 中央値を計算
+        sorted_epochs = sorted(epoch_history)
+        median_epoch = sorted_epochs[len(sorted_epochs) // 2]
         
-        # 許容範囲内なら終了（既定: 0 = 目標epochに一致）
-        if distance <= float(tolerance):
-            logger.info(f"Calibration converged! Calibrated LR={current_lr:.8f}")
+        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}")
+        
+        # 中央値がターゲットに一致したら収束
+        if median_epoch == target_in_cal:
+            logger.info(f"Calibration converged! median={median_epoch} == target={target_in_cal:.0f}")
             break
         
         # LRスケーリング: sqrt(best_epoch / target) で比率を計算（穏やかな収束）
@@ -521,7 +528,7 @@ def main():
         initial_lr,
         cal_epochs=10,
         target_best_epoch=5,
-        tolerance=0
+        
     )
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}")
     
