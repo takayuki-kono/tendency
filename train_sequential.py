@@ -283,6 +283,7 @@ def main():
         'dropout': 0.3,
         'head_dropout': 0.3,
         'learning_rate': 1e-3,
+        'epochs': 20,
         'rotation_range': 0.0,
         'width_shift_range': 0.0,
         'height_shift_range': 0.0,
@@ -299,10 +300,10 @@ def main():
     current_params['model_name'] = best_model
 
     # --- Step 1: Learning Rate Calibration ---
-    # 10 epoch中のepoch 5でベストになるLRをキャリブレーション
+    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
-        cal_epochs=10, target_best_epoch=5, tolerance=0
+        cal_epochs=20, target_best_epoch=10, tolerance=0
     )
     current_params['learning_rate'] = calibrated_lr
     
