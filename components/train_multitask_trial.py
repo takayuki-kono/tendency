@@ -565,8 +565,8 @@ def main():
         def cosine_decay(epoch):
             if total_epochs == 0: return initial_lr
 
-            # 前半4epochはLRを固定し、5epoch目以降で減衰を開始する
-            hold_epochs = min(4, total_epochs)
+            # 前半3epochはLRを固定し、4epoch目以降で減衰を開始する
+            hold_epochs = min(3, total_epochs)
             if epoch < hold_epochs:
                 return initial_lr
 
