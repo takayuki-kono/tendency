@@ -331,11 +331,11 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         
         cmd_train.extend(["--learning_rate", str(adjusted_lr)])
         
-        # 評価用なのでFine-tuningはOff、Epochsは15
-        cmd_train.extend(["--epochs", "10"])
+        # 評価用なのでFine-tuningはOff、Epochs=20
+        cmd_train.extend(["--epochs", "20"])
         cmd_train.extend(["--fine_tune", "False"])
 
-        logger.info(f"Running training with {model_name} (epochs=10, fine_tune=False)...")
+        logger.info(f"Running training with {model_name} (epochs=20, fine_tune=False)...")
         
         # Popenでリアルタイム出力 + スコア抽出
         process = subprocess.Popen(
@@ -526,9 +526,8 @@ def main():
     CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
         'EfficientNetV2B0',
         initial_lr,
-        cal_epochs=10,
-        target_best_epoch=5,
-        
+        cal_epochs=20,
+        target_best_epoch=10,
     )
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}")
     
