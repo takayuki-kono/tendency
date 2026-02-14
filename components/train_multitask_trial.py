@@ -15,12 +15,8 @@ from tensorflow.keras.applications.densenet import preprocess_input as densenet_
 import logging
 import sys
 
-# 再現性のためのシード固定
-SEED = 42
-os.environ['PYTHONHASHSEED'] = str(SEED)
-random.seed(SEED)
-np.random.seed(SEED)
-tf.random.set_seed(SEED)
+# デフォルトシード（--seed引数で上書き可能）
+DEFAULT_SEED = 42
 
 # 混合精度演算
 policy = mixed_precision.Policy('mixed_float16')
@@ -462,12 +458,22 @@ def main():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--unfreeze_layers', type=int, default=40)
     parser.add_argument('--single_task_mode', type=str, default='False') # "True" or "False"
+    parser.add_argument('--warmup_lr', type=float, default=0.0)  # Phase1用LR (0=learning_rateを使用)
+    parser.add_argument('--seed', type=int, default=DEFAULT_SEED)
     
     # 学習率自動調整: 指定したepochでベストになるようLRをデータ枚数に基づき自動算出
     # 0 = 無効（--learning_rate をそのまま使用）、>0 = target epoch
     parser.add_argument('--auto_lr_target_epoch', type=int, default=0)
 
     args = parser.parse_args()
+    
+    # シード設定（--seedで上書き可能）
+    seed = args.seed
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    logger.info(f"Random seed: {seed}")
     
     augment_params = {
         'rotation_range': args.rotation_range, 
@@ -536,13 +542,20 @@ def main():
         logger.info(f"[Auto LR] reference_steps={REFERENCE_STEPS_PER_EPOCH}, scale={lr_scale:.4f} (sqrt-based)")
         logger.info(f"[Auto LR] base_lr={args.learning_rate} -> effective_lr={effective_lr:.8f}")
 
+    # Phase 1 LR（FT時: warmup_lrが指定されていればそちらを使用）
+    if args.warmup_lr > 0 and args.fine_tune.lower() == 'true':
+        phase1_lr = args.warmup_lr
+        logger.info(f"Phase 1 warmup LR: {phase1_lr:.8f} (FT LR: {effective_lr:.8f})")
+    else:
+        phase1_lr = effective_lr
+
     model = create_model(
         args.model_name, 
         args.num_dense_layers, 
         args.dense_units, 
         args.dropout, 
         args.head_dropout,
-        effective_lr,
+        phase1_lr,
         augment_params,
         task_labels
     )
@@ -624,13 +637,13 @@ def main():
     if args.fine_tune.lower() == 'true':
         logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
     else:
-        logger.info(f"--- Training (Head only, {phase1_epochs} epochs, effective_lr={effective_lr:.8f}) ---")
+        logger.info(f"--- Training (Head only, {phase1_epochs} epochs, lr={phase1_lr:.8f}) ---")
 
     history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=phase1_epochs,
-        callbacks=create_callbacks(phase1_epochs, effective_lr, target_epoch=args.auto_lr_target_epoch),
+        callbacks=create_callbacks(phase1_epochs, phase1_lr, target_epoch=args.auto_lr_target_epoch),
         verbose=2
     )
     
@@ -750,11 +763,11 @@ def main():
             
             # 再コンパイル (FT用LRは外部キャリブレーションで決定済み)
             ft_lr = args.learning_rate
-            logger.info(f"Fine-tuning LR: {ft_lr:.8f}")
+            logger.info(f"Fine-tuning LR: {ft_lr:.8f} (clipnorm=1.0)")
             try:
-                optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=ft_lr)
+                optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=ft_lr, clipnorm=1.0)
             except AttributeError:
-                optimizer = tf.keras.optimizers.Adam(learning_rate=ft_lr)
+                optimizer = tf.keras.optimizers.Adam(learning_rate=ft_lr, clipnorm=1.0)
 
             model.compile(
                 optimizer=optimizer,

@@ -1,0 +1,19 @@
+---
+description: Git commit workflow - always share commands, never auto-execute
+alwaysApply: true
+---
+
+# Git Workflow
+
+## コミット前の必須チェックリスト
+コードを修正したら、gitコマンド提示の**前に必ず**以下を全て実行：
+
+1. 構文チェック（`py_compile` 等）を実行
+2. 関連する仕様書（`pipeline_specs.md` 等）を更新
+
+## Gitコマンドの提示ルール
+1. **自動実行禁止**: `git add`, `git commit`, `git push` を勝手に実行しない
+2. **常にコマンドを共有**: 実行可能な git コマンドをコードブロックで提示する
+3. **明示依頼時のみ実行**: 「実行して」「run it」「y」など明確な指示がある場合のみ実行
+4. **日本語コミットメッセージ**: commit メッセージは必ず日本語で記述
+5. **Author設定必須**: `--author="Claude <claude@anthropic.com>"` を必ず含める

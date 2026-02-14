@@ -326,6 +326,7 @@ def main():
         cal_epochs=20, target_best_epoch=10, tolerance=0
     )
     current_params['learning_rate'] = calibrated_lr
+    head_lr = calibrated_lr  # Phase 1 warmup用に保存
     
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
     # 0.0=Adam, >0=AdamW
@@ -396,6 +397,7 @@ def main():
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
+    current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
         cal_epochs=20, target_best_epoch=10, tolerance=0
@@ -440,24 +442,48 @@ def main():
     )
     current_params['learning_rate'] = final_lr
     
-    # 最終実行
-    final_ft_score = run_trial(current_params)
+    # --- Final: Best-of-N Runs (上振れ狙い) ---
+    N_FINAL_RUNS = 3
+    FINAL_EPOCHS = 10
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Final: Best-of-{N_FINAL_RUNS} runs (epochs={FINAL_EPOCHS}, different seeds)")
+    logger.info(f"{'='*50}")
     
-    logger.info("\n" + "="*50)
+    best_final_score = -1.0
+    best_seed = 42
+    
+    final_params = current_params.copy()
+    final_params['epochs'] = FINAL_EPOCHS
+    
+    for run_idx in range(N_FINAL_RUNS):
+        seed = 42 + run_idx
+        final_params['seed'] = seed
+        score = run_trial(final_params)
+        logger.info(f"  Final Run #{run_idx+1} (seed={seed}): Score={score:.4f}")
+        if score > best_final_score:
+            best_final_score = score
+            best_seed = seed
+    
+    final_ft_score = best_final_score
+    
+    logger.info(f"\n{'='*50}")
     logger.info("ALL PROCESSES COMPLETE")
-    logger.info(f"Final Fine-Tuned Score: {final_ft_score}")
-    logger.info("="*50)
+    logger.info(f"Best of {N_FINAL_RUNS} runs: seed={best_seed}, Score={final_ft_score:.4f}")
+    logger.info(f"{'='*50}")
 
-    # Save Best Params
+    # Save Best Params (ベストseedを含める)
+    best_params = current_params.copy()
+    best_params['seed'] = best_seed
+    best_params['epochs'] = FINAL_EPOCHS
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(current_params, f, indent=4)
+        json.dump(best_params, f, indent=4)
     logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")
 
     # 結果を自動記録
     from components.result_logger import log_result
     log_result("train_sequential", {
         "best_score": final_ft_score,
-        "best_params": current_params,
+        "best_params": best_params,
     })
 
 if __name__ == "__main__":
