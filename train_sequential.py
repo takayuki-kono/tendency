@@ -303,7 +303,7 @@ def main():
         'dropout': 0.3,
         'head_dropout': 0.3,
         'learning_rate': 1e-3,
-        'epochs': 20,
+        'epochs': 15,
         'rotation_range': 0.0,
         'width_shift_range': 0.0,
         'height_shift_range': 0.0,
@@ -320,10 +320,10 @@ def main():
     current_params['model_name'] = best_model
 
     # --- Step 1: Learning Rate Calibration ---
-    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
+    # 15 epoch中のepoch 8でベストになるLRをキャリブレーション
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
-        cal_epochs=20, target_best_epoch=10, tolerance=0
+        cal_epochs=15, target_best_epoch=8, tolerance=0
     )
     current_params['learning_rate'] = calibrated_lr
     head_lr = calibrated_lr  # Phase 1 warmup用に保存
@@ -393,14 +393,14 @@ def main():
     logger.info("="*50)
     
     # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
+    # 15 epoch中のepoch 8でベストになるLRをキャリブレーション
     current_params['fine_tune'] = 'True'
-    current_params['epochs'] = 20
+    current_params['epochs'] = 15
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
     current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=20, target_best_epoch=10, tolerance=0
+        cal_epochs=15, target_best_epoch=8, tolerance=0
     )
     current_params['learning_rate'] = ft_lr
     
@@ -413,7 +413,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=20, target_best_epoch=10, tolerance=0
+            cal_epochs=15, target_best_epoch=8, tolerance=0
         )
         current_params['learning_rate'] = ft_lr2
     else:
@@ -438,7 +438,7 @@ def main():
     logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
     final_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=20, target_best_epoch=10, tolerance=0
+        cal_epochs=15, target_best_epoch=8, tolerance=0
     )
     current_params['learning_rate'] = final_lr
     
