@@ -5,6 +5,7 @@ import os
 import logging
 import json
 import hashlib
+import math
 import winsound
 
 # --- 設定 ---
@@ -264,12 +265,13 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
             logger.info(f"Calibration converged! Calibrated LR={current_lr:.8f}")
             break
         
-        # LRスケーリング: best_epoch / target で比率を計算
-        scale = best_epoch / target_in_cal
+        # LRスケーリング: sqrt(best_epoch / target) で比率を計算（穏やかな収束）
+        raw_scale = best_epoch / target_in_cal
+        scale = math.sqrt(raw_scale) if raw_scale >= 0 else 0.5
         scale = max(0.5, min(scale, 2.0))
         new_lr = current_lr * scale
         
-        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, scale={scale:.2f}")
+        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, raw={raw_scale:.2f}, sqrt_scale={scale:.2f}")
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         # 変化が小さすぎる場合は停滞とみなし終了
         if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
