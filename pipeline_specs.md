@@ -78,14 +78,23 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ### ステージ 3: モデル学習 (Sequential Training)
 **スクリプト:** `train_sequential.py` (および `components/train_multitask_trial.py`)
 **最適化手法:**
-- 探索空間（Learning Rate, Layers, Dropout, Augmentation等）を順次固定しながら最適化するSequential Optimizationを採用。
+- 探索空間（Model, Layers, Dropout, Augmentation等）を順次固定しながら最適化するSequential Optimizationを採用。
 - **評価指標の変更 (2026-02-11):**
     - 従来の `Balanced Accuracy` (平均再現率) に代わり、**`MinClassAccuracy` (最低クラス精度)** を採用。
     - 各クラスの再現率（Recall）のうち、**最も低い値**を最大化するように学習・最適化を行う。
     - これにより、難易度の高いクラスや少数派クラスの放置を防ぎ、全てのクラスで一定以上の精度を保証することを目指す。
-- **学習率キャリブレーション (2026-02-13):**
+- **学習率キャリブレーション (2026-02-14):**
     - `train_multitask_trial.py` に `--auto_lr_target_epoch` オプションあり（スタンドアロン用）。
     - `BEST_EPOCH: N` を標準出力し、キャリブレーション時に利用可能。
+    - **Step 1 (初期LR):** グリッドサーチを廃止し、`calibrate_base_lr` を採用。
+        - 10 epoch の学習を最大5回繰り返し、Best epochが epoch 5 に来るようLRを調整。
+        - 調整式: `new_lr = current_lr × (best_epoch / 5)`、クランプ: 0.5〜2.0倍。
+        - 収束条件は `BestEpoch==5` を厳密採用（許容誤差0）。
+        - 各試行の候補から「epoch5への距離最小（同距離ならスコア高い方）」を最終採用。
+    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前に50 epoch用のLRキャリブレーションを実施。
+        - 50 epoch の学習を最大5回繰り返し、Best epochが epoch 25 に来るようLRを調整。
+        - `unfreeze_layers=60` を暫定値として使用し、キャリブレーション後にunfreeze_layersを最適化。
+        - Step 1で決定したLRを初期値として開始。
 - **Fine-tuning:**
     - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
     - **詳細ログ出力 (2026-02-11):**
@@ -104,6 +113,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - 得られた `calibrated_base_lr` を全後続trialで使用。
     - キャリブレーション最終結果をB0のベースラインスコアとして流用（重複排除）。
     - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / ((saved/total)^0.75)` で除算。
+    - 学習率スケジューラは前半5epochを固定LRとし、6epoch目からCosine Decayを開始。
     - 各trial: 10 epoch、Fine-tuning Off で評価。
 - **Phase 1 - 独立パラメータ評価:**
     - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。
@@ -121,5 +131,5 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ---
 
 ## Author
-Claude (Updated 2026-02-13)
+Claude (Updated 2026-02-14)
 

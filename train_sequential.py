@@ -158,6 +158,120 @@ def optimize_param(target_name, candidates, current_params):
     logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
     return best_val, best_score
 
+def run_calibration_trial(current_params, lr, cal_epochs=5):
+    """
+    LRキャリブレーション用: 指定パラメータで学習を実行し、BEST_EPOCHを返す。
+    
+    Returns:
+        tuple: (best_epoch, score)
+    """
+    params = current_params.copy()
+    params['learning_rate'] = lr
+    params['epochs'] = cal_epochs
+    
+    cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
+    for key, value in params.items():
+        if key == 'auto_lr_target_epoch':
+            continue
+        cmd.extend([f"--{key}", str(value)])
+    cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
+    
+    logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
+    
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace'
+    )
+    
+    output_lines = []
+    for line in process.stdout:
+        line = line.rstrip()
+        output_lines.append(line)
+        if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'MinClassAcc', 'Avg=']):
+            logger.info(f"  [Cal] {line}")
+    
+    process.wait()
+    full_output = "\n".join(output_lines)
+    
+    # BEST_EPOCH抽出
+    match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
+    best_epoch = int(match_epoch.group(1)) if match_epoch else cal_epochs
+    
+    # スコア抽出
+    match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
+    score = float(match_score.group(1)) if match_score else 0.0
+    
+    logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+    return best_epoch, score
+
+
+def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None, tolerance=0):
+    """
+    cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを探す。
+    
+    原理:
+    - best_epoch < target → LR高すぎ → 下げる
+    - best_epoch > target → LR低すぎ → 上げる
+    - best_epoch / target の比率でLRをスケーリング
+    
+    Returns:
+        tuple: (calibrated_lr, final_score)
+    """
+    if target_best_epoch is None:
+        target_in_cal = float(max(1, cal_epochs // 2))
+    else:
+        target_in_cal = float(target_best_epoch)
+    
+    current_lr = initial_lr
+    
+    logger.info(f"\n{'='*50}")
+    logger.info(f"LR Calibration Start")
+    logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch={target_in_cal:.0f}")
+    logger.info(f"  initial_lr = {initial_lr:.8f}")
+    logger.info(f"{'='*50}")
+    
+    best_candidate = None  # (distance, -score, lr, best_epoch, score)
+    max_iterations = 5
+    for iteration in range(max_iterations):
+        best_epoch, score = run_calibration_trial(current_params, current_lr, cal_epochs)
+        distance = abs(best_epoch - target_in_cal)
+        candidate = (distance, -score, current_lr, best_epoch, score)
+        if best_candidate is None or candidate < best_candidate:
+            best_candidate = candidate
+        
+        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        
+        # 許容範囲内なら終了
+        if distance <= float(tolerance):
+            logger.info(f"Calibration converged! Calibrated LR={current_lr:.8f}")
+            break
+        
+        # LRスケーリング: best_epoch / target で比率を計算
+        scale = best_epoch / target_in_cal
+        scale = max(0.5, min(scale, 2.0))
+        new_lr = current_lr * scale
+        
+        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, scale={scale:.2f}")
+        logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
+        # 変化が小さすぎる場合は停滞とみなし終了
+        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
+            logger.info("Calibration update became too small; stopping early.")
+            break
+        current_lr = new_lr
+
+    if best_candidate is not None:
+        _, _, chosen_lr, chosen_epoch, chosen_score = best_candidate
+        logger.info(
+            f"Calibration selected best candidate: LR={chosen_lr:.8f}, "
+            f"BestEpoch={chosen_epoch}/{cal_epochs}, Score={chosen_score:.4f}"
+        )
+        current_lr, score = chosen_lr, chosen_score
+
+    logger.info(f"\nCalibrated Base LR: {current_lr:.8f}, Final Score: {score:.4f}")
+    logger.info(f"{'='*50}")
+    return current_lr, score
+
+
 def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
     
@@ -184,9 +298,13 @@ def main():
     best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
     current_params['model_name'] = best_model
 
-    # --- Step 1: Learning Rate ---
-    best_lr, _ = optimize_param('learning_rate', [1e-3, 5e-4, 1e-4, 5e-5], current_params)
-    current_params['learning_rate'] = best_lr
+    # --- Step 1: Learning Rate Calibration ---
+    # 10 epoch中のepoch 5でベストになるLRをキャリブレーション
+    calibrated_lr, _ = calibrate_base_lr(
+        current_params, initial_lr=1e-3,
+        cal_epochs=10, target_best_epoch=5, tolerance=0
+    )
+    current_params['learning_rate'] = calibrated_lr
     
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
     # 0.0=Adam, >0=AdamW
@@ -252,10 +370,18 @@ def main():
     logger.info(f"Best Params before FT: {current_params}")
     logger.info("="*50)
     
-    # --- Step 4: Unfreeze Layers Optimization ---
+    # --- Step 3.5: Fine-Tuning LR Calibration ---
+    # 50 epoch中のepoch 25でベストになるLRをキャリブレーション
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 50
+    current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
+    ft_lr, _ = calibrate_base_lr(
+        current_params, initial_lr=current_params['learning_rate'],
+        cal_epochs=50, target_best_epoch=25, tolerance=0
+    )
+    current_params['learning_rate'] = ft_lr
     
+    # --- Step 4: Unfreeze Layers Optimization ---
     best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
     current_params['unfreeze_layers'] = best_unfreeze
     
