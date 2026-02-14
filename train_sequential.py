@@ -315,11 +315,7 @@ def main():
         'fine_tune': 'False'
     }
     
-    # --- Step 0: Model Architecture ---
-    best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
-    current_params['model_name'] = best_model
-
-    # --- Step 1: Learning Rate Calibration ---
+    # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
     # 10 epoch中のepoch 5でベストになるLRをキャリブレーション
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
@@ -327,6 +323,10 @@ def main():
     )
     current_params['learning_rate'] = calibrated_lr
     head_lr = calibrated_lr  # Phase 1 warmup用に保存
+
+    # --- Step 1.1: Model Architecture (キャリブレーション済みLRで比較) ---
+    best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
+    current_params['model_name'] = best_model
     
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
     # 0.0=Adam, >0=AdamW
