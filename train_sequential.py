@@ -474,6 +474,20 @@ def main():
     
     final_ft_score = best_final_score
     
+    # ベストseedのモデルを最終ファイルにコピー
+    import shutil
+    best_model_src = os.path.join(MODEL_DIR, f'model_seed{best_seed}.keras')
+    best_model_dst = os.path.join(MODEL_DIR, 'best_sequential_model.keras')
+    if os.path.exists(best_model_src):
+        shutil.copy2(best_model_src, best_model_dst)
+        logger.info(f"Best model (seed={best_seed}) -> {best_model_dst}")
+    # 他seedのモデルファイルを削除
+    for run_idx in range(N_FINAL_RUNS):
+        seed = 42 + run_idx
+        path = os.path.join(MODEL_DIR, f'model_seed{seed}.keras')
+        if os.path.exists(path):
+            os.remove(path)
+    
     logger.info(f"\n{'='*50}")
     logger.info("ALL PROCESSES COMPLETE")
     logger.info(f"Best of {N_FINAL_RUNS} runs: seed={best_seed}, Score={final_ft_score:.4f}")

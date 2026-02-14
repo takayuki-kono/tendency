@@ -861,9 +861,10 @@ def main():
     if os.path.exists(temp_weights_path):
         os.remove(temp_weights_path)
 
-    # モデル保存 (Fine-tuning時のみ)
+    # モデル保存 (Fine-tuning時のみ、seed付きファイル名で保存)
     if args.fine_tune.lower() == 'true':
-        save_path = 'best_sequential_model.keras'
+        save_path = f'outputs/models/model_seed{args.seed}.keras'
+        os.makedirs('outputs/models', exist_ok=True)
         model.save(save_path)
         logger.info(f"Fine-tuned model saved to {save_path}")
 
