@@ -201,14 +201,18 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     for line in process.stdout:
         line = line.rstrip()
         output_lines.append(line)
-        if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'MinClassAcc', 'Avg=']):
+        if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'FT_BEST_EPOCH', 'MinClassAcc', 'Avg=']):
             logger.info(f"  [Cal] {line}")
     
     process.wait()
     full_output = "\n".join(output_lines)
     
-    # BEST_EPOCH抽出
-    match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
+    # BEST_EPOCH抽出 (FT時はFT_BEST_EPOCHを優先)
+    is_ft = str(params.get('fine_tune', 'False')).lower() == 'true'
+    if is_ft:
+        match_epoch = re.search(r"FT_BEST_EPOCH:\s*(\d+)", full_output)
+    else:
+        match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
     best_epoch = int(match_epoch.group(1)) if match_epoch else cal_epochs
     
     # スコア抽出

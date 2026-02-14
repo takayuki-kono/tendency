@@ -551,20 +551,19 @@ def main():
     def create_callbacks(total_epochs, initial_lr, target_epoch=0):
         def cosine_decay(epoch):
             if total_epochs == 0: return initial_lr
-            
-            if target_epoch > 0:
-                # target_epoch付近でベストになるよう調整されたcosine decay
-                # decay_length = total_epochs（target epochの2倍）を使い、
-                # target_epochの時点でcos(pi * target/total) ≈ cos(pi/2) = 0 → LRが初期値の約50%
-                # これにより、target_epoch付近でまだ十分な学習率を保ちつつ
-                # 過学習が始まる直前のスイートスポットに到達する
-                decay_length = total_epochs
-            else:
-                decay_length = total_epochs
-            
+
+            # 前半5epochはLRを固定し、6epoch目以降で減衰を開始する
+            hold_epochs = min(5, total_epochs)
+            if epoch < hold_epochs:
+                return initial_lr
+
+            decay_length = max(1, total_epochs - hold_epochs)
+            progress = (epoch - hold_epochs + 1) / decay_length
+            progress = min(1.0, max(0.0, progress))
+
             # Cosine Decay with minimum LR (initial_lrの1%を下限とする)
             min_lr = initial_lr * 0.01
-            return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * epoch / decay_length))
+            return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
 
         # Early Stopping Monitor
         if len(task_labels) == 1:
@@ -749,11 +748,13 @@ def main():
                 metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
                 metrics_dict[name] = metrics_list
             
-            # 再コンパイル (学習率をさらに下げる: 1/100)
+            # 再コンパイル (FT用LRは外部キャリブレーションで決定済み)
+            ft_lr = args.learning_rate
+            logger.info(f"Fine-tuning LR: {ft_lr:.8f}")
             try:
-                optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=args.learning_rate / 100)
+                optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=ft_lr)
             except AttributeError:
-                optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate / 100)
+                optimizer = tf.keras.optimizers.Adam(learning_rate=ft_lr)
 
             model.compile(
                 optimizer=optimizer,
@@ -768,7 +769,7 @@ def main():
                 train_ds,
                 validation_data=val_ds,
                 epochs=args.epochs,
-                callbacks=create_callbacks(args.epochs, args.learning_rate / 100),
+                callbacks=create_callbacks(args.epochs, ft_lr),
                 verbose=2
             )
             
@@ -820,6 +821,10 @@ def main():
                             avg_scores.append(0.0)
 
                     ft_best_score = max(avg_scores)
+                    ft_best_epoch_idx = avg_scores.index(ft_best_score)
+                    ft_best_epoch = ft_best_epoch_idx + 1  # 1-indexed
+                    print(f"FT_BEST_EPOCH: {ft_best_epoch}")
+                    logger.info(f"Phase 2 FT Best Score: {ft_best_score:.4f} (at epoch {ft_best_epoch}/{num_epochs})")
             
             logger.info(f"Warmup Best: {warmup_best_score:.4f}, FT Best: {ft_best_score:.4f}")
             

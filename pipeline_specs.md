@@ -101,6 +101,8 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
         - 正則化パラメータ変更後にFinal LR Calibrationを実施。
 - **Fine-tuning:**
     - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
+    - **FT LRの外部制御 (2026-02-14):** `train_multitask_trial.py` のPhase 2 LRハードコード(`/100`)を廃止。`--learning_rate` をそのまま使用し、`train_sequential.py` のLRキャリブレーションで最適値を決定。
+    - Phase 2から `FT_BEST_EPOCH: N` を出力し、FTキャリブレーション時に利用。
     - **詳細ログ出力 (2026-02-11):**
         - 検証データに対する全クラスの個別精度（正解数/総数）を出力し、ボトルネックとなっているクラスを特定可能にした。
 
