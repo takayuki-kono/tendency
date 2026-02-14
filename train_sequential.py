@@ -90,26 +90,40 @@ def run_trial(params):
     cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
 
     try:
-        ret = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Popenでリアルタイム出力
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding='utf-8', errors='replace'
+        )
         
-        if ret.returncode != 0:
-            logger.error(f"Training failed: {ret.stderr}")
+        output_lines = []
+        for line in process.stdout:
+            line = line.rstrip()
+            output_lines.append(line)
+            # エポック情報やスコアを含む行をリアルタイム表示
+            if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=']):
+                logger.info(f"  [Train] {line}")
+        
+        process.wait()
+        
+        if process.returncode != 0:
+            logger.error(f"Training failed (returncode={process.returncode})")
             return 0.0
 
-        # スコア抽出
+        full_output = "\n".join(output_lines)
+
         # スコア抽出 (Task A)
-        match_a = re.search(r"FINAL_VAL_ACCURACY:\s*(\d+\.\d+)", ret.stdout)
+        match_a = re.search(r"FINAL_VAL_ACCURACY:\s*(\d+\.\d+)", full_output)
         
-        # 他のタスクも抽出してログに出す
         # 他のタスクも抽出してログに出す
         for char_code in range(ord('A'), ord('Z') + 1):
             task_label = chr(char_code)
-            match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*(\d+\.\d+)", ret.stdout)
+            match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*(\d+\.\d+)", full_output)
             if match_task:
                 logger.info(f"Task {task_label} Accuracy: {float(match_task.group(1))}")
 
         # 詳細なクラス別精度をログに転記
-        details_match = re.search(r"--- Task [A-Z] Details.*", ret.stdout, re.DOTALL)
+        details_match = re.search(r"--- Task [A-Z] Details.*", full_output, re.DOTALL)
         if details_match:
             logger.info("\n[Detailed Class Accuracy]")
             logger.info(details_match.group(0).strip())
@@ -385,6 +399,17 @@ def main():
     # --- Step 4: Unfreeze Layers Optimization ---
     best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
     current_params['unfreeze_layers'] = best_unfreeze
+    
+    # --- Step 4.5: FT LR Re-calibration (unfreeze_layers確定後) ---
+    if best_unfreeze != 60:
+        logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
+        ft_lr2, _ = calibrate_base_lr(
+            current_params, initial_lr=current_params['learning_rate'],
+            cal_epochs=50, target_best_epoch=25, tolerance=0
+        )
+        current_params['learning_rate'] = ft_lr2
+    else:
+        logger.info(f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<")
     
     # ファインチューニングは最適化されたパラメータで実行済み
     final_ft_score = run_trial(current_params)
