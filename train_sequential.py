@@ -224,7 +224,7 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     return best_epoch, score
 
 
-def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None):
+def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None, score_priority=False):
     """
     cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを探す。
     
@@ -256,7 +256,10 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         best_epoch, score = run_calibration_trial(current_params, current_lr, cal_epochs)
         epoch_history.append(best_epoch)
         distance = abs(best_epoch - target_in_cal)
-        candidate = (distance, -score, current_lr, best_epoch, score)
+        if score_priority:
+            candidate = (-score, distance, current_lr, best_epoch, score)
+        else:
+            candidate = (distance, -score, current_lr, best_epoch, score)
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
         
@@ -408,7 +411,7 @@ def main():
     current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=10, target_best_epoch=5
+        cal_epochs=10, target_best_epoch=5, score_priority=True
     )
     current_params['learning_rate'] = ft_lr
     
@@ -421,7 +424,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=10, target_best_epoch=5
+            cal_epochs=10, target_best_epoch=5, score_priority=True
         )
         current_params['learning_rate'] = ft_lr2
     else:
@@ -446,7 +449,7 @@ def main():
     logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
     final_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=10, target_best_epoch=5
+        cal_epochs=10, target_best_epoch=5, score_priority=True
     )
     current_params['learning_rate'] = final_lr
     
