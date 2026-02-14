@@ -189,16 +189,16 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             logger.info(f"Calibration converged! median={median_epoch} == target={target_in_cal:.0f}")
             break
         
-        # LRスケーリング: sqrt(best_epoch / target) で比率を計算（穏やかな収束）
-        # best_epoch=2, target=5 → sqrt(0.4)=0.63 → LRを下げる
-        # best_epoch=8, target=5 → sqrt(1.6)=1.26 → LRを上げる
+        # LRスケーリング: (best_epoch / target) ^ 0.75 で比率を計算
+        # best_epoch=2, target=10 → 0.2^0.75=0.30 → LRを下げる
+        # best_epoch=15, target=10 → 1.5^0.75=1.36 → LRを上げる
         raw_scale = best_epoch / target_in_cal
-        scale = math.sqrt(raw_scale) if raw_scale >= 0 else 0.5
+        scale = raw_scale ** 0.75 if raw_scale >= 0 else 0.5
         # 極端な変更を防ぐ（収束しやすいように少し保守的）
         scale = max(0.5, min(scale, 2.0))
         new_lr = current_lr * scale
         
-        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, raw={raw_scale:.2f}, sqrt_scale={scale:.2f}")
+        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, raw={raw_scale:.2f}, scale(^0.75)={scale:.2f}")
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         # 変化が小さすぎる場合は停滞とみなし終了
         if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:

@@ -276,13 +276,13 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
             logger.info(f"Calibration converged! median={median_epoch} == target={target_in_cal:.0f}")
             break
         
-        # LRスケーリング: sqrt(best_epoch / target) で比率を計算（穏やかな収束）
+        # LRスケーリング: (best_epoch / target) ^ 0.75 で比率を計算
         raw_scale = best_epoch / target_in_cal
-        scale = math.sqrt(raw_scale) if raw_scale >= 0 else 0.5
+        scale = raw_scale ** 0.75 if raw_scale >= 0 else 0.5
         scale = max(0.5, min(scale, 2.0))
         new_lr = current_lr * scale
         
-        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, raw={raw_scale:.2f}, sqrt_scale={scale:.2f}")
+        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, raw={raw_scale:.2f}, scale(^0.75)={scale:.2f}")
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         # 変化が小さすぎる場合は停滞とみなし終了
         if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
@@ -314,7 +314,7 @@ def main():
         'dropout': 0.3,
         'head_dropout': 0.3,
         'learning_rate': 1e-3,
-        'epochs': 10,
+        'epochs': 20,
         'rotation_range': 0.0,
         'width_shift_range': 0.0,
         'height_shift_range': 0.0,
@@ -327,10 +327,10 @@ def main():
     }
     
     # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
-    # 10 epoch中のepoch 5でベストになるLRをキャリブレーション
+    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
-        cal_epochs=10, target_best_epoch=5
+        cal_epochs=20, target_best_epoch=10
     )
     current_params['learning_rate'] = calibrated_lr
     head_lr = calibrated_lr  # Phase 1 warmup用に保存
@@ -404,14 +404,14 @@ def main():
     logger.info("="*50)
     
     # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # 10 epoch中のepoch 5でベストになるLRをキャリブレーション
+    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
     current_params['fine_tune'] = 'True'
-    current_params['epochs'] = 10
+    current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
     current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=10, target_best_epoch=5, score_priority=True
+        cal_epochs=20, target_best_epoch=10, score_priority=True
     )
     current_params['learning_rate'] = ft_lr
     
@@ -424,7 +424,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=10, target_best_epoch=5, score_priority=True
+            cal_epochs=20, target_best_epoch=10, score_priority=True
         )
         current_params['learning_rate'] = ft_lr2
     else:
@@ -449,13 +449,13 @@ def main():
     logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
     final_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=10, target_best_epoch=5, score_priority=True
+        cal_epochs=20, target_best_epoch=10, score_priority=True
     )
     current_params['learning_rate'] = final_lr
     
     # --- Final: Best-of-N Runs (上振れ狙い) ---
     N_FINAL_RUNS = 3
-    FINAL_EPOCHS = 10
+    FINAL_EPOCHS = 20
     logger.info(f"\n{'='*50}")
     logger.info(f"Final: Best-of-{N_FINAL_RUNS} runs (epochs={FINAL_EPOCHS}, different seeds)")
     logger.info(f"{'='*50}")
