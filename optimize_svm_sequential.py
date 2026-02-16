@@ -276,19 +276,82 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
             for mid_p in refinement_points:
                 raw_score, total_images, filtered_count = evaluate_wrapper(mid_p)
                 logger.info(f"  {target_name}={mid_p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
+                scores[mid_p] = (raw_score, total_images, filtered_count) # 記録追加
+                
                 if raw_score > best_score:
                     best_score = raw_score
                     best_val = mid_p
                     best_filtered = filtered_count
                     logger.info(f"  [REFINED BEST] {target_name}={mid_p} (Score: {raw_score:.4f})")
     
-    # Efficiency calculation
-    improvement = best_score - baseline_score
-    filtered_diff = best_filtered - baseline_filtered
-    efficiency = improvement / (filtered_diff + 1) if filtered_diff >= 0 else improvement
+    # --- Selection: Best Score vs Best Efficiency ---
+    logger.info(f"  [Selection] Selecting between Best Score and Best Efficiency candidate...")
     
-    logger.info(f"Finished optimizing {target_name}. Best: {best_val}, Score: {best_score:.4f}, Efficiency: {efficiency:.6f}")
-    return best_val, best_score, improvement, filtered_diff, efficiency
+    candidates_info = []
+    
+    for p, (s_score, s_total, s_filtered) in scores.items():
+        s_improvement = s_score - baseline_score
+        s_filtered_diff = s_filtered - baseline_filtered
+        
+        # 効率計算 (フィルタ数増加あたりの精度向上)
+        # filtered_diffが負（フィルタが減った）の場合は意味がない（通常ありえないが）
+        # improvement <= 0 なら効率ゼロ以下
+        if s_improvement <= 0:
+             s_efficiency = -1.0 # 無視
+        else:
+             s_efficiency = s_improvement / (max(0, s_filtered_diff) + 1)
+        
+        candidates_info.append({
+            'val': p,
+            'score': s_score,
+            'improvement': s_improvement,
+            'filtered': s_filtered,
+            'filtered_diff': s_filtered_diff,
+            'efficiency': s_efficiency
+        })
+    
+    if not candidates_info:
+        # Default fallback
+        logger.info(f"  -> No valid candidates found. Using baseline.")
+        return 0, baseline_score, 0.0, 0, 0.0
+
+    # 1. Best Score Candidate (current best_val logic)
+    # improvement > 0 の中で最高スコアを探す（なければ0）
+    valid_score_candidates = [c for c in candidates_info if c['improvement'] > 0]
+    if valid_score_candidates:
+        cand_score = max(valid_score_candidates, key=lambda x: x['score'])
+    else:
+        # 改善なしならBaseline (0)
+        cand_score = next((c for c in candidates_info if c['val'] == 0), candidates_info[0])
+
+    # 2. Best Efficiency Candidate
+    # improvement > 0 の中で最高効率を探す
+    if valid_score_candidates:
+        cand_eff = max(valid_score_candidates, key=lambda x: x['efficiency'])
+    else:
+        cand_eff = cand_score
+
+    logger.info(f"    Candidate Score (Best Score): {target_name}={cand_score['val']} (Score: {cand_score['score']:.4f}, Eff: {cand_score['efficiency']:.8f})")
+    logger.info(f"    Candidate Eff   (Best Eff)  : {target_name}={cand_eff['val']} (Score: {cand_eff['score']:.4f}, Eff: {cand_eff['efficiency']:.8f})")
+
+    # 3. Compare Efficiency and Select
+    if cand_eff['efficiency'] > cand_score['efficiency']:
+        selected = cand_eff
+        reason = "Higher Efficiency"
+    else:
+        selected = cand_score
+        reason = "Best Score (Efficiency tie or higher)"
+
+    final_val = selected['val']
+    final_score = selected['score']
+    final_improvement = selected['improvement']
+    final_filtered_diff = selected['filtered_diff']
+    final_efficiency = selected['efficiency']
+
+    logger.info(f"  -> Selected: {target_name}={final_val} via {reason}")
+    logger.info(f"Finished optimizing {target_name}. Best: {final_val}, Score: {final_score:.4f}, Efficiency: {final_efficiency:.6f}")
+    
+    return final_val, final_score, final_improvement, final_filtered_diff, final_efficiency
 
 def main():
     logger.info("Starting SVM Sequential Optimization (Efficiency-Based)")

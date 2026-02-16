@@ -1,1 +1,3 @@
-LearningRateSchedulerのdecayをminepoch廃止して、minzccu>0.5だったら適用
+optimizeのgreedy 現状各パラメータbestscoreでやってるけど
+各パラメータbestscoreと向上精度効率の２つのフィルタ%を算出して
+その2つの内向上精度効率の高いものを採用
