@@ -51,6 +51,9 @@
   - `x = relative_ratio` (現在データ数 / 基準データ数)
   - `exponent = 0.9998571 - 2.582857 * x + 3.542857 * (x**2) - 0.96 * (x**3)`
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
+- **Early Stoppingの扱い**:
+  - `calibrate_lr_scaling.py` におけるLR探索では、**Base LRキャリブレーション時は無効 (False)**、**指数探索時は有効 (True)** となります。
+  - ただし、指数探索時および本番学習時のEarly Stoppingは、**学習率の減衰（Decay）が開始された後のみ有効** となるよう制御されます（減衰前に早期終了することはありません）。
 
 ---
 
