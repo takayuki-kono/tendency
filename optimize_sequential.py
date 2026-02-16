@@ -330,11 +330,11 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
-            # Dynamic Exponent Logic (2nd order polynomial, 2026-02-16)
-            # y = 0.8491836 - 1.638353*x + 1.833087*x^2
+            # Dynamic Exponent Logic (Refined 2nd order polynomial, 2026-02-16 v2)
+            # y = 1.055699 - 2.394338*x + 2.443506*x^2
             # x = relative_ratio
             x = relative_ratio
-            exponent = 0.8491836 - 1.638353 * x + 1.833087 * (x**2)
+            exponent = 1.055699 - 2.394338 * x + 2.443506 * (x**2)
             
             # Apply min(1.0, exponent) as per user request
             exponent = min(1.0, exponent)
