@@ -91,6 +91,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
         - 調整式: `new_lr = current_lr × (best_epoch / 10)`、クランプ: 0.5〜2.0倍。
         - 収束条件は `BestEpoch==10` を厳密採用（許容誤差0）。
         - 各試行の候補から「epoch10への距離最小（同距離ならスコア高い方）」を最終採用。
+        - **Early Stopping無効化:** キャリブレーション時はEarly Stoppingを無効化し、必ず全Epoch学習して真のBest Epochを特定する。
     - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前に20 epoch用のLRキャリブレーションを実施。
         - 20 epoch の学習を最大5回繰り返し、Best epochが epoch 10 に来るようLRを調整。
         - `unfreeze_layers=60` を暫定値として使用し、キャリブレーション後にunfreeze_layersを最適化。
@@ -114,14 +115,25 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - 最適化開始前に、フィルタなしデータで20 epochの学習を最大5回繰り返す。
     - Best epochが中間（epoch 10）に来るようLRを二分探索で調整。
     - 調整式: `new_lr = current_lr × (best_epoch / 10)`
-    - 収束条件は `BestEpoch==10` を厳密採用（許容誤差0）。一致しない場合は最大5回まで調整を継続。
+    - 収束条件は `BestEpoch==10` を厳密採用（許容誤差0）。一致しない場合は最大5回まで調整を継続（LR変動幅による早期終了は行わない）。
+    - **Early Stopping無効化:** キャリブレーション時はEarly Stoppingを無効化し、必ず全Epoch学習して真のBest Epochを特定する。
     - 各試行の候補から「epoch10への距離最小（同距離ならスコア高い方）」を最終採用。
     - 得られた `calibrated_base_lr` を全後続trialで使用。
     - キャリブレーション最終結果をB0のベースラインスコアとして流用（重複排除）。
-    - 各フィルタtrial: `adjusted_lr = calibrated_base_lr / (((saved/total)^2)^exponent)` で除算（= `calibrated_base_lr / ((saved/total)^(2*exponent))`）。
-    - `calibrate_lr_scaling.py` でフィルタ `[0, 5, 40, 80]%` を評価し、`exponent` を二分探索で決定。
-    - 評価スコアは `weighted_score = raw_score / ((abs(best_epoch-10)+1)^exponent)` を使用し、best epoch が 10 に近いほど高評価とする。
-    - `exponent` の探索範囲は `0.5〜0.8`（`ratio^2` に対する乗数として探索）。
+    - **2段階スケーリング (Two-Stage LR Scaling):** (2026-02-15更新)
+        - `calibrate_lr_scaling.py` で2つの指数 `exp1`, `exp2` を独立に最適化。
+      ### 2.2 LRスケーリングロジック（適応型）
+
+- **目的**: フィルタリングによるデータ量の減少に応じて、学習率を自動調整する。
+- **計算式**:
+  - `relative_ratio = ratio / base_ratio`
+  - `exponent = max(0.65, relative_ratio ** 0.66)` (動的指数)
+  - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
+- **キャリブレーション (`calibrate_lr_scaling.py`)**:
+  - 各フィルタレベル (25%, 50%, 75%) で学習を実行。
+  - 評価指標: `abs(21 - score * 30) + distance` (Target Score 0.7 & Epoch 10, 低いほど良い)
+  - 各レベルの最適Expを探索・分析し、動的指数の決定に利用する。
+  - `optimize_sequential.py` は `base_lr` を設定ファイルから読み込み、`exponent` は上記数式で決定する。
     - 学習率スケジューラは前半5epochを固定LRとし、6epoch目からCosine Decayを開始。
     - 各trial: 20 epoch、Fine-tuning Off で評価。
 - **Phase 1 - 独立パラメータ評価:**
@@ -140,5 +152,5 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ---
 
 ## Author
-Claude (Updated 2026-02-14)
+Gemini (Updated 2026-02-15)
 
