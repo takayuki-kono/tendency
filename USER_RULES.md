@@ -5,6 +5,13 @@
 - Always create or update .bat files, then ask the user to execute them manually.
 - This rule applies to all future interactions in this workspace.
 
+## Version Control Rules (CRITICAL)
+- **Git Command Sharing**: After ANY code modification, ALWAYS provide the `git add` and `git commit` commands.
+  - Do NOT auto-execute git commands.
+  - Commit messages MUST be in Japanese.
+  - Always include the `--author` flag based on the model (Gemini/Claude).
+  - This must be done proactively without the user asking.
+
 ## Prompt-Driven Development Flow (CRITICAL)
 Follow this workflow for every new request or feature:
 1. **Record Prompt (APPEND ONLY)**: ALWAYS **APPEND** the user's prompt verbatim to `docs/prompt.md`. Do not add headers/dates/separators, but ensure there is a single newline separator between prompts.

@@ -29,3 +29,11 @@ y = 0.9998571 - 2.582857*x + 3.542857*x^2 - 0.96*x^3
 これで実現できる？
 
 やっぱcalibrateで5, 25, 50, 75の4点の最適exp探索しよかな
+
+
+これbaseLRの時ってexpなんか関与してる？
+
+calibrateのbaseLR以外の所でearlystoping消えてる？
+
+baseLR以外ではearlystoping有効
+ただしdecay有効後

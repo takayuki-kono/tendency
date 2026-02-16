@@ -108,7 +108,7 @@ def run_training_trial(lr, model_name='EfficientNetV2B0', epochs=20, target_epoc
     cmd.extend(["--learning_rate", str(lr)])
     cmd.extend(["--epochs", str(epochs)])
     cmd.extend(["--fine_tune", "False"])
-    cmd.extend(["--enable_early_stopping", "False"])
+
     # 内部自動スケーリングを無効化（このスクリプトで制御するため）
     cmd.extend(["--auto_lr_target_epoch", "0"]) 
     # if target_epoch > 0:

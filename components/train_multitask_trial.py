@@ -647,6 +647,23 @@ def main():
         else:
             monitor_metric = 'val_task_a_output_min_class_accuracy'
 
+        # Conditional Early Stopping: Only behave as EarlyStopping after decay condition is met
+        class ConditionalEarlyStopping(EarlyStopping):
+            def __init__(self, monitor='val_loss', patience=0, verbose=0, mode='auto', baseline=None, restore_best_weights=False, decay_scheduler=None):
+                super().__init__(monitor=monitor, patience=patience, verbose=verbose, mode=mode, baseline=baseline, restore_best_weights=restore_best_weights)
+                self.decay_scheduler = decay_scheduler
+
+            def on_epoch_end(self, epoch, logs=None):
+                # Check if decay has started. If not, do NOT execute EarlyStopping logic.
+                if self.decay_scheduler and self.decay_scheduler.decay_start_epoch is None:
+                    # Decay logic in scheduler runs on_epoch_end as well.
+                    # Since callbacks are executed in order, if Scheduler is first, decay_start_epoch might be set in this epoch.
+                    # If it is NOT set, we definitely skip.
+                    return
+                
+                # If decay started, behave like normal EarlyStopping
+                super().on_epoch_end(epoch, logs)
+
         # エポックごとの精度サマリー出力
         class EpochSummaryCallback(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
@@ -675,8 +692,10 @@ def main():
                     parts.append(f"Loss={val_loss:.4f}")
                 logger.info(" | ".join(parts))
 
+        scheduler = ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, verbose=1)
+        
         callbacks_list = [
-            ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, verbose=1),
+            scheduler,
             EpochSummaryCallback()
         ]
 
@@ -686,7 +705,8 @@ def main():
                 patience = max(3, target_epoch // 2)
             else:
                 patience = 5
-            callbacks_list.insert(0, EarlyStopping(monitor=monitor_metric, patience=patience, restore_best_weights=True, verbose=1, mode='max'))
+            # Use ConditionalEarlyStopping linked to the scheduler
+            callbacks_list.insert(0, ConditionalEarlyStopping(monitor=monitor_metric, patience=patience, restore_best_weights=True, verbose=1, mode='max', decay_scheduler=scheduler))
         
         return callbacks_list
 
