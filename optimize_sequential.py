@@ -330,12 +330,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
-            # Dynamic Exponent Logic (Derived from calibration results)
-            # 25%(Ratio high) -> exp=0.825, 50%/75%(Ratio low) -> exp=0.65
-            # Formula: exp = max(0.65, relative_ratio ** 0.66)
+            # Dynamic Exponent Logic (3rd order polynomial, 2026-02-16)
+            # y = 0.9998571 - 2.582857*x + 3.542857*x^2 - 0.96*x^3
+            # x = relative_ratio
+            x = relative_ratio
+            exponent = 0.9998571 - 2.582857 * x + 3.542857 * (x**2) - 0.96 * (x**3)
             
-            dynamic_exponent = relative_ratio ** 0.66
-            exponent = max(0.65, dynamic_exponent)
+            # 安全のため範囲制限 (0.1 ~ 2.0)
+            exponent = max(0.1, min(exponent, 2.0))
             
             # adjusted_lr = base_lr * (ratio ** exp)
             scale_factor = relative_ratio ** exponent
