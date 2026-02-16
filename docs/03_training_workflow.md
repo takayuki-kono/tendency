@@ -49,7 +49,8 @@
 - **目的**: データ数が少ない場合（フィルタで厳しく選別した場合）に適した学習率へ動的に補正する。
 - **計算式** (2026-02-16更新):
   - `x = relative_ratio` (現在データ数 / 基準データ数)
-  - `exponent = 0.9998571 - 2.582857 * x + 3.542857 * (x**2) - 0.96 * (x**3)`
+  - `x = relative_ratio` (現在データ数 / 基準データ数)
+  - `exponent = min(1.0, 0.8491836 - 1.638353 * x + 1.833087 * (x**2))`
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
 - **Early Stoppingの扱い**:
   - `calibrate_lr_scaling.py` におけるLR探索では、**Base LRキャリブレーション時は無効 (False)**、**指数探索時は有効 (True)** となります。
