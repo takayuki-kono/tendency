@@ -478,66 +478,55 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     
     # --- 二分探索 Refinement ---
     # --- 二分探索 Refinement (1%単位まで探索) ---
-    logger.info("  [Refinement] Starting binary search refinement to 1% resolution...")
-    
-    # 既存のスコア辞書 (scores) を使用して探索を継続
-    # 上位2点間を埋めていく方針
-    
-    refinement_iter = 0
-    MAX_REFINEMENT_ITER = 20 # 0-50の範囲なら十分収束する
-    
-    while refinement_iter < MAX_REFINEMENT_ITER:
-        # スコア順にソート (降順)
-        sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
-        if len(sorted_items) < 2:
-            break
-            
-        top1_val, top1_data = sorted_items[0]
-        top1_score = top1_data[0]
+    # Initial searchで改善が見られた場合のみ実行
+    if best_score > baseline_score:
+        logger.info("  [Refinement] Starting binary search refinement to 1% resolution...")
         
-        top2_val, top2_data = sorted_items[1]
+        # 既存のスコア辞書 (scores) を使用して探索を継続
+        # 上位2点間を埋めていく方針
         
-        # 1位と2位の差が1以下なら終了 (これ以上探索できない)
-        diff = abs(top1_val - top2_val)
-        if diff <= 1:
-            logger.info(f"  [Refinement] Converged (diff={diff}). Best={top1_val}, 2nd={top2_val}")
-            break
-            
-        # 中間点を計算
-        mid_val = (top1_val + top2_val) // 2
+        refinement_iter = 0
+        MAX_REFINEMENT_ITER = 20 # 0-50の範囲なら十分収束する
         
-        # 既に評価済みなら、周辺を探索し尽くしている可能性が高い
-        if mid_val in scores:
-            # 中間が既に評価済みの場合、上位2点の間にはピークがないか、平坦
-            # 念のため、1位のもう一方の隣(もしあれば)との間もチェックすべきだが、
-            # 単純化のため、ここでは探索終了とする（あるいはランダムに振る）
+        while refinement_iter < MAX_REFINEMENT_ITER:
+            # スコア順にソート (降順)
+            sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+            if len(sorted_items) < 2:
+                break
+                
+            top1_val, top1_data = sorted_items[0]
+            top1_score = top1_data[0]
             
-            # 特例: diff > 1 なのに mid が key にある -> つまり (top1+top2)//2 が既に評価済み
-            # 例: top1=0, top2=2 -> mid=1. evaluated.
-            # 例: top1=0, top2=5 -> mid=2. evaluated.
-            # この場合、これ以上分割しても新しい整数が出ないなら終了
+            top2_val, top2_data = sorted_items[1]
             
-            # まだ埋まっていない場所を探す (Lower bound logic)
-            # top1とtop2の間で、まだ評価していない点を探す
-            low, high = min(top1_val, top2_val), max(top1_val, top2_val)
-            found_new = False
-            # 単純に mid-1, mid+1 などを試すか、このループを抜ける
-            # 今回はシンプルに、(low + high) // 2 が済みなら終了
-            logger.info(f"  [Refinement] Midpoint {mid_val} already evaluated. Stopping refinement.")
-            break
+            # 1位と2位の差が1以下なら終了 (これ以上探索できない)
+            diff = abs(top1_val - top2_val)
+            if diff <= 1:
+                logger.info(f"  [Refinement] Converged (diff={diff}). Best={top1_val}, 2nd={top2_val}")
+                break
+                
+            # 中間点を計算
+            mid_val = (top1_val + top2_val) // 2
             
-        logger.info(f"  [Refinement #{refinement_iter+1}] Testing mid={mid_val} (between {top1_val} and {top2_val})...")
-        raw_score, total_images, filtered_count = evaluate_wrapper(mid_val)
-        logger.info(f"  {target_name}={mid_val} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
-        scores[mid_val] = (raw_score, total_images, filtered_count)
-        
-        if raw_score > best_score:
-            best_score = raw_score
-            best_val = mid_val
-            best_filtered = filtered_count
-            logger.info(f"  [REFINED BEST] {target_name}={mid_val} (Score: {raw_score:.4f})")
+            # 既に評価済みなら、周辺を探索し尽くしている可能性が高い
+            if mid_val in scores:
+                logger.info(f"  [Refinement] Midpoint {mid_val} already evaluated. Stopping refinement.")
+                break
+                
+            logger.info(f"  [Refinement #{refinement_iter+1}] Testing mid={mid_val} (between {top1_val} and {top2_val})...")
+            raw_score, total_images, filtered_count = evaluate_wrapper(mid_val)
+            logger.info(f"  {target_name}={mid_val} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
+            scores[mid_val] = (raw_score, total_images, filtered_count)
             
-        refinement_iter += 1
+            if raw_score > best_score:
+                best_score = raw_score
+                best_val = mid_val
+                best_filtered = filtered_count
+                logger.info(f"  [REFINED BEST] {target_name}={mid_val} (Score: {raw_score:.4f})")
+                
+            refinement_iter += 1
+    else:
+        logger.info("  [Refinement] Skipped (No improvement over baseline in initial search).")
     
     # --- Collect Candidates (Best Score & Best Efficiency) ---
     # すべての探索点（Refinement含む）から候補を選定
