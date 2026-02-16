@@ -894,42 +894,80 @@ def main():
     logger.info(f"Total Improvement: +{final_score - baseline_score:.4f}")
     logger.info("="*50)
 
-    # 結果を自動記録
-    from components.result_logger import log_result
-    log_result("optimize_sequential", {
-        "baseline_score": round(baseline_score, 4),
-        "best_score": round(final_score, 4),
-        "improvement": round(final_score - baseline_score, 4),
-        "strategy": final_desc,
-        "model": best_model,
-        "filter_params": {k: v for k, v in final_params.items() if k != 'grayscale'},
-        "grayscale": final_params.get('grayscale', False),
-        "param_efficiency": {k: {ek: round(ev, 6) if isinstance(ev, float) else ev for ek, ev in v.items()} for k, v in param_efficiency.items()},
-    })
+    # 結果を自動記録 (Legacy logger removed, using JSON analysis)
+    # --- Save Optimization Analysis Data ---
+    analysis_data = {
+        'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+        'baseline_score': baseline_score,
+        'candidates': all_candidates,
+        'greedy_order': [
+            {'param': c['param_name'], 'val': c['val'], 'efficiency': c['efficiency'], 'single_score': c['score']} 
+            for c in sorted_candidates
+        ],
+        'greedy_process': [
+            {'param': p, 'val': v, 'score_after': s} for p, v, s in greedy_history
+        ],
+        'final_selection': {
+            'strategy': final_desc,
+            'score': final_score,
+            'params': final_params,
+            'model': best_model
+        }
+    }
+    
+    analysis_file = os.path.join("outputs", "optimization_analysis.json")
+    try:
+        with open(analysis_file, 'w', encoding='utf-8') as f:
+            json.dump(analysis_data, f, indent=4)
+        logger.info(f"Optimization analysis saved to: {analysis_file}")
+    except Exception as e:
+        logger.error(f"Failed to save analysis data: {e}")
 
     # Generate and print the final preprocessing command
-    final_cmd = (
-        f"{PYTHON_PREPROCESS} preprocess_multitask.py --out_dir preprocessed_multitask "
-        f"--pitch_percentile {final_params['pitch']} "
-        f"--symmetry_percentile {final_params['sym']} "
-        f"--y_diff_percentile {final_params['y_diff']} "
-        f"--mouth_open_percentile {final_params['mouth_open']} "
-        f"--eyebrow_eye_percentile_high {final_params['eb_eye_high']} "
-        f"--eyebrow_eye_percentile_low {final_params['eb_eye_low']} "
-        f"--sharpness_percentile_low {final_params['sharpness_low']} "
-        f"--sharpness_percentile_high {final_params['sharpness_high']} "
-        f"--face_size_percentile_low {final_params['face_size_low']} "
-        f"--face_size_percentile_high {final_params['face_size_high']} "
-        f"--retouching_percentile {final_params['retouching']} "
-        f"--mask_percentile {final_params['mask']} "
-        f"--glasses_percentile {final_params['glasses']} "
-    )
+    cmd_parts = [PYTHON_PREPROCESS, "preprocess_multitask.py"]
+    cmd_parts.extend(["--out_dir", "preprocessed_multitask"])
+    
+    # Add all params
+    for k, v in final_params.items():
+        if k == 'grayscale':
+            pass # handled separately
+        else:
+            # percentile params
+            arg_map = {
+                'pitch': '--pitch_percentile',
+                'sym': '--symmetry_percentile',
+                'y_diff': '--y_diff_percentile',
+                'mouth_open': '--mouth_open_percentile',
+                'eb_eye_high': '--eyebrow_eye_percentile_high',
+                'eb_eye_low': '--eyebrow_eye_percentile_low',
+                'sharpness_low': '--sharpness_percentile_low',
+                'sharpness_high': '--sharpness_percentile_high',
+                'face_size_low': '--face_size_percentile_low',
+                'face_size_high': '--face_size_percentile_high',
+                'retouching': '--retouching_percentile',
+                'mask': '--mask_percentile',
+                'glasses': '--glasses_percentile'
+            }
+            if k in arg_map:
+                cmd_parts.extend([arg_map[k], str(v)])
+    
     if final_params.get('grayscale', False):
-        final_cmd += "--grayscale "
+        cmd_parts.append("--grayscale")
+        
+    final_cmd = " ".join(cmd_parts)
     logger.info("\nRun this command to apply the best filters:")
     logger.info(final_cmd)
     logger.info(f"\nRecommended Model for Training: {best_model}")
     logger.info("="*50)
+
+    # Save command to batch file for easy execution
+    bat_file = "run_optimized_preprocess.bat"
+    with open(bat_file, 'w', encoding='utf-8') as f:
+        f.write(f"@echo off\n")
+        f.write(f"echo Running Optimized Preprocessing...\n")
+        f.write(f"{final_cmd}\n")
+        f.write(f"pause\n")
+    logger.info(f"Command saved to {bat_file}")
 
 if __name__ == "__main__":
     main()
