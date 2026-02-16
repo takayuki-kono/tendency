@@ -433,6 +433,83 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
     )
     return model
 
+
+class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
+    """
+    MinClassAccuracy > 0.5 を達成した次のエポックから減衰を開始するスケジューラ。
+    達成するまでは初期LRを維持する。
+    """
+    def __init__(self, initial_lr, total_epochs, task_labels, verbose=0):
+        super(ConditionalLearningRateScheduler, self).__init__()
+        self.initial_lr = initial_lr
+        self.total_epochs = total_epochs
+        self.task_labels = task_labels # For metric name resolution
+        self.verbose = verbose
+        self.decay_start_epoch = None
+        self.metric_history = []
+
+    def on_epoch_begin(self, epoch, logs=None):
+        if not hasattr(self.model.optimizer, 'lr'):
+            return
+            
+        lr = self.initial_lr
+        
+        # 減衰開始条件を満たしてからの経過エポック数で減衰を計算
+        if self.decay_start_epoch is not None:
+             # 残りエポック数で減衰させる
+             remaining_epochs = max(1.0, self.total_epochs - self.decay_start_epoch)
+             
+             # progress: 0.0 (start) -> 1.0 (end)
+             current_step = epoch - self.decay_start_epoch
+             progress = current_step / remaining_epochs
+             progress = min(1.0, max(0.0, progress))
+             
+             min_lr = self.initial_lr * 0.01
+             # Sqrt Decay: 1 - sqrt(progress)
+             decay = 1.0 - np.sqrt(progress)
+             lr = min_lr + (self.initial_lr - min_lr) * decay
+        
+        # Set LR
+        tf.keras.backend.set_value(self.model.optimizer.lr, lr)
+        if self.verbose > 0:
+            print(f'\nEpoch {epoch + 1}: LearningRateScheduler setting learning rate to {lr:.8f}. (Decay Started: {self.decay_start_epoch})')
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None: return
+
+        # Calculate Average Min Class Accuracy
+        task_mins = []
+        if len(self.task_labels) == 1:
+            val = logs.get('val_min_class_accuracy')
+            if val is not None: task_mins.append(val)
+        else:
+            for i in range(len(self.task_labels)):
+                # Note: logs keys are based on Metric names.
+                # In create_model: metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
+                # And output names are 'task_a_output'.
+                # Keras usually formats as: val_{output_name}_{metric_name}
+                # So: val_task_a_output_min_class_accuracy
+                key = f"val_task_{chr(ord('a')+i)}_output_min_class_accuracy"
+                val = logs.get(key)
+                if val is not None: task_mins.append(val)
+        
+        current_score = 0.0
+        if task_mins:
+            current_score = sum(task_mins) / len(task_mins)
+        
+        self.metric_history.append(current_score)
+
+        # Condition Check: MinClassAccuracy > 0.5
+        # まだ開始しておらず、かつ条件を満たした場合
+        if self.decay_start_epoch is None and current_score > 0.5:
+            # 次のエポックから開始するために +1 を記録
+            self.decay_start_epoch = epoch + 1
+            if self.verbose > 0:
+                print(f"\n[LR Scheduler] Condition Met (Avg MinClassAcc {current_score:.4f} > 0.5)! Starting decay from epoch {self.decay_start_epoch} (Next Epoch).")
+        elif self.decay_start_epoch is None:
+             if self.verbose > 0:
+                print(f"\n[LR Scheduler] Condition NOT Met (Avg MinClassAcc {current_score:.4f} <= 0.5). Keeping LR constant.")
+
 def main():
     parser = argparse.ArgumentParser()
     # Model Params
@@ -464,6 +541,7 @@ def main():
     # 学習率自動調整: 指定したepochでベストになるようLRをデータ枚数に基づき自動算出
     # 0 = 無効（--learning_rate をそのまま使用）、>0 = target epoch
     parser.add_argument('--auto_lr_target_epoch', type=int, default=0)
+    parser.add_argument('--enable_early_stopping', type=str, default='True')
 
     args = parser.parse_args()
     
@@ -560,36 +638,14 @@ def main():
         task_labels
     )
 
-    # コールバック生成関数 (Balanced Accuracyを監視 + Cosine Decay)
-    def create_callbacks(total_epochs, initial_lr, target_epoch=0):
-        def cosine_decay(epoch):
-            if total_epochs == 0: return initial_lr
-
-            # 前半3epochはLRを固定し、4epoch目以降で減衰を開始する
-            hold_epochs = min(3, total_epochs)
-            if epoch < hold_epochs:
-                return initial_lr
-
-            decay_length = max(1, total_epochs - hold_epochs)
-            progress = (epoch - hold_epochs + 1) / decay_length
-            progress = min(1.0, max(0.0, progress))
-
-            # Sqrt Decay: 1 - sqrt(progress) で穏やかに減衰（cosineより後半の減衰が緩い）
-            min_lr = initial_lr * 0.01
-            decay = 1.0 - np.sqrt(progress)  # progress=0→1.0, progress=0.25→0.5, progress=1→0.0
-            return min_lr + (initial_lr - min_lr) * decay
-
+    # コールバック生成関数 (Balanced Accuracyを監視 + Conditional Cosine Decay)
+    def create_callbacks(total_epochs, initial_lr, target_epoch=0, enable_early_stopping=True):
+        
         # Early Stopping Monitor
         if len(task_labels) == 1:
             monitor_metric = 'val_min_class_accuracy'
         else:
             monitor_metric = 'val_task_a_output_min_class_accuracy'
-
-        # patience: target_epochの半分を目安にする（ただし最低3）
-        if target_epoch > 0:
-            patience = max(3, target_epoch // 2)
-        else:
-            patience = 5
 
         # エポックごとの精度サマリー出力
         class EpochSummaryCallback(tf.keras.callbacks.Callback):
@@ -605,7 +661,7 @@ def main():
                 else:
                     task_mins = []
                     for i in range(len(task_labels)):
-                        key = f"val_task_{chr(ord('a')+i)}_output_min_class_accuracy"
+                        key = f"val_task_{chr(97+i)}_output_min_class_accuracy"
                         val = logs.get(key, None)
                         if val is not None:
                             parts.append(f"Task{chr(65+i)}={val:.4f}")
@@ -619,11 +675,20 @@ def main():
                     parts.append(f"Loss={val_loss:.4f}")
                 logger.info(" | ".join(parts))
 
-        return [
-            EarlyStopping(monitor=monitor_metric, patience=patience, restore_best_weights=True, verbose=1, mode='max'),
-            LearningRateScheduler(cosine_decay, verbose=1),
+        callbacks_list = [
+            ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, verbose=1),
             EpochSummaryCallback()
         ]
+
+        if enable_early_stopping:
+            # patience: target_epochの半分を目安にする（ただし最低3）
+            if target_epoch > 0:
+                patience = max(3, target_epoch // 2)
+            else:
+                patience = 5
+            callbacks_list.insert(0, EarlyStopping(monitor=monitor_metric, patience=patience, restore_best_weights=True, verbose=1, mode='max'))
+        
+        return callbacks_list
 
     # --- Phase 1: 初期学習 (Headのみ) ---
     if args.fine_tune.lower() == 'true':
@@ -640,11 +705,12 @@ def main():
     else:
         logger.info(f"--- Training (Head only, {phase1_epochs} epochs, lr={phase1_lr:.8f}) ---")
 
+    enable_early_stopping = args.enable_early_stopping.lower() == 'true'
     history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=phase1_epochs,
-        callbacks=create_callbacks(phase1_epochs, phase1_lr, target_epoch=args.auto_lr_target_epoch),
+        callbacks=create_callbacks(phase1_epochs, phase1_lr, target_epoch=args.auto_lr_target_epoch, enable_early_stopping=enable_early_stopping),
         verbose=2
     )
     

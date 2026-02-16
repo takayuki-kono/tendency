@@ -1,4 +1,1 @@
-ルールに下記追加
-1まずプロンプトの内容をそのまま/docのprompt.mdに追記
-2prompt.mdの内容後勝ちで/docのmdの仕様内容を更新
-3/docのmdの仕様内容でもって実装
+LearningRateSchedulerのdecayをminepoch廃止して、minzccu>0.5だったら適用
