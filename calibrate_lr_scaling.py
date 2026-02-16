@@ -314,7 +314,7 @@ def main():
 
     # --- Step 2: フィルタレベル準備 & 分類 ---
     logger.info("\n>>> Step 2: Prepare filter levels & Split by threshold <<<")
-    filter_percentiles = [25, 50, 75] # Updated: 0.75(25%), 0.5(50%), 0.25(75%) ratio approx
+    filter_percentiles = [5, 25, 50, 75] # Updated: 5%, 25%, 50%, 75% for calibration
     levels_high = [] # ratio >= threshold
     levels_low = []  # ratio < threshold
     
