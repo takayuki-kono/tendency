@@ -57,5 +57,6 @@ tendency/
     ├── 00_overview_and_map.md      # 全体マップ
     ├── 01_data_acquisition.md      # データ収集
     ├── 02_data_filtering.md        # フィルタリング・前処理
-    └── 03_training_workflow.md     # 学習ワークフロー
+    ├── 03_training_workflow.md     # 学習ワークフロー
+    └── 04_development_rules.md     # 開発ルール
 ```
