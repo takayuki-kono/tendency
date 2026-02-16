@@ -539,18 +539,57 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
             
         refinement_iter += 1
     
-    # 効率計算
-    improvement = best_score - baseline_score
-    filtered_diff = best_filtered - baseline_filtered
-    # 効率 = 精度向上 / (フィルタリング枚数増加 + 1)  ※0除算防止
-    efficiency = improvement / (filtered_diff + 1) if filtered_diff >= 0 else improvement
+    # --- Collect Candidates (Best Score & Best Efficiency) ---
+    # すべての探索点（Refinement含む）から候補を選定
+    best_score_candidate = None
+    best_eff_candidate = None
+    max_score_val = -1.0
+    max_eff_val = -float('inf')
     
+    for p, res in scores.items():
+        r_score, r_total, r_filtered = res
+        
+        # Improvement / Efficiency vs Baseline
+        imp = r_score - baseline_score
+        f_diff = r_filtered - baseline_filtered
+        eff = imp / (f_diff + 1) if f_diff >= 0 else imp # Safety
+        
+        # Valid only if improvement is positive (or at least non-negative?)
+        # User constraint: "score上昇" -> improvement > 0
+        if imp > 0:
+            # Update Best Score Candidate
+            if r_score > max_score_val:
+                max_score_val = r_score
+                best_score_candidate = {
+                    'val': p, 'score': r_score, 'improvement': imp, 
+                    'filtered': r_filtered, 'efficiency': eff
+                }
+            
+            # Update Best Efficiency Candidate
+            if eff > max_eff_val:
+                max_eff_val = eff
+                best_eff_candidate = {
+                    'val': p, 'score': r_score, 'improvement': imp, 
+                    'filtered': r_filtered, 'efficiency': eff
+                }
+
     logger.info(f"Finished optimizing {target_name}.")
-    logger.info(f"  Best: {best_val}, Score: {best_score:.4f}")
-    logger.info(f"  Improvement: +{improvement:.4f}, FilteredDiff: +{filtered_diff}")
-    logger.info(f"  Efficiency: {efficiency:.6f} (improvement per filtered image)")
     
-    return best_val, best_score, improvement, filtered_diff, efficiency
+    candidates = []
+    if best_score_candidate:
+        candidates.append(best_score_candidate)
+        logger.info(f"  Best Score Param: {best_score_candidate['val']} (Score={best_score_candidate['score']:.4f}, Eff={best_score_candidate['efficiency']:.6f})")
+        
+    if best_eff_candidate:
+        # Avoid duplicate object if same point is both best score and best eff
+        if not best_score_candidate or best_eff_candidate['val'] != best_score_candidate['val']:
+            candidates.append(best_eff_candidate)
+            logger.info(f"  Best Eff Param:   {best_eff_candidate['val']} (Score={best_eff_candidate['score']:.4f}, Eff={best_eff_candidate['efficiency']:.6f})")
+
+    if not candidates:
+        logger.info("  No valid candidates found (no improvement).")
+
+    return candidates
 
 def main():
     global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO
@@ -669,42 +708,39 @@ def main():
     ]
     
     # Phase 1 loop
+    # Phase 1 loop
     global_best_score = baseline_score
-    # 初期状態は全て0のパラメータ
     global_best_params = {k: 0 for k in current_params}
     global_best_desc = "Baseline (No Filter)"
+    
+    # 全候補リスト (Best Score, Best Eff mixed)
+    all_candidates = []
 
     for param_name in param_names:
-        val, score, improvement, filtered_diff, efficiency = optimize_single_param(
+        # Returns list of dicts: [{'val':..., 'score':..., 'efficiency':...}, ...]
+        candidates = optimize_single_param(
             param_name, current_params, best_model, baseline_score, baseline_filtered
         )
-        current_params[param_name] = val
-        param_efficiency[param_name] = {
-            'val': val,
-            'improvement': improvement,
-            'filtered_diff': filtered_diff,
-            'efficiency': efficiency
-        }
         
-        # 単体でのベスト記録を更新したか確認
-        if score > global_best_score:
-            global_best_score = score
-            # このパラメータだけ有効にした辞書を作成
-            temp_params = {k: 0 for k in current_params} # Reset all to 0
-            temp_params[param_name] = val
-            global_best_params = temp_params
-            global_best_desc = f"Single Best ({param_name}={val})"
-            logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {score:.4f}")
-    
+        for cand in candidates:
+            cand['param_name'] = param_name
+            all_candidates.append(cand)
+            
+            # Check for Global Single Best
+            if cand['score'] > global_best_score:
+                global_best_score = cand['score']
+                global_best_params = {k: 0 for k in current_params}
+                global_best_params[param_name] = cand['val']
+                global_best_desc = f"Single Best ({param_name}={cand['val']})"
+                logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {cand['score']:.4f}")
+
     # Phase 2: Efficiency-Based Greedy Integration (Grayscale無しで実行)
     logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
     
-    # 効率順にソート (効率 > 0 のもののみ)
-    sorted_params = sorted(
-        [p for p in param_efficiency.items() if p[1]['efficiency'] > 0 and p[1]['improvement'] > 0],
-        key=lambda x: x[1]['efficiency'], 
-        reverse=True
-    )
+    # 効率順にソート (降順)
+    # User Requirement: "score上昇かつ、効率の良い方をgreedyで採用"
+    # -> 効率順に試行し、スコアが上がるなら採用 (Greedy)
+    sorted_candidates = sorted(all_candidates, key=lambda x: x['efficiency'], reverse=True)
     
     current_greedy_params = {k: 0 for k in current_params}
     
@@ -718,12 +754,24 @@ def main():
     
     greedy_history = []
     
-    for param_name, info in sorted_params:
-        val = info['val']
-        logger.info(f"Trying to add {param_name}={val} (Efficiency: {info['efficiency']:.6f})...")
+    for cand in sorted_candidates:
+        p_name = cand['param_name']
+        p_val = cand['val']
+        p_eff = cand['efficiency']
+        p_score_single = cand['score']
         
+        logger.info(f"Trying candidate: {p_name}={p_val} (Eff: {p_eff:.6f}, SingleScore: {p_score_single:.4f})...")
+        
+        # 既にセットされている値がある場合、それと比較して更新するか判断
+        prev_val = current_greedy_params[p_name]
+        
+        if prev_val == p_val:
+            logger.info(f"  -> Already set to {p_val}. Skipping.")
+            continue
+            
+        # 一時的にパラメータ適用
         temp_params = current_greedy_params.copy()
-        temp_params[param_name] = val
+        temp_params[p_name] = p_val
         
         res = run_trial(
             temp_params['pitch'], temp_params['sym'], temp_params['y_diff'], temp_params['mouth_open'],
@@ -735,14 +783,18 @@ def main():
         )
         score, total, filtered = res
         
+        # 採用基準: スコアが現状以上 (>=) なら採用
+        # (効率が良い順に試しているので、同じスコアなら効率が良い方が先に採用されているはずだが、
+        #  後から来た「効率は低いがスコアが高い候補」がさらにスコアを上げるなら更新する)
         if score >= current_best_score:
-            logger.info(f"  -> Accepted (Score: {score:.4f} >= {current_best_score:.4f})")
+            diff = score - current_best_score
+            logger.info(f"  -> Accepted (Score: {score:.4f} >= {current_best_score:.4f}, Diff: +{diff:.4f})")
             current_best_score = score
-            current_greedy_params[param_name] = val
-            greedy_history.append((param_name, val, score))
+            current_greedy_params[p_name] = p_val
+            greedy_history.append((p_name, p_val, score))
         else:
             logger.info(f"  -> Skipped (Score: {score:.4f} < {current_best_score:.4f})")
-    
+            
     greedy_score = current_best_score
     greedy_params = current_greedy_params.copy()
 
