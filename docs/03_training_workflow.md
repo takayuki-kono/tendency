@@ -53,10 +53,9 @@
 ### 学習率の動的スケーリング (Dynamic LR Scaling)
 前処理フィルタによりデータ量が減少した場合、学習率を以下の多項式曲線に基づいて自動調整します。
 - **目的**: データ数が少ない場合（フィルタで厳しく選別した場合）に適した学習率へ動的に補正する。
-- **計算式** (2026-02-16更新):
-  - `x = relative_ratio` (現在データ数 / 基準データ数)
-  - `exponent = max(0.5, min(1.0, 0.8491836 - 1.638353 * x + 1.833087 * (x**2)))`
-  - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
+- **計算式** (2026-02-17再設定):
+  - `exponent = 1.0` (固定)
+  - `adjusted_lr = base_lr * (relative_ratio ** exponent)` (つまり線形スケーリング)
 - **Early Stoppingの扱い**:
   - `calibrate_lr_scaling.py` におけるLR探索では、**Base LRキャリブレーション時は無効 (False)**、**指数探索時は有効 (True)** となります。
   - `calibrate_lr_scaling.py` におけるLR探索では、**Base LRキャリブレーション時は無効 (False)**、**指数探索時は有効 (True)** となります。
@@ -119,9 +118,9 @@
     - ...
 - **損失関数**: `SparseCategoricalCrossentropy` (Mixup/LabelSmoothing使用時は `CategoricalCrossentropy`)
 - **評価指標**: `BalancedSparseCategoricalAccuracy` (自作指標。データ不均衡に頑健)
-- **学習率スケジュール**: Sqrt Decay (常に有効)
+- **学習率スケジュール**: Linear Decay (常に有効)
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
-    - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - sqrt(progress)` で減衰させる。
+    - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
     - **最低LR**: `initial_lr × 0.01` (ゼロにはしない)。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)

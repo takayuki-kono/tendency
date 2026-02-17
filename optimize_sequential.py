@@ -332,14 +332,10 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
-            # Dynamic Exponent Logic (Refined 2nd order polynomial, 2026-02-16 v2)
-            # y = 1.055699 - 2.394338*x + 2.443506*x^2
-            # x = relative_ratio
+            # Fixed Exponent Logic (2026-02-17)
+            # y = 1.0 (Linear Scaling)
             x = relative_ratio
-            exponent = 1.055699 - 2.394338 * x + 2.443506 * (x**2)
-            
-            # Apply constraints: 0.5 <= exponent <= 1.0
-            exponent = max(0.5, min(1.0, exponent))
+            exponent = 1.0
             
             # adjusted_lr = base_lr * (ratio ** exp)
             scale_factor = relative_ratio ** exponent
