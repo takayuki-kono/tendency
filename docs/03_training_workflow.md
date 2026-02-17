@@ -43,6 +43,7 @@
 - **探索設定**:
     - **探索点**: `[0, 2, 5, 25, 50]` (初期探索) -> 1%刻みの二分探索 (Refinement)。
 - **出力アーティファクト**:
+    - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。
     - `outputs/optimization_analysis.json`: 最適化プロセスの全候補、Greedy統合の履歴、最終パラメータを含む詳細ログ。
     - `run_optimized_preprocess.bat`: 最適化されたパラメータを適用するための実行バッチファイル。
 - **モデル選択ステップ**:
