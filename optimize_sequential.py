@@ -338,11 +338,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             x = relative_ratio
             exponent = 1.055699 - 2.394338 * x + 2.443506 * (x**2)
             
-            # Apply min(1.0, exponent) as per user request
-            exponent = min(1.0, exponent)
-
-            # Keep safety range [0.1, 2.0] just in case (though min(1.0) makes upper mostly redundant)
-            exponent = max(0.1, min(exponent, 2.0))
+            # Apply constraints: 0.5 <= exponent <= 1.0
+            exponent = max(0.5, min(1.0, exponent))
             
             # adjusted_lr = base_lr * (ratio ** exp)
             scale_factor = relative_ratio ** exponent
