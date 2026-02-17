@@ -115,9 +115,9 @@
     - ...
 - **損失関数**: `SparseCategoricalCrossentropy` (Mixup/LabelSmoothing使用時は `CategoricalCrossentropy`)
 - **評価指標**: `BalancedSparseCategoricalAccuracy` (自作指標。データ不均衡に頑健)
-- **学習率スケジュール**: Sqrt Decay (常に有効)
-    - **開始条件**: **常に有効** (学習開始時から `sqrt` ベースの減衰を適用)。これまでのような条件付き発動 (`val_min_class_accuracy > 0.5`) は廃止。
-    - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - sqrt(progress)` で減衰させる。
+- **学習率スケジュール**: Linear Decay (常に有効)
+    - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
+    - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
     - **最低LR**: `initial_lr × 0.01` (ゼロにはしない)。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
