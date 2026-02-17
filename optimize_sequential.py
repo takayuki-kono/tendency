@@ -581,12 +581,15 @@ def main():
 
     # LRスケーリング設定（calibrate_lr_scaling.py の結果）を読み込む
     cal_score = 0.0
+    LR_SCALING_CONFIG_FILE = "outputs/cache/calibrated_lr.json"
+    cal_score = 0.0
     if os.path.exists(LR_SCALING_CONFIG_FILE):
         try:
             with open(LR_SCALING_CONFIG_FILE, 'r', encoding='utf-8') as f:
                 lr_config = json.load(f)
             LR_LOW_RATIO_THRESHOLD = float(lr_config.get('threshold', LR_LOW_RATIO_THRESHOLD))
-            BASE_RATIO = float(lr_config.get('base_ratio', 1.0))
+            # BASE_RATIO = float(lr_config.get('base_ratio', 1.0)) # User request: Do not use cached base_ratio
+            BASE_RATIO = 1.0 # Default/Reset
             
             if 'base_lr' in lr_config:
                 CALIBRATED_BASE_LR = float(lr_config['base_lr'])
