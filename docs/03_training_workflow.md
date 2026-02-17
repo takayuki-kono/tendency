@@ -59,7 +59,11 @@
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
 - **Early Stoppingの扱い**:
   - `calibrate_lr_scaling.py` におけるLR探索では、**Base LRキャリブレーション時は無効 (False)**、**指数探索時は有効 (True)** となります。
+  - `calibrate_lr_scaling.py` におけるLR探索では、**Base LRキャリブレーション時は無効 (False)**、**指数探索時は有効 (True)** となります。
   - ただし、指数探索時および本番学習時のEarly Stoppingは、**学習率の減衰（Decay）が開始された後のみ有効** となるよう制御されます（減衰前に早期終了することはありません）。
+  - **キャリブレーション設定 (2026-02-17更新)**:
+    - 指数探索範囲: `0.15` ～ `1.5`
+    - 初期探索点: `[0.15, 0.8, 1.5]` (広範囲をカバーするため)
 
 ---
 
@@ -115,9 +119,9 @@
     - ...
 - **損失関数**: `SparseCategoricalCrossentropy` (Mixup/LabelSmoothing使用時は `CategoricalCrossentropy`)
 - **評価指標**: `BalancedSparseCategoricalAccuracy` (自作指標。データ不均衡に頑健)
-- **学習率スケジュール**: Linear Decay (常に有効)
+- **学習率スケジュール**: Sqrt Decay (常に有効)
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
-    - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
+    - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - sqrt(progress)` で減衰させる。
     - **最低LR**: `initial_lr × 0.01` (ゼロにはしない)。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)

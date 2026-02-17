@@ -465,8 +465,8 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
              progress = min(1.0, max(0.0, progress))
              
              min_lr = self.initial_lr * 0.01
-             # Linear Decay: 1 - progress
-             decay = 1.0 - progress
+             # Sqrt Decay: 1 - sqrt(progress)
+             decay = 1.0 - np.sqrt(progress)
              lr = min_lr + (self.initial_lr - min_lr) * decay
         
         # Set LR
