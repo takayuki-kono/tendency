@@ -377,7 +377,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             line = line.rstrip()
             train_output.append(line)
             # エポック情報やスコアを含む行のみ表示
-            if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=']):
+            if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
                 logger.info(f"  [Train] {line}")
         
         process.wait()
