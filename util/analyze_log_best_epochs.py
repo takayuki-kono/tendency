@@ -96,7 +96,34 @@ def analyze_best_epochs(log_file):
     print(f"Results saved to {output_file}")
 
 if __name__ == "__main__":
-    # Windows path adjustment just in case running from different cwd
-    if not os.path.exists(LOG_FILE) and os.path.exists(r"d:\tendency\outputs\logs\sequential_opt_log.txt"):
-        LOG_FILE = r"d:\tendency\outputs\logs\sequential_opt_log.txt"
-    analyze_best_epochs(LOG_FILE)
+    import sys
+    log_target = None
+    
+    # Check command line args
+    if len(sys.argv) > 1:
+        log_target = sys.argv[1]
+    
+    # If not provided, find latest log in default dir
+    if not log_target or not os.path.exists(log_target):
+        # Default directory
+        base_dir = "outputs/logs"
+        if not os.path.exists(base_dir) and os.path.exists(r"d:\tendency\outputs\logs"):
+             base_dir = r"d:\tendency\outputs\logs"
+             
+        # Look for timestamped logs first
+        logs = glob.glob(os.path.join(base_dir, "sequential_opt_log_*.txt"))
+        # Also look for the old static log
+        static_log = os.path.join(base_dir, "sequential_opt_log.txt")
+        if os.path.exists(static_log):
+            logs.append(static_log)
+            
+        if logs:
+            # Sort by modification time, newest first
+            logs.sort(key=os.path.getmtime, reverse=True)
+            log_target = logs[0]
+            print(f"Latest log file found: {log_target}")
+        else:
+            print("No log files found.")
+            sys.exit(1)
+            
+    analyze_best_epochs(log_target)

@@ -41,11 +41,13 @@ if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
 if not os.path.exists(PYTHON_TRAIN): PYTHON_TRAIN = "python"
 
 # ログ設定
+timestamp = time.strftime("%Y%m%d_%H%M%S")
+log_filename = f"sequential_opt_log_{timestamp}.txt"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, 'sequential_opt_log.txt'), mode='w', encoding='utf-8'),
+        logging.FileHandler(os.path.join(LOG_DIR, log_filename), mode='w', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
