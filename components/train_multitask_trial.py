@@ -436,8 +436,8 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
 
 class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
     """
-    MinClassAccuracy > 0.5 を達成した次のエポックから減衰を開始するスケジューラ。
-    達成するまでは初期LRを維持する。
+    MinClassAccuracy > 0.5 を達成した次のエポックから減衰を開始する... 
+    -> 変更(2026-02-17): 常に最初(Epoch 0)から減衰を開始する仕様に変更。
     """
     def __init__(self, initial_lr, total_epochs, task_labels, verbose=0):
         super(ConditionalLearningRateScheduler, self).__init__()
@@ -445,7 +445,7 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
         self.total_epochs = total_epochs
         self.task_labels = task_labels # For metric name resolution
         self.verbose = verbose
-        self.decay_start_epoch = None
+        self.decay_start_epoch = 0 # 常に0から開始
         self.metric_history = []
 
     def on_epoch_begin(self, epoch, logs=None):
@@ -484,11 +484,6 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
             if val is not None: task_mins.append(val)
         else:
             for i in range(len(self.task_labels)):
-                # Note: logs keys are based on Metric names.
-                # In create_model: metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
-                # And output names are 'task_a_output'.
-                # Keras usually formats as: val_{output_name}_{metric_name}
-                # So: val_task_a_output_min_class_accuracy
                 key = f"val_task_{chr(ord('a')+i)}_output_min_class_accuracy"
                 val = logs.get(key)
                 if val is not None: task_mins.append(val)
@@ -499,16 +494,8 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
         
         self.metric_history.append(current_score)
 
-        # Condition Check: MinClassAccuracy > 0.5
-        # まだ開始しておらず、かつ条件を満たした場合
-        if self.decay_start_epoch is None and current_score > 0.5:
-            # 次のエポックから開始するために +1 を記録
-            self.decay_start_epoch = epoch + 1
-            if self.verbose > 0:
-                print(f"\n[LR Scheduler] Condition Met (Avg MinClassAcc {current_score:.4f} > 0.5)! Starting decay from epoch {self.decay_start_epoch} (Next Epoch).")
-        elif self.decay_start_epoch is None:
-             if self.verbose > 0:
-                print(f"\n[LR Scheduler] Condition NOT Met (Avg MinClassAcc {current_score:.4f} <= 0.5). Keeping LR constant.")
+        # Condition Check: Removed (Always Active)
+        # self.decay_start_epoch is already 0.
 
 def main():
     parser = argparse.ArgumentParser()

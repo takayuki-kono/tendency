@@ -37,4 +37,7 @@ bestepochが1か20になってるパターン分析してほしい
 
 sequential_opt_log.txt　まずこれが最新のみではなく、過去のも参照できるようにすべきかも
 
+
 指摘せずともdocsの仕様更新するよう記憶
+
+やっぱscheduleのdecay常に発動しよかな
