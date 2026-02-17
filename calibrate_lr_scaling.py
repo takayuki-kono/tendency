@@ -233,7 +233,7 @@ def main():
     logger.info("=" * 60)
 
     model_name = 'EfficientNetV2B0'
-    target_epoch = 5
+    target_epoch = 10
     cal_epochs = 20
     
     # ユーザー指定の探索範囲
