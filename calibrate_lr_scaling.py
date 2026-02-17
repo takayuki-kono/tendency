@@ -233,7 +233,7 @@ def main():
     logger.info("=" * 60)
 
     model_name = 'EfficientNetV2B0'
-    target_epoch = 10
+    target_epoch = 5
     cal_epochs = 20
     
     # ユーザー指定の探索範囲
@@ -408,7 +408,9 @@ def main():
         scores = {}
         
         # Initial 3 points
-        for x in [lo, mid, hi]:
+        points = [lo, (lo + hi) / 2, hi]
+
+        for x in points:
             scores[x] = eval_exp(x)
             history.append((x, scores[x]))
             
