@@ -313,13 +313,12 @@ def main():
     logger.info("=" * 60)
 
     model_name = 'EfficientNetV2B0'
-    # target_epochは参照用
-    target_epoch = 10 
+    target_epoch = 13 
     cal_epochs = 20
     
     # ユーザー指定の探索範囲
-    range_exp1 = (0.3, 1.0)  # High Ratio (>= threshold)
-    range_exp2 = (0.3, 1.0)  # Low Ratio (< threshold)
+    range_exp1 = (0.3, 1.5)  # High Ratio (>= threshold)
+    range_exp2 = (0.3, 1.5)  # Low Ratio (< threshold)
     threshold = 0.5
 
     # --- Step 1: ベースライン（フィルタなし）---
@@ -423,8 +422,8 @@ def main():
             continue
             
         # Optimize for this parameter
-        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)")
-        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)")
+        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)", initial_points=[0.3, 1.0, 1.5])
+        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)", initial_points=[0.3, 1.0, 1.5])
         
         param_results[param_name] = {'exp1': p_exp1, 'exp2': p_exp2}
         
@@ -450,7 +449,7 @@ def main():
         logger.error("No valid levels.")
         return
 
-    def optimize_exponent_for_levels(levels_subset, exp_range, param_name):
+    def optimize_exponent_for_levels(levels_subset, exp_range, param_name, initial_points=None):
         if not levels_subset:
             logger.info(f"No levels for {param_name}. Skipping optimization, returning range midpoint.")
             return (exp_range[0] + exp_range[1]) / 2, 0.0
@@ -518,8 +517,15 @@ def main():
         history = []
         scores = {}
         
-        # Initial 3 points
-        points = [lo, (lo + hi) / 2, hi]
+        
+        # Initial points
+        if initial_points:
+             points = initial_points
+             # Ensure points are within range and distinct
+             points = [max(lo, min(hi, x)) for x in points]
+             points = sorted(list(set(points)))
+        else:
+             points = [lo, (lo + hi) / 2, hi]
 
         for x in points:
             scores[x] = eval_exp(x)
