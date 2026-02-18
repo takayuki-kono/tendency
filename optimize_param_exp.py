@@ -382,9 +382,7 @@ def main():
                 'initial_lr': initial_lr, 'base_ratio': base_ratio
             }, f, indent=4)
 
-    if not levels_high and not levels_low:
-        logger.error("No valid levels.")
-        return
+
 
     def optimize_exponent_for_levels(levels_subset, exp_range, param_name, initial_points=None):
         if not levels_subset:
