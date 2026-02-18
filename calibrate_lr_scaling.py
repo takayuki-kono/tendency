@@ -227,13 +227,94 @@ def calibrate_lr_for_target(initial_lr, target_epoch=10, model_name='EfficientNe
     return chosen_lr, chosen_score, chosen_epoch
 
 
+def optimize_lr_range(initial_lr, model_name, cal_epochs):
+    """
+    Epoch 11 と Epoch 20 に収束するLRを特定し、その範囲内でScore最大化探索を行う
+    """
+    logger.info("Starting Range Optimization (Epoch 11 vs 20)...")
+    
+    # 1. Find LR for Epoch 11 (Previously 10, now 11 per user request)
+    logger.info(">>> Finding LR for BestEpoch=11...")
+    lr_11, score_11, epoch_11 = calibrate_lr_for_target(
+        initial_lr, target_epoch=11, model_name=model_name, 
+        cal_epochs=cal_epochs, max_iter=5, strict_target=True
+    )
+    logger.info(f"Found LR for Epoch 11: {lr_11:.8f} (Score={score_11:.4f}, Epoch={epoch_11})")
+    
+    # 2. Find LR for Epoch 20
+    # Search from a lower point (e.g. 0.2x of lr_11) to start from "slow learning" side
+    logger.info(">>> Finding LR for BestEpoch=20...")
+    lr_20_init = lr_11 * 0.2
+    lr_20, score_20, epoch_20 = calibrate_lr_for_target(
+        lr_20_init, target_epoch=20, model_name=model_name, 
+        cal_epochs=cal_epochs, max_iter=5, strict_target=True
+    )
+    logger.info(f"Found LR for Epoch 20: {lr_20:.8f} (Score={score_20:.4f}, Epoch={epoch_20})")
+    
+    # 3. Binary Search for Max Score in Range [lr_20, lr_11]
+    low = min(lr_11, lr_20)
+    high = max(lr_11, lr_20)
+    
+    logger.info(f">>> Binary Search in Range [{low:.8f}, {high:.8f}]...")
+    
+    best_lr = lr_11 if score_11 > score_20 else lr_20
+    best_score = max(score_11, score_20)
+    best_epoch = epoch_11 if score_11 > score_20 else epoch_20
+    
+    # Cache scores
+    scores = {lr_11: (score_11, epoch_11), lr_20: (score_20, epoch_20)}
+    
+    # 3 iterations of binary search refinement
+    for i in range(3): 
+        mid = (low + high) / 2
+        
+        logger.info(f"  [Range Search #{i+1}] Testing Mid LR: {mid:.8f}")
+        if mid in scores:
+            s, e = scores[mid]
+        else:
+            s, e = run_training_trial(mid, model_name, cal_epochs)
+            scores[mid] = (s, e)
+            
+        if s > best_score:
+            best_score = s
+            best_lr = mid
+            best_epoch = e
+            logger.info(f"    New Best! Score={best_score:.4f}")
+        elif abs(s - best_score) < 1e-6:
+             logger.info(f"    Tied Best! Score={best_score:.4f} (Checking between tied points)")
+            
+        # Decision Logic:
+        # Ensure we keep the best point and search its neighborhood.
+        # If tied, we favor the side that has the tied best.
+        
+        s_low = scores.get(low, (0,0))[0]
+        s_high = scores.get(high, (0,0))[0]
+        
+        # If mid became the new best (or tied), we want to narrow around it.
+        # Strict inequality handles "if same, search between" naturally:
+        # If s_low == s_high (both lower than mid?), rare.
+        # If s_low == s_high (both equal to mid?), search left/right?
+        
+        # Priority: Keep the interval containing the HIGHEST scores.
+        if s_low >= s_high:
+            # Low side is better. Peak is likely in [low, mid].
+            high = mid
+        else:
+            # High side is better. Peak is likely in [mid, high].
+            low = mid
+            
+    logger.info(f"Optimization Result: Best LR={best_lr:.8f} (Score={best_score:.4f}, Epoch={best_epoch})")
+    return best_lr, best_score, best_epoch
+
+
 def main():
     logger.info("=" * 60)
-    logger.info("LR Scaling Exponent Calibration (Two-Stage)")
+    logger.info("LR Scaling Exponent Calibration (Range Search: Epoch 10-20)")
     logger.info("=" * 60)
 
     model_name = 'EfficientNetV2B0'
-    target_epoch = 10
+    # target_epochは参照用
+    target_epoch = 10 
     cal_epochs = 20
     
     # ユーザー指定の探索範囲
@@ -242,7 +323,7 @@ def main():
     threshold = 0.5
 
     # --- Step 1: ベースライン（フィルタなし）---
-    logger.info("\n>>> Step 1: Baseline (no filter, calibrate to epoch 10) <<<")
+    logger.info("\n>>> Step 1: Baseline (no filter, optimize LR in Epoch 10-20 range) <<<")
     best_params = load_best_train_params()
     initial_lr = best_params.get('learning_rate', 0.0001)
     
@@ -275,17 +356,9 @@ def main():
                 abs(cached_initial_lr - float(initial_lr)) <= max(1e-12, abs(float(initial_lr)) * 1e-6)
             )
             
-            if base_epoch == target_epoch and initial_lr_match:
-                # base_ratioが1.0の場合（古いキャッシュ等）、念のため再計測して正しい値にする
-                if abs(base_ratio - 1.0) < 1e-6:
-                    logger.info("Base ratio is 1.0 in cache. Re-calculating actual base ratio...")
-                    total_base, saved_base = run_preprocess(0)
-                    real_base_ratio = saved_base / total_base if total_base > 0 else 1.0
-                    if abs(real_base_ratio - 1.0) > 1e-4:
-                        base_ratio = real_base_ratio
-                        logger.info(f"Updated Base Ratio: {base_ratio:.4f}")
-
-                logger.info(f"Cache Hit! LR={base_lr:.8f}, Ratio={base_ratio:.4f}")
+            # キャッシュ利用条件: initial_lr情報が一致する場合 (ScoreベースなのでEpoch一致は問わない)
+            if initial_lr_match:
+                logger.info(f"Cache Hit! LR={base_lr:.8f}, Ratio={base_ratio:.4f}, Score={base_score:.4f}")
             else:
                 logger.warning("Cache ignored (mismatch).")
                 base_lr = None
@@ -297,20 +370,18 @@ def main():
         total_base, saved_base = run_preprocess(0)
         base_ratio = saved_base / total_base if total_base > 0 else 1.0
         
-        base_lr, base_score, base_epoch = calibrate_lr_for_target(
-            initial_lr, target_epoch, model_name, cal_epochs, max_iter=12, strict_target=True
+        # Optimize LR for Range (Replacing optimize_lr_score)
+        base_lr, base_score, base_epoch = optimize_lr_range(
+            initial_lr, model_name, cal_epochs
         )
-        logger.info(f"Baseline: LR={base_lr:.8f}, Score={base_score:.4f}, Ratio={base_ratio:.4f}")
+        
+        logger.info(f"Baseline Selected: LR={base_lr:.8f}, Score={base_score:.4f}, Ratio={base_ratio:.4f}")
         os.makedirs(os.path.dirname(cal_cache_file), exist_ok=True)
         with open(cal_cache_file, 'w', encoding='utf-8') as f:
             json.dump({
                 'lr': base_lr, 'score': base_score, 'best_epoch': base_epoch, 
                 'initial_lr': initial_lr, 'base_ratio': base_ratio
             }, f, indent=4)
-
-    if base_epoch != target_epoch:
-        logger.error(f"Baseline did not converge to epoch {target_epoch}. Aborting.")
-        return
 
     # --- Step 2: フィルタレベル準備 & 分類 ---
     logger.info("\n>>> Step 2: Prepare filter levels & Split by threshold <<<")
@@ -375,21 +446,20 @@ def main():
                     adjusted_lr, target_epoch, model_name, cal_epochs, max_iter=1,
                     distance_exponent=0.5 # Dummy, unused since we take ret val
                 )
-                # 評価スコア: ユーザー指定の数式
-                # abs(21 - best_score * 30) + epoch_distance
-                # 低いほど良い評価
-                distance = abs(epoch - target_epoch)
-                metric = abs(21.0 - score * 30.0) + float(distance)
+                # 評価スコア: 単純にScoreを使用 (2026-02-18 User Request)
+                # 高いほど良い
+                metric = score
                 
-                # 最大化問題として扱うため、マイナスを返す
-                response_val = -metric
+                # 最大化問題として扱うため、そのまま返す
+                response_val = metric
                 
                 total_weighted += response_val
                 total_raw += score
-                logger.info(f"    -> Score={score:.4f}, Epoch={epoch}, Dist={distance}, Metric={metric:.4f}")
+                distance = abs(epoch - target_epoch)
+                logger.info(f"    -> Score={score:.4f}, Epoch={epoch}, Dist={distance}, Metric(Score)={metric:.4f}")
             
             avg_response = total_weighted / len(levels_subset)
-            logger.info(f"  {param_name}={exp_val:.4f} -> AvgMetric={-avg_response:.4f} (negated)")
+            logger.info(f"  {param_name}={exp_val:.4f} -> AvgScore={avg_response:.4f}")
             
             eval_cache[param_key] = avg_response
             return avg_response
