@@ -439,11 +439,12 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
     MinClassAccuracy > 0.5 を達成した次のエポックから減衰を開始する... 
     -> 変更(2026-02-17): 常に最初(Epoch 0)から減衰を開始する仕様に変更。
     """
-    def __init__(self, initial_lr, total_epochs, task_labels, verbose=0):
+    def __init__(self, initial_lr, total_epochs, task_labels, decay_exponent=1.0, verbose=0):
         super(ConditionalLearningRateScheduler, self).__init__()
         self.initial_lr = initial_lr
         self.total_epochs = total_epochs
         self.task_labels = task_labels # For metric name resolution
+        self.decay_exponent = decay_exponent
         self.verbose = verbose
         self.decay_start_epoch = 0 # 常に0から開始
         self.metric_history = []
@@ -464,9 +465,10 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
              progress = current_step / remaining_epochs
              progress = min(1.0, max(0.0, progress))
              
-             min_lr = self.initial_lr * 0.01
-             # Power Decay: 1 - (progress ** 0.75)
-             decay = 1.0 - (progress ** 0.75)
+             min_lr = self.initial_lr * 0.2
+             # Polynomial Decay: (1 - progress) ^ exponent
+             linear_decay = 1.0 - progress
+             decay = linear_decay ** self.decay_exponent
              lr = min_lr + (self.initial_lr - min_lr) * decay
         
         # Set LR
@@ -529,6 +531,7 @@ def main():
     # 0 = 無効（--learning_rate をそのまま使用）、>0 = target epoch
     parser.add_argument('--auto_lr_target_epoch', type=int, default=0)
     parser.add_argument('--enable_early_stopping', type=str, default='True')
+    parser.add_argument('--decay_exponent', type=float, default=1.0) # Decay curve exponent (1.0=Linear, 0.5=Sqrt, 2.0=Poly)
 
     args = parser.parse_args()
     
@@ -679,7 +682,7 @@ def main():
                     parts.append(f"Loss={val_loss:.4f}")
                 logger.info(" | ".join(parts))
 
-        scheduler = ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, verbose=1)
+        scheduler = ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, decay_exponent=args.decay_exponent, verbose=1)
         
         callbacks_list = [
             scheduler,

@@ -127,7 +127,7 @@
 - **学習率スケジュール**: Linear Decay (常に有効)
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
     - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
-    - **最低LR**: `initial_lr × 0.01` (ゼロにはしない)。
+    - **最低LR**: `initial_lr × 0.2` (ゼロにはしない)。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
