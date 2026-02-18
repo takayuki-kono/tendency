@@ -229,40 +229,40 @@ def calibrate_lr_for_target(initial_lr, target_epoch=10, model_name='EfficientNe
 
 def optimize_lr_range(initial_lr, model_name, cal_epochs):
     """
-    Epoch 11 と Epoch 20 に収束するLRを特定し、その範囲内でScore最大化探索を行う
+    Epoch 10 と Epoch 15 に収束するLRを特定し、その範囲内でScore最大化探索を行う
     """
-    logger.info("Starting Range Optimization (Epoch 11 vs 20)...")
+    logger.info("Starting Range Optimization (Epoch 10 vs 15)...")
     
-    # 1. Find LR for Epoch 11 (Previously 10, now 11 per user request)
-    logger.info(">>> Finding LR for BestEpoch=11...")
-    lr_11, score_11, epoch_11 = calibrate_lr_for_target(
-        initial_lr, target_epoch=11, model_name=model_name, 
+    # 1. Find LR for Epoch 10
+    logger.info(">>> Finding LR for BestEpoch=10...")
+    lr_10, score_10, epoch_10 = calibrate_lr_for_target(
+        initial_lr, target_epoch=10, model_name=model_name, 
         cal_epochs=cal_epochs, max_iter=5, strict_target=True
     )
-    logger.info(f"Found LR for Epoch 11: {lr_11:.8f} (Score={score_11:.4f}, Epoch={epoch_11})")
+    logger.info(f"Found LR for Epoch 10: {lr_10:.8f} (Score={score_10:.4f}, Epoch={epoch_10})")
     
-    # 2. Find LR for Epoch 20
-    # Search from a lower point (e.g. 0.2x of lr_11) to start from "slow learning" side
-    logger.info(">>> Finding LR for BestEpoch=20...")
-    lr_20_init = lr_11 * 0.2
-    lr_20, score_20, epoch_20 = calibrate_lr_for_target(
-        lr_20_init, target_epoch=20, model_name=model_name, 
+    # 2. Find LR for Epoch 15
+    # Search from a lower point (e.g. 0.5x of lr_10) to start from "slow learning" side
+    logger.info(">>> Finding LR for BestEpoch=15...")
+    lr_15_init = lr_10 * 0.5
+    lr_15, score_15, epoch_15 = calibrate_lr_for_target(
+        lr_15_init, target_epoch=15, model_name=model_name, 
         cal_epochs=cal_epochs, max_iter=5, strict_target=True
     )
-    logger.info(f"Found LR for Epoch 20: {lr_20:.8f} (Score={score_20:.4f}, Epoch={epoch_20})")
+    logger.info(f"Found LR for Epoch 15: {lr_15:.8f} (Score={score_15:.4f}, Epoch={epoch_15})")
     
-    # 3. Binary Search for Max Score in Range [lr_20, lr_11]
-    low = min(lr_11, lr_20)
-    high = max(lr_11, lr_20)
+    # 3. Binary Search for Max Score in Range [lr_15, lr_10]
+    low = min(lr_10, lr_15)
+    high = max(lr_10, lr_15)
     
     logger.info(f">>> Binary Search in Range [{low:.8f}, {high:.8f}]...")
     
-    best_lr = lr_11 if score_11 > score_20 else lr_20
-    best_score = max(score_11, score_20)
-    best_epoch = epoch_11 if score_11 > score_20 else epoch_20
+    best_lr = lr_10 if score_10 > score_15 else lr_15
+    best_score = max(score_10, score_15)
+    best_epoch = epoch_10 if score_10 > score_15 else epoch_15
     
     # Cache scores
-    scores = {lr_11: (score_11, epoch_11), lr_20: (score_20, epoch_20)}
+    scores = {lr_10: (score_10, epoch_10), lr_15: (score_15, epoch_15)}
     
     # 3 iterations of binary search refinement
     for i in range(3): 
@@ -309,7 +309,7 @@ def optimize_lr_range(initial_lr, model_name, cal_epochs):
 
 def main():
     logger.info("=" * 60)
-    logger.info("LR Scaling Exponent Calibration (Range Search: Epoch 10-20)")
+    logger.info("LR Scaling Exponent Calibration (Range Search: Epoch 10-15)")
     logger.info("=" * 60)
 
     model_name = 'EfficientNetV2B0'
@@ -323,7 +323,7 @@ def main():
     threshold = 0.5
 
     # --- Step 1: ベースライン（フィルタなし）---
-    logger.info("\n>>> Step 1: Baseline (no filter, optimize LR in Epoch 10-20 range) <<<")
+    logger.info("\n>>> Step 1: Baseline (no filter, optimize LR in Epoch 10-15 range) <<<")
     best_params = load_best_train_params()
     initial_lr = best_params.get('learning_rate', 0.0001)
     
