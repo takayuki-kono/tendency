@@ -35,6 +35,7 @@ LR_LOW_RATIO_THRESHOLD = 0.5
 LR_SCALING_EXP1 = 0.65 # Default
 LR_SCALING_EXP2 = 1.25 # Default
 BASE_RATIO = 1.0 # Default
+LR_INDIVIDUAL_EXPONENTS = {} # Parameter specific exponents
 
 # パスが存在しない場合はデフォルトを使用
 if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
@@ -227,7 +228,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     return current_lr, score
 
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='EfficientNetV2B0'):
+def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='EfficientNetV2B0', active_param_name=None):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
     
@@ -332,10 +333,55 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
-            # Fixed Exponent Logic (2026-02-17)
-            # y = 1.0 (Linear Scaling)
+            # Fixed Exponent Logic (2026-02-17) -> Dynamic (2026-02-18)
+            # Use parameter specific exponent if available
+            exponent = LR_SCALING_EXP1 if ratio >= LR_LOW_RATIO_THRESHOLD else LR_SCALING_EXP2
+            
+            if active_param_name:
+                # Map script param names to config param names (e.g. 'y_diff' -> 'y_diff_percentile')
+                # Config keys usually have '_percentile' suffix or similar?
+                # calibrate_lr_scaling.py keys: 'y_diff_percentile', etc.
+                # optimize_sequential param names: 'y_diff', 'pitch', etc.
+                
+                # Try simple mapping
+                config_key = active_param_name
+                if not config_key.endswith('_percentile') and not config_key.endswith('_low') and not config_key.endswith('_high'):
+                     config_key += '_percentile'
+                
+                # Handle special cases if names don't match perfectly
+                # optimize: eb_eye_high -> config: eyebrow_eye_percentile_high?
+                # optimize: sharpness_low -> config: sharpness_percentile_low
+                
+                # Check direct match first
+                if config_key in LR_INDIVIDUAL_EXPONENTS:
+                    p_exps = LR_INDIVIDUAL_EXPONENTS[config_key]
+                    exponent = p_exps['exp1'] if ratio >= LR_LOW_RATIO_THRESHOLD else p_exps['exp2']
+                    logger.info(f"Using Per-Parameter Exponent for {active_param_name} ({config_key}): {exponent:.4f}")
+                else:
+                    # Fallback mapping
+                    mapping = {
+                        'y_diff': 'y_diff_percentile',
+                        'sym': 'symmetry_percentile',
+                        'pitch': 'pitch_percentile',
+                        'sharpness_low': 'sharpness_percentile_low',
+                        'sharpness_high': 'sharpness_percentile_high',
+                        'eb_eye_high': 'eyebrow_eye_percentile_high',
+                        'eb_eye_low': 'eyebrow_eye_percentile_low',
+                        'face_size_low': 'face_size_percentile_low',
+                        'face_size_high': 'face_size_percentile_high',
+                        'mouth_open': 'mouth_open_percentile',
+                        'retouching': 'retouching_percentile',
+                        'mask': 'mask_percentile',
+                        'glasses': 'glasses_percentile'
+                    }
+                    mapped_key = mapping.get(active_param_name, active_param_name)
+                    if mapped_key in LR_INDIVIDUAL_EXPONENTS:
+                        p_exps = LR_INDIVIDUAL_EXPONENTS[mapped_key]
+                        exponent = p_exps['exp1'] if ratio >= LR_LOW_RATIO_THRESHOLD else p_exps['exp2']
+                        logger.info(f"Using Per-Parameter Exponent for {active_param_name} (mapped to {mapped_key}): {exponent:.4f}")
+            
+            # y = 1.0 (Linear Scaling) -> Updated
             x = relative_ratio
-            exponent = 1.0
             
             # adjusted_lr = base_lr * (ratio ** exp)
             scale_factor = relative_ratio ** exponent
@@ -448,7 +494,8 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
             test_params['sharpness_low'], test_params['sharpness_high'],
             test_params['face_size_low'], test_params['face_size_high'],
             test_params['retouching'], test_params['mask'], test_params['glasses'],
-            model_name=model_name
+            model_name=model_name,
+            active_param_name=target_name
         )
         return result  # (raw_score, total_images, filtered_count)
 
@@ -576,7 +623,7 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     return candidates
 
 def main():
-    global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO
+    global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
     logger.info("Starting Sequential Optimization (Efficiency-Based)")
 
     # LRスケーリング設定（calibrate_lr_scaling.py の結果）を読み込む
@@ -604,6 +651,10 @@ def main():
                 LR_SCALING_EXP1 = float(lr_config['exp1'])
             if 'exp2' in lr_config:
                 LR_SCALING_EXP2 = float(lr_config['exp2'])
+                
+            if 'individual_exponents' in lr_config:
+                LR_INDIVIDUAL_EXPONENTS = lr_config['individual_exponents']
+                logger.info(f"Loaded {len(LR_INDIVIDUAL_EXPONENTS)} individual exponents.")
             
             logger.info(
                 f"Loaded LR scaling config: threshold={LR_LOW_RATIO_THRESHOLD:.2f}, "

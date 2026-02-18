@@ -63,15 +63,15 @@ def load_best_train_params():
     return {}
 
 
-def run_preprocess(filter_percentile):
+def run_preprocess(filter_percentile, param_name="y_diff_percentile"):
     """
-    単一パラメータ(y_diff)でフィルタリングを適用して前処理を実行する。
+    指定パラメータでフィルタリングを適用して前処理を実行する。
     """
     cmd = [
         PYTHON_PREPROCESS,
         "preprocess_multitask.py",
         "--out_dir", "preprocessed_multitask",
-        "--y_diff_percentile", str(filter_percentile),
+        f"--{param_name}", str(filter_percentile),
     ]
 
     logger.info(f"Running preprocessing (y_diff_filter={filter_percentile}%)...")
@@ -383,23 +383,64 @@ def main():
                 'initial_lr': initial_lr, 'base_ratio': base_ratio
             }, f, indent=4)
 
-    # --- Step 2: フィルタレベル準備 & 分類 ---
-    logger.info("\n>>> Step 2: Prepare filter levels & Split by threshold <<<")
-    filter_percentiles = [5, 25, 50, 75] # Updated: 5%, 25%, 50%, 75% for calibration
-    levels_high = [] # ratio >= threshold
-    levels_low = []  # ratio < threshold
+    # --- Step 2: 各パラメータごとのレベル準備 & 最適Exp探索 ---
+    logger.info("\n>>> Step 2: Per-Parameter Exponent Calibration <<<")
     
-    for pct in filter_percentiles:
-        total, saved = run_preprocess(pct)
-        if total > 0 and saved > 0:
-            ratio = saved / total
-            item = {'pct': pct, 'ratio': ratio}
-            if ratio >= threshold:
-                levels_high.append(item)
+    target_params = [
+        'y_diff_percentile', 
+        'symmetry_percentile', 
+        'sharpness_percentile_low',
+        'pitch_percentile'
+    ]
+    
+    # フィルタ強度 (Percentiles)
+    filter_percentiles = [5, 25, 50, 75] 
+
+    param_results = {} # param -> { 'exp1': val, 'exp2': val, 'levels': [...] }
+    all_high_exps = []
+    all_low_exps = []
+
+    for param_name in target_params:
+        logger.info(f"\n--- Calibrating Parameter: {param_name} ---")
+        
+        levels_high = []
+        levels_low = []
+        
+        for pct in filter_percentiles:
+            total, saved = run_preprocess(pct, param_name=param_name)
+            if total > 0 and saved > 0:
+                ratio = saved / total
+                item = {'pct': pct, 'ratio': ratio, 'param': param_name}
+                if ratio >= threshold:
+                    levels_high.append(item)
+                else:
+                    levels_low.append(item)
             else:
-                levels_low.append(item)
-        else:
-            logger.warning(f"Filter {pct}% produced no data.")
+                logger.warning(f"Filter {param_name}={pct}% produced no data.")
+        
+        if not levels_high and not levels_low:
+            logger.warning(f"No valid levels for {param_name}. Skipping.")
+            continue
+            
+        # Optimize for this parameter
+        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)")
+        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)")
+        
+        param_results[param_name] = {'exp1': p_exp1, 'exp2': p_exp2}
+        
+        if levels_high: all_high_exps.append(p_exp1)
+        if levels_low: all_low_exps.append(p_exp2)
+
+    # --- Step 3: グローバル設定 (平均) ---
+    if all_high_exps:
+        best_exp1 = sum(all_high_exps) / len(all_high_exps)
+    else:
+        best_exp1 = (range_exp1[0] + range_exp1[1]) / 2
+        
+    if all_low_exps:
+        best_exp2 = sum(all_low_exps) / len(all_low_exps)
+    else:
+        best_exp2 = (range_exp2[0] + range_exp2[1]) / 2
 
     logger.info(f"Threshold: {threshold}")
     logger.info(f"High Ratio Levels (Use exp1): {[l['pct'] for l in levels_high]}")
@@ -430,8 +471,8 @@ def main():
             total_weighted = 0.0
             total_raw = 0.0
             for l in levels_subset:
-                pct, ratio = l['pct'], l['ratio']
-                run_preprocess(pct)
+                pct, ratio, p_name = l['pct'], l['ratio'], l.get('param', 'unknown')
+                run_preprocess(pct, param_name=p_name)
                 # scale_lr_by_ratioを使わず直接計算 (exp1/exp2が混在しないため単純化)
                 # ratioは相対値 (ratio / base_ratio) を使う
                 relative_ratio = ratio / base_ratio if base_ratio > 0 else ratio
@@ -536,9 +577,8 @@ def main():
             logger.info(f"===> Best Exp for Level {pct}% (Ratio={target_level['ratio']:.4f}): {best_e:.4f} (Score={best_s:.4f})")
 
     # --- Step 4: グループ最適化実行 (本番設定用) ---
-    logger.info("\n>>> Step 4: Group Optimization (High/Low) for Config <<<")
-    best_exp1, score1 = optimize_exponent_for_levels(levels_high, range_exp1, "exp1 (High Ratio)")
-    best_exp2, score2 = optimize_exponent_for_levels(levels_low, range_exp2, "exp2 (Low Ratio)")
+    logger.info("\n>>> Step 4: Finalizing Config <<<")
+    # best_exp1/2 are already calculated as averages above
 
     # --- Step 5: 保存 ---
     logger.info("\n" + "=" * 60)
@@ -546,9 +586,9 @@ def main():
     logger.info(f"Best Exp1 (High Ratio >= {threshold}): {best_exp1:.4f}")
     logger.info(f"Best Exp2 (Low Ratio < {threshold}) : {best_exp2:.4f}")
     
-    logger.info("Individual Results:")
-    for p, e in individual_results.items():
-        logger.info(f"  Level {p}%: {e:.4f}")
+    logger.info("Per-Parameter Results:")
+    for p, res in param_results.items():
+        logger.info(f"  {p}: Exp1={res['exp1']:.4f}, Exp2={res['exp2']:.4f}")
         
     logger.info("=" * 60)
 
@@ -556,7 +596,7 @@ def main():
         'exp1': best_exp1,
         'exp2': best_exp2,
         'threshold': threshold,
-        'individual_exponents': individual_results, # Added
+        'individual_exponents': param_results, # Changed to param-specific dict
         'base_lr': base_lr,
         'search_range_exp1': range_exp1,
         'search_range_exp2': range_exp2,
