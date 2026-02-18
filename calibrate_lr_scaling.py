@@ -382,69 +382,6 @@ def main():
                 'initial_lr': initial_lr, 'base_ratio': base_ratio
             }, f, indent=4)
 
-    # --- Step 2: 各パラメータごとのレベル準備 & 最適Exp探索 ---
-    logger.info("\n>>> Step 2: Per-Parameter Exponent Calibration <<<")
-    
-    target_params = [
-        'y_diff_percentile', 
-        'symmetry_percentile', 
-        'sharpness_percentile_low',
-        'pitch_percentile'
-    ]
-    
-    # フィルタ強度 (Percentiles)
-    filter_percentiles = [5, 25, 50, 75] 
-
-    param_results = {} # param -> { 'exp1': val, 'exp2': val, 'levels': [...] }
-    all_high_exps = []
-    all_low_exps = []
-
-    for param_name in target_params:
-        logger.info(f"\n--- Calibrating Parameter: {param_name} ---")
-        
-        levels_high = []
-        levels_low = []
-        
-        for pct in filter_percentiles:
-            total, saved = run_preprocess(pct, param_name=param_name)
-            if total > 0 and saved > 0:
-                ratio = saved / total
-                item = {'pct': pct, 'ratio': ratio, 'param': param_name}
-                if ratio >= threshold:
-                    levels_high.append(item)
-                else:
-                    levels_low.append(item)
-            else:
-                logger.warning(f"Filter {param_name}={pct}% produced no data.")
-        
-        if not levels_high and not levels_low:
-            logger.warning(f"No valid levels for {param_name}. Skipping.")
-            continue
-            
-        # Optimize for this parameter
-        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)", initial_points=[0.3, 1.0, 1.5])
-        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)", initial_points=[0.3, 1.0, 1.5])
-        
-        param_results[param_name] = {'exp1': p_exp1, 'exp2': p_exp2}
-        
-        if levels_high: all_high_exps.append(p_exp1)
-        if levels_low: all_low_exps.append(p_exp2)
-
-    # --- Step 3: グローバル設定 (平均) ---
-    if all_high_exps:
-        best_exp1 = sum(all_high_exps) / len(all_high_exps)
-    else:
-        best_exp1 = (range_exp1[0] + range_exp1[1]) / 2
-        
-    if all_low_exps:
-        best_exp2 = sum(all_low_exps) / len(all_low_exps)
-    else:
-        best_exp2 = (range_exp2[0] + range_exp2[1]) / 2
-
-    logger.info(f"Threshold: {threshold}")
-    logger.info(f"High Ratio Levels (Use exp1): {[l['pct'] for l in levels_high]}")
-    logger.info(f"Low Ratio Levels (Use exp2): {[l['pct'] for l in levels_low]}")
-    
     if not levels_high and not levels_low:
         logger.error("No valid levels.")
         return
@@ -563,6 +500,75 @@ def main():
         best_x, best_s = max(scores.items(), key=lambda item: item[1])
         logger.info(f"Best {param_name}: {best_x:.4f} (Score={best_s:.4f})")
         return best_x, best_s
+
+    # --- Step 2: 各パラメータごとのレベル準備 & 最適Exp探索 ---
+    logger.info("\n>>> Step 2: Per-Parameter Exponent Calibration <<<")
+    
+    target_params = [
+        'y_diff_percentile', 
+        'symmetry_percentile', 
+        'sharpness_percentile_low',
+        'pitch_percentile'
+    ]
+    
+    # フィルタ強度 (Percentiles)
+    filter_percentiles = [5, 25, 50, 75] 
+
+    param_results = {} # param -> { 'exp1': val, 'exp2': val, 'levels': [...] }
+    all_high_exps = []
+    all_low_exps = []
+
+    for param_name in target_params:
+        logger.info(f"\n--- Calibrating Parameter: {param_name} ---")
+        
+        levels_high = []
+        levels_low = []
+        
+        for pct in filter_percentiles:
+            total, saved = run_preprocess(pct, param_name=param_name)
+            if total > 0 and saved > 0:
+                ratio = saved / total
+                item = {'pct': pct, 'ratio': ratio, 'param': param_name}
+                if ratio >= threshold:
+                    levels_high.append(item)
+                else:
+                    levels_low.append(item)
+            else:
+                logger.warning(f"Filter {param_name}={pct}% produced no data.")
+        
+        if not levels_high and not levels_low:
+            logger.warning(f"No valid levels for {param_name}. Skipping.")
+            continue
+            
+        # Optimize for this parameter
+        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)", initial_points=[0.3, 1.0, 1.5])
+        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)", initial_points=[0.3, 1.0, 1.5])
+        
+        param_results[param_name] = {'exp1': p_exp1, 'exp2': p_exp2}
+        
+        if levels_high: all_high_exps.append(p_exp1)
+        if levels_low: all_low_exps.append(p_exp2)
+
+    # --- Step 3: グローバル設定 (平均) ---
+    if all_high_exps:
+        best_exp1 = sum(all_high_exps) / len(all_high_exps)
+    else:
+        best_exp1 = (range_exp1[0] + range_exp1[1]) / 2
+        
+    if all_low_exps:
+        best_exp2 = sum(all_low_exps) / len(all_low_exps)
+    else:
+        best_exp2 = (range_exp2[0] + range_exp2[1]) / 2
+
+    logger.info(f"Threshold: {threshold}")
+    logger.info(f"High Ratio Levels (Use exp1): {[l['pct'] for l in levels_high]}")
+    logger.info(f"Low Ratio Levels (Use exp2): {[l['pct'] for l in levels_low]}")
+    
+    if not levels_high and not levels_low:
+        logger.error("No valid levels.")
+        return
+
+
     # --- Step 3: 個別レベルでの最適Exp探索 (分析用) ---
     logger.info("\n>>> Step 3: Individual Exponent Optimization for each level <<<")
     individual_results = {}
