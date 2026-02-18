@@ -626,7 +626,7 @@ def main():
     global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
     logger.info("Starting Sequential Optimization (Efficiency-Based)")
 
-    # LRスケーリング設定（calibrate_lr_scaling.py の結果）を読み込む
+    # LRスケーリング設定（optimize_param_exp.py の結果）を読み込む
     cal_score = 0.0
     LR_SCALING_CONFIG_FILE = "outputs/cache/calibrated_lr.json"
     cal_score = 0.0
