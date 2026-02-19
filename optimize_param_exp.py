@@ -503,10 +503,19 @@ def main():
     logger.info("\n>>> Step 2: Per-Parameter Exponent Calibration <<<")
     
     target_params = [
-        'y_diff_percentile', 
-        'symmetry_percentile', 
+        'pitch_percentile',
+        'symmetry_percentile',
+        'y_diff_percentile',
+        'mouth_open_percentile',
+        'eyebrow_eye_percentile_high',
+        'eyebrow_eye_percentile_low',
         'sharpness_percentile_low',
-        'pitch_percentile'
+        'sharpness_percentile_high',
+        'face_size_percentile_low',
+        'face_size_percentile_high',
+        'retouching_percentile',
+        'mask_percentile',
+        'glasses_percentile'
     ]
     
     # フィルタ強度 (Percentiles)
@@ -558,33 +567,10 @@ def main():
     else:
         best_exp2 = (range_exp2[0] + range_exp2[1]) / 2
 
-    logger.info(f"Threshold: {threshold}")
-    logger.info(f"High Ratio Levels (Use exp1): {[l['pct'] for l in levels_high]}")
-    logger.info(f"Low Ratio Levels (Use exp2): {[l['pct'] for l in levels_low]}")
-    
-    if not levels_high and not levels_low:
-        logger.error("No valid levels.")
-        return
 
 
-    # --- Step 3: 個別レベルでの最適Exp探索 (分析用) ---
-    logger.info("\n>>> Step 3: Individual Exponent Optimization for each level <<<")
-    individual_results = {}
-    for pct in filter_percentiles:
-        # Find the level object
-        target_level = None
-        for l in levels_high + levels_low:
-            if l['pct'] == pct:
-                target_level = l
-                break
-        
-        if target_level:
-            # Determine range based on threshold logic (just for initial guess/range)
-            search_range = range_exp1 if target_level['ratio'] >= threshold else range_exp2
-            # Optimize for single level
-            best_e, best_s = optimize_exponent_for_levels([target_level], search_range, f"Exp(Level {pct}%)")
-            individual_results[pct] = best_e
-            logger.info(f"===> Best Exp for Level {pct}% (Ratio={target_level['ratio']:.4f}): {best_e:.4f} (Score={best_s:.4f})")
+
+
 
     # --- Step 4: グループ最適化実行 (本番設定用) ---
     logger.info("\n>>> Step 4: Finalizing Config <<<")
