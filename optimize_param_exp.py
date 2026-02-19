@@ -389,8 +389,25 @@ def main():
             logger.info(f"No levels for {param_name}. Skipping optimization, returning range midpoint.")
             return (exp_range[0] + exp_range[1]) / 2, 0.0
 
-        logger.info(f"\n--- Optimizing {param_name} for levels: {[l['pct'] for l in levels_subset]} ---")
-        logger.info(f"Search Range: {exp_range}")
+        if len(levels_subset) > 1:
+            # Prioritize 50% level as requested
+            target_50 = next((l for l in levels_subset if l['pct'] == 50), None)
+            
+            if target_50:
+                selected_level = target_50
+                logger.info(f"Selecting requested 50% percentile level: {selected_level['pct']}% (Ratio={selected_level['ratio']:.4f})")
+            else:
+                # Sort by ratio ascending (lowest ratio first) -> Most critical
+                levels_subset.sort(key=lambda x: x['ratio'])
+                selected_level = levels_subset[0]
+                logger.info(f"50% level not found. Selecting lowest ratio level: {selected_level['pct']}% (Ratio={selected_level['ratio']:.4f})")
+            
+            levels_subset = [selected_level]
+            
+        logger.info(f"\n--- Optimizing {param_name} for level: {[l['pct'] for l in levels_subset]} ---")
+        # Fixed Points Search (user request: 0.25, 0.5, 0.75, 1.0)
+        search_points = [0.25, 0.5, 0.75, 1.0]
+        logger.info(f"Fixed Search Points: {search_points}")
 
         # 評価結果のキャッシュ
         eval_cache = {}
@@ -439,62 +456,15 @@ def main():
             eval_cache[param_key] = avg_response
             return avg_response
 
-        # 二分探索 (3 iterations)
-        lo, hi = exp_range
-        
-        # 特例: 探索範囲が固定点の場合
-        if abs(hi - lo) < 1e-6:
-             logger.info(f"Fixed range detected for {param_name}. Evaluating single point {lo:.4f}.")
-             score = eval_exp(lo)
-             return lo, score
-
-        mid = (lo + hi) / 2
-        history = []
+        # Fixed Point Evaluation (No Binary Search)
         scores = {}
+        history = []
         
-        
-        # Initial points
-        if initial_points:
-             points = initial_points
-             # Ensure points are within range and distinct
-             points = [max(lo, min(hi, x)) for x in points]
-             points = sorted(list(set(points)))
-        else:
-             points = [lo, (lo + hi) / 2, hi]
-
-        for x in points:
+        for x in search_points:
             scores[x] = eval_exp(x)
             history.append((x, scores[x]))
             
-        # Refinement Loop
-        for i in range(3):
-            # Sort by score descending
-            sorted_res = sorted(scores.items(), key=lambda item: -item[1])
-            
-            if len(sorted_res) < 2:
-                break
-                
-            top1_x, top1_s = sorted_res[0]
-            top2_x, top2_s = sorted_res[1]
-            
-            # 1位と2位の間、あるいは勾配方向を探索
-            new_x = (top1_x + top2_x) / 2
-            
-            # Check if new_x is already evaluated (or very close)
-            if any(abs(h[0] - new_x) < 0.001 for h in history):
-                # 詰まったら範囲内の別ポイントを適当に試す (Perturbation)
-                diff = abs(top1_x - top2_x)
-                if diff < 0.001: break # Converged
-                
-                if top1_x > top2_x: new_x = top1_x + diff * 0.5
-                else: new_x = top1_x - diff * 0.5
-                
-            new_x = max(lo, min(hi, new_x))
-
-            logger.info(f"  [Iter {i+1}] Trying {new_x:.4f}...")
-            scores[new_x] = eval_exp(new_x)
-            history.append((new_x, scores[new_x]))
-
+        # Select Best
         best_x, best_s = max(scores.items(), key=lambda item: item[1])
         logger.info(f"Best {param_name}: {best_x:.4f} (Score={best_s:.4f})")
         return best_x, best_s
