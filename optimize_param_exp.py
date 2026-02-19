@@ -317,8 +317,8 @@ def main():
     cal_epochs = 20
     
     # ユーザー指定の探索範囲
-    range_exp1 = (0.3, 1.5)  # High Ratio (>= threshold)
-    range_exp2 = (0.3, 1.5)  # Low Ratio (< threshold)
+    range_exp1 = (0.15, 1.0)  # High Ratio (>= threshold)
+    range_exp2 = (0.15, 1.0)  # Low Ratio (< threshold)
     threshold = 0.5
 
     # --- Step 1: ベースライン（フィルタなし）---
@@ -548,8 +548,8 @@ def main():
             continue
             
         # Optimize for this parameter
-        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)", initial_points=[0.3, 1.0, 1.5])
-        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)", initial_points=[0.3, 1.0, 1.5])
+        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)", initial_points=[0.15, 0.5, 1.0])
+        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)", initial_points=[0.15, 0.5, 1.0])
         
         param_results[param_name] = {'exp1': p_exp1, 'exp2': p_exp2}
         

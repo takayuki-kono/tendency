@@ -55,6 +55,7 @@
 - **目的**: データ数が少ない場合（フィルタで厳しく選別した場合）に適した学習率へ動的に補正する。
 - **計算式** (2026-02-18更新):
   - `exponent`: **パラメータごとに個別最適化** された値を使用（`optimize_param_exp.py` で算出）。
+  - Exp Range: `0.15` ~ `1.0` (Binary Search)
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
   - データ残存率 (`ratio`) が閾値（0.5）以上の場合は `exp1`、未満の場合は `exp2` を適用。
 - **Base LR決定ロジック**:
