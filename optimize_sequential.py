@@ -628,7 +628,7 @@ def main():
 
     # LRスケーリング設定（optimize_param_exp.py の結果）を読み込む
     cal_score = 0.0
-    LR_SCALING_CONFIG_FILE = "outputs/cache/calibrated_lr.json"
+    LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
     cal_score = 0.0
     if os.path.exists(LR_SCALING_CONFIG_FILE):
         try:
