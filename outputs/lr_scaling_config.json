@@ -1,0 +1,71 @@
+{
+    "exp1": 0.46153846153846156,
+    "exp2": 0.46153846153846156,
+    "threshold": 0.5,
+    "individual_exponents": {
+        "pitch_percentile": {
+            "exp1": 0.75,
+            "exp2": 0.75
+        },
+        "symmetry_percentile": {
+            "exp1": 0.5,
+            "exp2": 0.5
+        },
+        "y_diff_percentile": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "mouth_open_percentile": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "eyebrow_eye_percentile_high": {
+            "exp1": 0.75,
+            "exp2": 0.75
+        },
+        "eyebrow_eye_percentile_low": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "sharpness_percentile_low": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "sharpness_percentile_high": {
+            "exp1": 0.75,
+            "exp2": 0.75
+        },
+        "face_size_percentile_low": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "face_size_percentile_high": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "retouching_percentile": {
+            "exp1": 0.5,
+            "exp2": 0.5
+        },
+        "mask_percentile": {
+            "exp1": 0.25,
+            "exp2": 0.25
+        },
+        "glasses_percentile": {
+            "exp1": 1.0,
+            "exp2": 1.0
+        }
+    },
+    "base_lr": 0.00016252524168962833,
+    "search_range_exp1": [
+        0.15,
+        1.0
+    ],
+    "search_range_exp2": [
+        0.15,
+        1.0
+    ],
+    "base_ratio": 0.9331619537275064,
+    "formula": "base_lr * ((ratio/base_ratio) ** exp)",
+    "note": "exp=exp1 if ratio >= threshold else exp2"
+}

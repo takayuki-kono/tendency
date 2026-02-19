@@ -1,0 +1,373 @@
+{
+    "__file_count__": 926,
+    "model=EfficientNetV2S_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57219251,
+        1167,
+        78
+    ],
+    "model=EfficientNetV2S_pitch=2_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.53551913,
+        1167,
+        98
+    ],
+    "model=EfficientNetV2S_pitch=5_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58563536,
+        1167,
+        121
+    ],
+    "model=EfficientNetV2S_pitch=25_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.52857143,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2S_pitch=50_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.34831461,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2S_pitch=0_sym=2_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56521739,
+        1167,
+        94
+    ],
+    "model=EfficientNetV2S_pitch=0_sym=5_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55681819,
+        1167,
+        120
+    ],
+    "model=EfficientNetV2S_pitch=0_sym=25_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.63309354,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58823532,
+        1167,
+        78
+    ],
+    "model=EfficientNetV2B0_pitch=2_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57065219,
+        1167,
+        98
+    ],
+    "model=EfficientNetV2B0_pitch=5_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.60000002,
+        1167,
+        121
+    ],
+    "model=EfficientNetV2B0_pitch=25_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56028369,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=50_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.39325843,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=2_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54644811,
+        1167,
+        94
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=5_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58522727,
+        1167,
+        120
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=25_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.61971831,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=50_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57954545,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=12_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57926829,
+        1167,
+        180
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=2_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56756759,
+        1167,
+        96
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=5_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.59659094,
+        1167,
+        122
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=25_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.60283691,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=50_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.63095238,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=37_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.61904764,
+        1167,
+        432
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=43_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.61864407,
+        1167,
+        502
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=2_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56424582,
+        1167,
+        99
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=5_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56321841,
+        1167,
+        120
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=25_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.52985075,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=50_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55000001,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=1_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58823532,
+        1167,
+        90
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=2_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55191257,
+        1167,
+        94
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=5_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58988764,
+        1167,
+        119
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=25_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.51428574,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=50_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54255319,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=2_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55737705,
+        1167,
+        94
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=5_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.6011236,
+        1167,
+        119
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=25_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57857144,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=50_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.59574468,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=27_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56617647,
+        1167,
+        316
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=2_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55801105,
+        1167,
+        97
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=5_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54802263,
+        1167,
+        128
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=25_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.51700681,
+        1167,
+        306
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=50_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.52873564,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=1_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58288771,
+        1167,
+        88
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=2_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.5690608,
+        1167,
+        91
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=5_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57225436,
+        1167,
+        112
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=25_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.5714286,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=50_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.52941179,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=2_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55135137,
+        1167,
+        91
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=5_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.5714286,
+        1167,
+        122
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=25_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55102041,
+        1167,
+        297
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=50_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.51960784,
+        1167,
+        572
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=2_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55494505,
+        1167,
+        91
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=5_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.57627119,
+        1167,
+        111
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=25_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56617647,
+        1167,
+        290
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=50_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55238098,
+        1167,
+        575
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=2_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54143649,
+        1167,
+        98
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=5_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.5714286,
+        1167,
+        123
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=25_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.56521739,
+        1167,
+        299
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=50_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.49541286,
+        1167,
+        574
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=2_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55191257,
+        1167,
+        94
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=5_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54696133,
+        1167,
+        117
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=25_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.55038762,
+        1167,
+        292
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=50_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54807693,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=1_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.54347826,
+        1167,
+        86
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=2_gray=False_clr=0.00029266_cnt=926": [
+        0.55801105,
+        1167,
+        98
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=5_gray=False_clr=0.00029266_cnt=926": [
+        0.58192092,
+        1167,
+        124
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=25_gray=False_clr=0.00029266_cnt=926": [
+        0.5714286,
+        1167,
+        293
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=0_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=50_gray=False_clr=0.00029266_cnt=926": [
+        0.58585858,
+        1167,
+        582
+    ],
+    "model=EfficientNetV2B0_pitch=5_sym=0_ydiff=0_mouth=0_ebh=0_ebl=5_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.60818714,
+        1167,
+        160
+    ],
+    "model=EfficientNetV2B0_pitch=5_sym=0_ydiff=5_mouth=0_ebh=0_ebl=5_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.58490568,
+        1167,
+        195
+    ],
+    "model=EfficientNetV2B0_pitch=5_sym=25_ydiff=0_mouth=0_ebh=0_ebl=5_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.62903226,
+        1167,
+        365
+    ],
+    "model=EfficientNetV2B0_pitch=5_sym=25_ydiff=0_mouth=0_ebh=5_ebl=5_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.60483873,
+        1167,
+        413
+    ],
+    "model=EfficientNetV2B0_pitch=5_sym=25_ydiff=50_mouth=0_ebh=0_ebl=5_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=False_clr=0.00029266_cnt=926": [
+        0.63013699,
+        1167,
+        648
+    ],
+    "model=EfficientNetV2B0_pitch=0_sym=0_ydiff=50_mouth=0_ebh=0_ebl=0_sharplow=0_sharphigh=0_fsl=0_fsh=0_retouch=0_mask=0_glasses=0_gray=True_clr=0.00029266_cnt=926": [
+        0.54761905,
+        1167,
+        582
+    ]
+}
