@@ -587,52 +587,72 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
         # 既存のスコア辞書 (scores) を使用して探索を継続
         # 上位2点間を埋めていく方針
         
+        def calc_eff(score_info):
+            raw_s, _, f_count = score_info
+            imp = raw_s - baseline_score
+            f_diff = f_count - baseline_filtered
+            return imp / (f_diff + 1) if f_diff >= 0 else imp
+
         refinement_iter = 0
         MAX_REFINEMENT_ITER = 20 # 0-50の範囲なら十分収束する
         
         while refinement_iter < MAX_REFINEMENT_ITER:
-            # スコア順にソート (降順)
-            sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
-            if len(sorted_items) < 2:
+            # スコア順・効率順にソート (降順)
+            sorted_by_score = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+            sorted_by_eff = sorted(scores.items(), key=lambda x: calc_eff(x[1]), reverse=True)
+            
+            if len(sorted_by_score) < 2:
                 break
                 
-            top1_val, top1_data = sorted_items[0]
-            top1_score = top1_data[0]
+            s_top1_val, s_top2_val = sorted_by_score[0][0], sorted_by_score[1][0]
+            e_top1_val, e_top2_val = sorted_by_eff[0][0], (sorted_by_eff[1][0] if len(sorted_by_eff) > 1 else None)
             
-            top2_val, top2_data = sorted_items[1]
+            candidates = []
             
-            # 1位と2位の差が1以下なら終了 (これ以上探索できない)
-            diff = abs(top1_val - top2_val)
-            if diff <= 1:
-                logger.info(f"  [Refinement] Converged (diff={diff}). Best={top1_val}, 2nd={top2_val}")
+            # Score Top2 中間点
+            if abs(s_top1_val - s_top2_val) > 1:
+                mid_s = (s_top1_val + s_top2_val) // 2
+                if mid_s not in scores:
+                    candidates.append(('Score', mid_s))
+                    
+            # Efficiency Top2 中間点
+            if e_top2_val is not None and abs(e_top1_val - e_top2_val) > 1:
+                mid_e = (e_top1_val + e_top2_val) // 2
+                if mid_e not in scores and mid_e not in [c[1] for c in candidates]:
+                    candidates.append(('Efficiency', mid_e))
+                    
+            if not candidates:
+                logger.info(f"  [Refinement] Converged. No valid midpoints left to explore.")
                 break
                 
-            # 中間点を計算
-            mid_val = (top1_val + top2_val) // 2
-            
-            # 既に評価済みなら、周辺を探索し尽くしている可能性が高い
-            if mid_val in scores:
-                logger.info(f"  [Refinement] Midpoint {mid_val} already evaluated. Stopping refinement.")
-                break
+            improved_any = False
+            for cand_type, mid_val in candidates:
+                logger.info(f"  [Refinement #{refinement_iter+1}] Testing mid={mid_val} (based on {cand_type} Top 2)...")
+                raw_score, total_images, filtered_count = evaluate_wrapper(mid_val)
+                logger.info(f"  {target_name}={mid_val} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
+                scores[mid_val] = (raw_score, total_images, filtered_count)
                 
-            logger.info(f"  [Refinement #{refinement_iter+1}] Testing mid={mid_val} (between {top1_val} and {top2_val})...")
-            raw_score, total_images, filtered_count = evaluate_wrapper(mid_val)
-            logger.info(f"  {target_name}={mid_val} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
-            scores[mid_val] = (raw_score, total_images, filtered_count)
-            
-            if raw_score > best_score:
-                best_score = raw_score
-                best_val = mid_val
-                best_filtered = filtered_count
-                logger.info(f"  [REFINED BEST] {target_name}={mid_val} (Score: {raw_score:.4f})")
+                if raw_score > best_score:
+                    best_score = raw_score
+                    best_val = mid_val
+                    best_filtered = filtered_count
+                    logger.info(f"  [REFINED BEST] {target_name}={mid_val} (Score: {raw_score:.4f})")
+                    
+                # 確認: この中間点が新たなTop2 (Score or Efficiency) に入ったか？
+                new_sorted_s = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+                new_sorted_e = sorted(scores.items(), key=lambda x: calc_eff(x[1]), reverse=True)
                 
-            # 中間がbest2に入っているか確認（入っていなければ探索終了）
-            new_sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
-            new_top1_val = new_sorted_items[0][0]
-            new_top2_val = new_sorted_items[1][0] if len(new_sorted_items) > 1 else None
+                s_top2_vals = [new_sorted_s[0][0], new_sorted_s[1][0]] if len(new_sorted_s) > 1 else [new_sorted_s[0][0]]
+                e_top2_vals = [new_sorted_e[0][0], new_sorted_e[1][0]] if len(new_sorted_e) > 1 else [new_sorted_e[0][0]]
+                
+                if mid_val in s_top2_vals or mid_val in e_top2_vals:
+                    logger.info(f"  [Refinement] Midpoint {mid_val} stays in Top 2 (Score or Eff). Will continue.")
+                    improved_any = True
+                else:
+                    logger.info(f"  [Refinement] Midpoint {mid_val} dropped out of Top 2 for both Score and Efficiency.")
             
-            if mid_val != new_top1_val and mid_val != new_top2_val:
-                logger.info(f"  [Refinement] Midpoint {mid_val} is no longer in Top 2. Stopping binary search.")
+            if not improved_any:
+                logger.info(f"  [Refinement] None of the explored midpoints reached Top 2. Stopping binary search.")
                 break
                 
             refinement_iter += 1
@@ -841,13 +861,12 @@ def main():
                 global_best_desc = f"Single Best ({param_name}={cand['val']})"
                 logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {cand['score']:.4f}")
 
-    # Phase 2: Score-Based Greedy Integration (Grayscale無しで実行)
-    logger.info("\n>>> Phase 2: Score-Based Greedy Integration <<<")
+    # Phase 2: Efficiency-Based Greedy Integration (Grayscale無しで実行)
+    logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
     
-    # スコア順にソート (降順)
-    # User Requirement (2026-02-20): "やっぱgreedyに関しては上昇効率でなくscoreで評価"
-    # -> 効率ではなく、単体スコアが高い順に統合を試し、最終スコアが上がるなら採用する
-    sorted_candidates = sorted(all_candidates, key=lambda x: x['score'], reverse=True)
+    # 効率順にソート (降順)
+    # 単体スコア（Score）ではなく、上昇効率（Efficiency）の高い順に統合を試す
+    sorted_candidates = sorted(all_candidates, key=lambda x: x['efficiency'], reverse=True)
     
     current_greedy_params = {k: 0 for k in current_params}
     
