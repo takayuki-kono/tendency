@@ -87,8 +87,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - `train_multitask_trial.py` に `--auto_lr_target_epoch` オプションあり（スタンドアロン用）。
     - `BEST_EPOCH: N` を標準出力し、キャリブレーション時に利用可能。
     - **Step 1 (初期LR):** グリッドサーチを廃止し、`calibrate_base_lr` を採用。
-        - 10 epoch の学習を繰り返し、Best epochが epoch 5 に来るようLRを調整。
-        - 調整後、取得したLRの **80% (0.8倍)** を初期（Warmup）のLRとして採用する。
+        - 10 epoch の学習を繰り返し、Best epochが epoch 5 に来るようLRを調整し、それをベースのLRとして採用する。
         - キャリブレーション時はEarly Stoppingを無効化し、必ず全Epoch学習して真のBest Epochを特定する。
     - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前にLRキャリブレーションを実施。
         - Target Epochを **10〜15の範囲で探索（6点）** し、最も検証精度が高かったLRを採用する。（`search_ft_lr_by_targets`）

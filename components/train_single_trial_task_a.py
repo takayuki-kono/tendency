@@ -247,69 +247,35 @@ def main():
             ReduceLROnPlateau(monitor='val_accuracy', factor=0.5, patience=3, min_lr=1e-7, verbose=1)
         ]
 
-    # --- Phase 1: 初期学習 (Headのみ) ---
-    phase1_epochs = 10
+    # --- Training (Single Phase) ---
     if args.fine_tune.lower() == 'true':
-        logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
+        logger.info(f"--- Fine-tuning Training ({args.epochs} epochs) ---")
+        base_model.trainable = True
+        for layer in base_model.layers[:-40]:
+            layer.trainable = False
+            
+        current_lr = args.learning_rate  # No division by 100, if they pass LR externally
     else:
-        logger.info(f"--- Training (Head only, {phase1_epochs} epochs) ---")
+        logger.info(f"--- Training (Head only, {args.epochs} epochs) ---")
+        current_lr = args.learning_rate
+        
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=current_lr),
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy'],
+        jit_compile=False
+    )
 
     history = model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=phase1_epochs,
+        epochs=args.epochs,
         callbacks=create_callbacks(),
         class_weight=class_weights,
         verbose=2
     )
     
-    warmup_best_score = max(history.history['val_accuracy']) if 'val_accuracy' in history.history else 0.0
-    
-    # Warmupモデルを保存（フルモデル）
-    temp_model_path = 'temp_warmup_model_task_a.keras'
-    model.save(temp_model_path)
-
-    # --- Phase 2: Fine-tuning ---
-    if args.fine_tune.lower() == 'true':
-        logger.info(f"--- Phase 2: Fine-tuning ({args.epochs} epochs) ---")
-        
-        base_model.trainable = True
-        for layer in base_model.layers[:-40]:
-            layer.trainable = False
-        
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=args.learning_rate / 100),
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy'],
-            jit_compile=False
-        )
-        
-        history_ft = model.fit(
-            train_ds,
-            validation_data=val_ds,
-            epochs=args.epochs,
-            callbacks=create_callbacks(),
-            class_weight=class_weights,
-            verbose=2
-        )
-        
-        ft_best_score = max(history_ft.history['val_accuracy']) if 'val_accuracy' in history_ft.history else 0.0
-        
-        logger.info(f"Warmup Best: {warmup_best_score:.4f}, FT Best: {ft_best_score:.4f}")
-        
-        if ft_best_score < warmup_best_score:
-            logger.warning("Fine-tuning degraded performance. Reverting to Warmup model.")
-            # Warmupモデルをリロード
-            model = models.load_model(temp_model_path, compile=False)
-            final_val_acc = warmup_best_score
-        else:
-            final_val_acc = ft_best_score
-    else:
-        final_val_acc = warmup_best_score
-
-    # クリーンアップ
-    if os.path.exists(temp_model_path):
-        os.remove(temp_model_path)
+    final_val_acc = max(history.history['val_accuracy']) if 'val_accuracy' in history.history else 0.0
 
     # モデル保存
     if args.fine_tune.lower() == 'true':

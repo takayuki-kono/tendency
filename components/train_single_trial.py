@@ -98,7 +98,7 @@ def main():
         augment_params
     )
     
-    # 5. Training Setup
+    # --- Training Setup ---
     def create_callbacks(total_epochs, initial_lr):
         def cosine_decay(epoch):
             if total_epochs == 0: return initial_lr
@@ -109,37 +109,10 @@ def main():
             LearningRateScheduler(cosine_decay, verbose=1)
         ]
 
-    # --- Phase 1: Warmup (Head Only) ---
-    phase1_epochs = 10
-    logger.info(f"--- Phase 1: Warump ({phase1_epochs} epochs) ---")
-    
-    history = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=phase1_epochs,
-        callbacks=create_callbacks(phase1_epochs, args.learning_rate),
-        class_weight=class_weights,
-        verbose=2
-    )
-
-    warmup_best_score = max(history.history.get('val_min_class_accuracy', [0.0]))
-    logger.info(f"Warmup Best Score: {warmup_best_score}")
-    
-    # Save temp weights
-    temp_weights_path = 'temp_warmup_weights.weights.h5'
-    model.save_weights(temp_weights_path)
-    
-    final_val_acc = warmup_best_score
-
-    # --- Phase 2: Fine-tuning ---
+    # --- Training (Single Phase) ---
     if args.fine_tune.lower() == 'true':
-        logger.info(f"--- Phase 2: Fine-tuning ({args.epochs} epochs) ---")
+        logger.info(f"--- Fine-tuning Training ({args.epochs} epochs) ---")
         
-        # Unfreeze base model
-        # Assuming second layer is base model (input -> augmentation -> preprocess -> base)
-        # Check model structure in model_factory to be sure.
-        # Structure: Input -> Augment -> Norm -> Base -> GlobalPool -> Dropout -> Dense...
-        # So we iterate layers to find the Model object
         base_model_layer = None
         for layer in model.layers:
             if isinstance(layer, tf.keras.Model):
@@ -148,47 +121,33 @@ def main():
         
         if base_model_layer:
             base_model_layer.trainable = True
-            # Re-freeze bottom N layers if desired (e.g. first 50%)
-            # Skipping specific freeze logic for simplicity or keep as full fine-tune
-            pass
-            
-            # Recompile with lower LR
-            optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=args.learning_rate / 100)
-             # Metric/Loss must be re-specified? Yes.
-            
-            # Reuse logic from model_factory manually or trust it works? 
-            # create_model returns compiled model.
-            # We must recompile manually here.
-            
-            # SparseCategoricalCrossentropy doesn't support label_smoothing in TF 2.10
-            loss = tf.keras.losses.SparseCategoricalCrossentropy()
-            metrics = ['accuracy', BalancedSparseCategoricalAccuracy(num_classes, name='balanced_accuracy'), MinClassAccuracy(num_classes, name='min_class_accuracy')]
-            
-            model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
-            
-            history_ft = model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=args.epochs,
-                callbacks=create_callbacks(args.epochs, args.learning_rate / 100),
-                class_weight=class_weights,
-                verbose=2
-            )
-            
-            ft_best_score = max(history_ft.history.get('val_min_class_accuracy', [0.0]))
-            
-            if ft_best_score < warmup_best_score:
-                logger.warning("Fine-tuning degraded performance. Reverting.")
-                model.load_weights(temp_weights_path)
-            else:
-                final_val_acc = ft_best_score
-                # Save Best Model
-                model.save('best_person_model.keras')
-                logger.info("Saved best fine-tuned model.")
         
-    # Clean up
-    if os.path.exists(temp_weights_path):
-        os.remove(temp_weights_path)
+        current_lr = args.learning_rate
+    else:
+        logger.info(f"--- Training (Head only, {args.epochs} epochs) ---")
+        current_lr = args.learning_rate
+
+    # Always recompile
+    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=current_lr)
+    loss = tf.keras.losses.SparseCategoricalCrossentropy()
+    metrics = ['accuracy', BalancedSparseCategoricalAccuracy(num_classes, name='balanced_accuracy'), MinClassAccuracy(num_classes, name='min_class_accuracy')]
+    
+    model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+    
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=args.epochs,
+        callbacks=create_callbacks(args.epochs, current_lr),
+        class_weight=class_weights,
+        verbose=2
+    )
+    
+    final_val_acc = max(history.history.get('val_min_class_accuracy', [0.0]))
+    
+    if args.fine_tune.lower() == 'true':
+        model.save('best_person_model.keras')
+        logger.info("Saved best fine-tuned model.")
         
     print(f"FINAL_VAL_ACCURACY: {final_val_acc}")
 

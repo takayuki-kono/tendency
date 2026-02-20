@@ -524,7 +524,6 @@ def main():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--unfreeze_layers', type=int, default=40)
     parser.add_argument('--single_task_mode', type=str, default='False') # "True" or "False"
-    parser.add_argument('--warmup_lr', type=float, default=0.0)  # Phase1用LR (0=learning_rateを使用)
     parser.add_argument('--seed', type=int, default=DEFAULT_SEED)
     
     # 学習率自動調整: 指定したepochでベストになるようLRをデータ枚数に基づき自動算出
@@ -610,12 +609,11 @@ def main():
         logger.info(f"[Auto LR] reference_steps={REFERENCE_STEPS_PER_EPOCH}, scale={lr_scale:.4f} (sqrt-based)")
         logger.info(f"[Auto LR] base_lr={args.learning_rate} -> effective_lr={effective_lr:.8f}")
 
-    # Phase 1 LR（FT時: warmup_lrが指定されていればそちらを使用）
-    if args.warmup_lr > 0 and args.fine_tune.lower() == 'true':
-        phase1_lr = args.warmup_lr
-        logger.info(f"Phase 1 warmup LR: {phase1_lr:.8f} (FT LR: {effective_lr:.8f})")
+    # LRの決定
+    if args.fine_tune.lower() == 'true':
+        current_lr = args.learning_rate
     else:
-        phase1_lr = effective_lr
+        current_lr = effective_lr
 
     model = create_model(
         args.model_name, 
@@ -623,7 +621,7 @@ def main():
         args.dense_units, 
         args.dropout, 
         args.head_dropout,
-        phase1_lr,
+        current_lr,
         augment_params,
         task_labels
     )
@@ -700,104 +698,10 @@ def main():
         
         return callbacks_list
 
-    # --- Phase 1: 初期学習 (Headのみ) ---
+    # --- 構成と学習方針の決定 ---
     if args.fine_tune.lower() == 'true':
-        phase1_epochs = 5 # Fine-tuning前のWarmupは短めに固定
-    else:
-        if args.auto_lr_target_epoch > 0:
-            # auto_lr有効時: target_epochの2倍を上限にしてEarlyStoppingに任せる
-            phase1_epochs = args.auto_lr_target_epoch * 2
-            logger.info(f"[Auto LR] epochs set to {phase1_epochs} (target={args.auto_lr_target_epoch} x 2)")
-        else:
-            phase1_epochs = args.epochs # Fine-tuningなしの場合は指定されたEpoch数で学習
-    if args.fine_tune.lower() == 'true':
-        logger.info(f"--- Phase 1: Warmup Training (Head only, {phase1_epochs} epochs) ---")
-    else:
-        logger.info(f"--- Training (Head only, {phase1_epochs} epochs, lr={phase1_lr:.8f}) ---")
-
-    enable_early_stopping = args.enable_early_stopping.lower() == 'true'
-    history = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=phase1_epochs,
-        callbacks=create_callbacks(phase1_epochs, phase1_lr, target_epoch=args.auto_lr_target_epoch, enable_early_stopping=enable_early_stopping),
-        verbose=2
-    )
-    
-    # Phase 1 のベストスコアを記録 (全タスクの平均Balanced Accuracy)
-    # history.historyには 'val_task_a_output_balanced_accuracy' 等が含まれる
-    warmup_best_score = 0.0
-    if hasattr(history, 'history'):
-        task_acc_keys = []
-        if len(task_labels) == 1:
-            # Single task mode (metrics might not have prefix)
-            single_keys = ['val_min_class_accuracy', 'val_balanced_accuracy', 'val_accuracy']
-            for k in single_keys:
-                if k in history.history:
-                    task_acc_keys.append(k)
-                    break # Use the best one found
-        else:
-            for i in range(len(task_labels)):
-                char_code = chr(ord('a') + i)
-                key_min = f"val_task_{char_code}_output_min_class_accuracy"
-                key_bal = f"val_task_{char_code}_output_balanced_accuracy"
-                key_acc = f"val_task_{char_code}_output_accuracy"
-                
-                if key_min in history.history:
-                    task_acc_keys.append(key_min)
-                elif key_bal in history.history:
-                    task_acc_keys.append(key_bal)
-                elif key_acc in history.history:
-                    task_acc_keys.append(key_acc)
-        
-        if task_acc_keys:
-            # 各エポックごとの平均を計算
-            num_epochs = len(history.history[task_acc_keys[0]])
-            avg_scores = []
-            for epoch in range(num_epochs):
-                # Calculate average MinClassAccuracy across tasks
-                epoch_sum = 0
-                count = 0
-                for char_code in range(ord('a'), ord('a') + len(task_labels)):
-                    key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
-                    if key_min in history.history:
-                         epoch_sum += history.history[key_min][epoch]
-                         count += 1
-                    elif 'val_min_class_accuracy' in history.history:
-                         # Single task fallback
-                         epoch_sum += history.history['val_min_class_accuracy'][epoch]
-                         count += 1
-                         break # Only one task anyway
-                
-                if count > 0:
-                    avg_scores.append(epoch_sum / count)
-                else:
-                    # If min keys are missing, but we entered because of other keys...
-                    # Try to use whatever keys we found in task_acc_keys?
-                    # No, let's just use what we have.
-                    # Fallback: use balanced accuracy if min is missing for this task
-                    # Re-loop to calculate sum based on task_acc_keys (which has best available metric)
-                    epoch_sum_fallback = sum(history.history[k][epoch] for k in task_acc_keys)
-                    avg_scores.append(epoch_sum_fallback / len(task_acc_keys))
-
-            warmup_best_score = max(avg_scores)
-            best_epoch_idx = avg_scores.index(warmup_best_score)
-            best_epoch = best_epoch_idx + 1  # 1-indexed
-            print(f"BEST_EPOCH: {best_epoch}")
-            logger.info(f"Phase 1 Best Average Min-Class Score: {warmup_best_score:.4f} (at epoch {best_epoch}/{num_epochs})")
-        else:
-            logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
-    
-    # Backup weights (FTで悪化した場合の保険)
-    temp_weights_path = 'temp_warmup_weights.weights.h5'
-    model.save_weights(temp_weights_path)
-
-
-    # --- Phase 2: Fine-tuning (全層解凍) ---
-    final_val_acc = warmup_best_score  # Initialize with warmup score by default
-
-    if args.fine_tune.lower() == 'true':
-        logger.info(f"--- Phase 2: Fine-tuning ({args.epochs} epochs) ---")
+        logger.info(f"--- Fine-tuning Mode ({args.epochs} epochs) ---")
+        training_epochs = args.epochs
         
         # ベースモデル解凍
         base_model_layer = None
@@ -813,142 +717,125 @@ def main():
                 for layer in base_model_layer.layers[:-args.unfreeze_layers]:
                     layer.trainable = False
             logger.info(f"Unfreezing top {args.unfreeze_layers} layers of {len(base_model_layer.layers)} total")
-            
-            output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
-            
-            # Loss switching based on Mixup/Smoothing
-            label_smoothing = augment_params.get('label_smoothing', 0.0)
-            use_categorical = augment_params.get('mixup_alpha', 0.0) > 0.0 or label_smoothing > 0.0
-            
-            if use_categorical:
-                loss_dict = {name: tf.keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing) for name in output_names}
-            else:
-                loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
+    else:
+        training_epochs = args.auto_lr_target_epoch * 2 if args.auto_lr_target_epoch > 0 else args.epochs
+        logger.info(f"--- Training Mode (Head only, {training_epochs} epochs) ---")
 
-            loss_weights_dict = {name: 1.0 / len(task_labels) for name in output_names}
-            
-            # Update metrics to match loss type (though BalancedAcc handles one-hot, 'accuracy' needs to match)
-            metrics_dict = {}
-            for name, labels in zip(output_names, task_labels):
-                metrics_list = ['accuracy'] 
-                if use_categorical:
-                    metrics_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')] # Explicit categorical acc
-                
-                metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
-                metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
-                metrics_dict[name] = metrics_list
-            
-            # 再コンパイル (FT用LRは外部キャリブレーションで決定済み)
-            ft_lr = args.learning_rate
-            logger.info(f"Fine-tuning LR: {ft_lr:.8f} (clipnorm=1.0)")
-            try:
-                optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=ft_lr, clipnorm=1.0)
-            except AttributeError:
-                optimizer = tf.keras.optimizers.Adam(learning_rate=ft_lr, clipnorm=1.0)
-
-            model.compile(
-                optimizer=optimizer,
-                loss=loss_dict,
-                loss_weights=loss_weights_dict,
-                metrics=metrics_dict,
-                jit_compile=False
-            )
-            
-            # 再学習
-            history_ft = model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=args.epochs,
-                callbacks=create_callbacks(args.epochs, ft_lr),
-                verbose=2
-            )
-            
-            # スコア比較とロールバック
-            # FTのベストスコアも全タスク平均で計算
-            ft_best_score = 0.0
-            if hasattr(history_ft, 'history'):
-                task_acc_keys = []
-                if len(task_labels) == 1:
-                    # Single task mode (metrics might not have prefix)
-                    single_keys = ['val_min_class_accuracy', 'val_balanced_accuracy', 'val_accuracy']
-                    for k in single_keys:
-                        if k in history_ft.history:
-                            task_acc_keys.append(k)
-                            break
-                else:
-                    for i in range(len(task_labels)):
-                        char_code = chr(ord('a') + i)
-                        key_min = f"val_task_{char_code}_output_min_class_accuracy"
-                        key_bal = f"val_task_{char_code}_output_balanced_accuracy"
-                        key_acc = f"val_task_{char_code}_output_accuracy"
-                        
-                        if key_min in history_ft.history:
-                            task_acc_keys.append(key_min)
-                        elif key_bal in history_ft.history:
-                            task_acc_keys.append(key_bal)
-                        elif key_acc in history_ft.history:
-                            task_acc_keys.append(key_acc)
-                
-                if task_acc_keys:
-                    num_epochs = len(history_ft.history[task_acc_keys[0]])
-                    avg_scores = []
-                    for epoch in range(num_epochs):
-                        epoch_sum = 0
-                        count = 0
-                        for char_code in range(ord('a'), ord('a') + len(task_labels)):
-                            key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
-                            if key_min in history_ft.history:
-                                 epoch_sum += history_ft.history[key_min][epoch]
-                                 count += 1
-                            elif 'val_min_class_accuracy' in history_ft.history:
-                                 epoch_sum += history_ft.history['val_min_class_accuracy'][epoch]
-                                 count += 1
-                                 break
-                        
-                        if count > 0:
-                            avg_scores.append(epoch_sum / count)
-                        else:
-                            avg_scores.append(0.0)
-
-                    ft_best_score = max(avg_scores)
-                    ft_best_epoch_idx = avg_scores.index(ft_best_score)
-                    ft_best_epoch = ft_best_epoch_idx + 1  # 1-indexed
-                    print(f"FT_BEST_EPOCH: {ft_best_epoch}")
-                    logger.info(f"Phase 2 FT Best Score: {ft_best_score:.4f} (at epoch {ft_best_epoch}/{num_epochs})")
-            
-            logger.info(f"Warmup Best: {warmup_best_score:.4f}, FT Best: {ft_best_score:.4f}")
-            
-            if ft_best_score < warmup_best_score:
-                logger.warning("Fine-tuning degraded performance. Reverting to Warmup model.")
-                model.load_weights(temp_weights_path)
-                # historyを書き換えて最終出力が正しくなるようにする (簡易的)
-                history = history # そのまま(Phase1の結果を持つオブジェクト)には戻らないが、スコア変数は別途管理すべき
-                # 下流で history.history を参照しているので、ここはどうしようもないが
-                # 少なくとも保存されるモデル（model.save）は戻った状態になる。
-                # 画面表示用のスコア出力は以下のロジックで対応
-                final_val_acc = warmup_best_score
-            else:
-                history = history_ft # FTの結果を採用
-                final_val_acc = ft_best_score
-        else:
-            logger.warning("Base model layer not found for fine-tuning.")
-            # final_val_acc は既に warmup_best_score で初期化済み
-
-    # --- Phase 2.5: Conditional Extension (Low LR or Best Epoch is Last) ---
-    # 最終的なベストエポックが訓練の最終エポックだったか判定する
-    final_best_epoch = best_epoch if 'best_epoch' in locals() else 1
-    actual_trained_epochs = phase1_epochs
+    # 再コンパイル (Fine-tuning時は解凍したため、またはPhase 1でも明示的に再コンパイルを統一で行う)
+    output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
     
-    if args.fine_tune.lower() == 'true':
-        if ft_best_score >= warmup_best_score:
-            final_best_epoch = ft_best_epoch if 'ft_best_epoch' in locals() else 1
-            actual_trained_epochs = args.epochs
+    label_smoothing = augment_params.get('label_smoothing', 0.0)
+    use_categorical = augment_params.get('mixup_alpha', 0.0) > 0.0 or label_smoothing > 0.0
+    
+    if use_categorical:
+        loss_dict = {name: tf.keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing) for name in output_names}
+    else:
+        loss_dict = {name: 'sparse_categorical_crossentropy' for name in output_names}
+
+    loss_weights_dict = {name: 1.0 / len(task_labels) for name in output_names}
+    
+    metrics_dict = {}
+    for name, labels in zip(output_names, task_labels):
+        metrics_list = ['accuracy'] 
+        if use_categorical:
+            metrics_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')]
+        
+        metrics_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
+        metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
+        metrics_dict[name] = metrics_list
+    
+    logger.info(f"Training LR: {current_lr:.8f} (clipnorm=1.0)")
+    try:
+        optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=current_lr, clipnorm=1.0)
+    except AttributeError:
+        optimizer = tf.keras.optimizers.Adam(learning_rate=current_lr, clipnorm=1.0)
+
+    model.compile(
+        optimizer=optimizer,
+        loss=loss_dict,
+        loss_weights=loss_weights_dict,
+        metrics=metrics_dict,
+        jit_compile=False
+    )
+    
+    # --- 学習実行 (単一フェーズ) ---
+    enable_early_stopping = args.enable_early_stopping.lower() == 'true'
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=training_epochs,
+        callbacks=create_callbacks(training_epochs, current_lr, target_epoch=args.auto_lr_target_epoch, enable_early_stopping=enable_early_stopping),
+        verbose=2
+    )
+    
+    # ベストスコア記録
+    final_val_acc = 0.0
+    best_epoch = 1
+    if hasattr(history, 'history'):
+        task_acc_keys = []
+        if len(task_labels) == 1:
+            single_keys = ['val_min_class_accuracy', 'val_balanced_accuracy', 'val_accuracy']
+            for k in single_keys:
+                if k in history.history:
+                    task_acc_keys.append(k)
+                    break 
+        else:
+            for i in range(len(task_labels)):
+                char_code = chr(ord('a') + i)
+                key_min = f"val_task_{char_code}_output_min_class_accuracy"
+                key_bal = f"val_task_{char_code}_output_balanced_accuracy"
+                key_acc = f"val_task_{char_code}_output_accuracy"
+                
+                if key_min in history.history:
+                    task_acc_keys.append(key_min)
+                elif key_bal in history.history:
+                    task_acc_keys.append(key_bal)
+                elif key_acc in history.history:
+                    task_acc_keys.append(key_acc)
+        
+        if task_acc_keys:
+            num_epochs = len(history.history[task_acc_keys[0]])
+            avg_scores = []
+            for epoch in range(num_epochs):
+                epoch_sum = 0
+                count = 0
+                for char_code in range(ord('a'), ord('a') + len(task_labels)):
+                    key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
+                    if key_min in history.history:
+                         epoch_sum += history.history[key_min][epoch]
+                         count += 1
+                    elif 'val_min_class_accuracy' in history.history:
+                         epoch_sum += history.history['val_min_class_accuracy'][epoch]
+                         count += 1
+                         break 
+                
+                if count > 0:
+                    avg_scores.append(epoch_sum / count)
+                else:
+                    epoch_sum_fallback = sum(history.history[k][epoch] for k in task_acc_keys)
+                    avg_scores.append(epoch_sum_fallback / len(task_acc_keys))
+
+            final_val_acc = max(avg_scores)
+            best_epoch_idx = avg_scores.index(final_val_acc)
+            best_epoch = best_epoch_idx + 1  # 1-indexed
             
-    is_best_at_last = (final_best_epoch == actual_trained_epochs)
+            if args.fine_tune.lower() == 'true':
+                print(f"FT_BEST_EPOCH: {best_epoch}")
+                logger.info(f"FT Best Score: {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
+            else:
+                print(f"BEST_EPOCH: {best_epoch}")
+                logger.info(f"Best Target Score: {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
+        else:
+            logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
+            
+    # --- 延長学習の判定 (Conditional Extension) ---
+    is_best_at_last = (best_epoch == training_epochs)
+    
+    temp_weights_path = 'temp_training_weights.weights.h5'
     
     if final_val_acc < 0.5 or is_best_at_last:
-        reason = f"Score {final_val_acc:.4f} < 0.5" if final_val_acc < 0.5 else f"Best Epoch reached at last epoch ({actual_trained_epochs})"
-        logger.info(f"--- Phase 2.5: Conditional Extension ({reason}) ---")
+        reason = f"Score {final_val_acc:.4f} < 0.5" if final_val_acc < 0.5 else f"Best Epoch reached at last epoch ({training_epochs})"
+        logger.info(f"--- Extension Training ({reason}) ---")
         
         # Save current best weights before extension
         model.save_weights(temp_weights_path)

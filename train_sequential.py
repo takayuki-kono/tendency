@@ -408,16 +408,14 @@ def main():
     }
     
     # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
-    # Epoch 5でベストになるLRをキャリブレーションし、取得したLRの0.8倍を採用
-    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 5, then x0.8) <<<")
-    raw_base_lr, _ = calibrate_base_lr(
+    # Epoch 5でベストになるLRをキャリブレーション (そのまま使用)
+    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 5) <<<")
+    calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
         cal_epochs=10, target_best_epoch=5, score_priority=True
     )
-    calibrated_lr = raw_base_lr * 0.8
-    logger.info(f"Target 5 LR={raw_base_lr:.8f} -> Applied 80% LR={calibrated_lr:.8f}")
+    logger.info(f"Target 5 LR={calibrated_lr:.8f}")
     current_params['learning_rate'] = calibrated_lr
-    head_lr = calibrated_lr  # Phase 1 warmup用に保存
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで比較) ---
     best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
     current_params['model_name'] = best_model
@@ -491,7 +489,6 @@ def main():
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
-    current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
     
     logger.info("\n>>> Step 3.5: FT LR Search (Targets 10-15) <<<")
     ft_lr, _ = search_ft_lr_by_targets(
