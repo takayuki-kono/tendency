@@ -465,7 +465,7 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
              progress = current_step / remaining_epochs
              progress = min(1.0, max(0.0, progress))
              
-             min_lr = self.initial_lr * 0.2
+             min_lr = self.initial_lr * 0.05
              # Polynomial Decay: (1 - progress) ^ exponent
              linear_decay = 1.0 - progress
              decay = linear_decay ** self.decay_exponent
@@ -933,6 +933,87 @@ def main():
         else:
             logger.warning("Base model layer not found for fine-tuning.")
             # final_val_acc は既に warmup_best_score で初期化済み
+
+    # --- Phase 2.5: Conditional Extension (Low LR or Best Epoch is Last) ---
+    # 最終的なベストエポックが訓練の最終エポックだったか判定する
+    final_best_epoch = best_epoch if 'best_epoch' in locals() else 1
+    actual_trained_epochs = phase1_epochs
+    
+    if args.fine_tune.lower() == 'true':
+        if ft_best_score >= warmup_best_score:
+            final_best_epoch = ft_best_epoch if 'ft_best_epoch' in locals() else 1
+            actual_trained_epochs = args.epochs
+            
+    is_best_at_last = (final_best_epoch == actual_trained_epochs)
+    
+    if final_val_acc < 0.5 or is_best_at_last:
+        reason = f"Score {final_val_acc:.4f} < 0.5" if final_val_acc < 0.5 else f"Best Epoch reached at last epoch ({actual_trained_epochs})"
+        logger.info(f"--- Phase 2.5: Conditional Extension ({reason}) ---")
+        
+        # Save current best weights before extension
+        model.save_weights(temp_weights_path)
+        
+        # LR固定 (Initial * 0.05)
+        extension_lr = args.learning_rate * 0.05
+        if hasattr(model.optimizer, 'lr'):
+            tf.keras.backend.set_value(model.optimizer.lr, extension_lr)
+        logger.info(f"Extension LR set to {extension_lr:.8f}")
+        
+        max_ext_epochs = 20
+        best_ext_score = final_val_acc
+        
+        for i in range(max_ext_epochs):
+            logger.info(f"Extension Epoch {i+1}/{max_ext_epochs}...")
+            
+            # 1 Epoch training (epochs=1 means run 1 epoch from scratch in this call)
+            hist_ext = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=1,
+                verbose=2
+            )
+            
+            # Score Calculation
+            val_scores = []
+            if hasattr(hist_ext, 'history'):
+                history_keys = hist_ext.history
+                # Iterate phases to find metric keys
+                if len(task_labels) == 1:
+                    if 'val_min_class_accuracy' in history_keys:
+                        val_scores.append(history_keys['val_min_class_accuracy'][0])
+                    elif 'val_balanced_accuracy' in history_keys:
+                        val_scores.append(history_keys['val_balanced_accuracy'][0])
+                    elif 'val_accuracy' in history_keys:
+                        val_scores.append(history_keys['val_accuracy'][0])
+                else:
+                    for t_idx in range(len(task_labels)):
+                        char_code = chr(ord('a') + t_idx)
+                        key_min = f"val_task_{char_code}_output_min_class_accuracy"
+                        key_bal = f"val_task_{char_code}_output_balanced_accuracy"
+                        key_acc = f"val_task_{char_code}_output_accuracy"
+                        
+                        if key_min in history_keys:
+                            val_scores.append(history_keys[key_min][0])
+                        elif key_bal in history_keys:
+                            val_scores.append(history_keys[key_bal][0])
+                        elif key_acc in history_keys:
+                            val_scores.append(history_keys[key_acc][0])
+            
+            current_ext_score = sum(val_scores) / len(val_scores) if val_scores else 0.0
+            logger.info(f"Extension Score: {current_ext_score:.4f} (Best: {best_ext_score:.4f})")
+            
+            if current_ext_score > best_ext_score:
+                best_ext_score = current_ext_score
+                final_val_acc = best_ext_score
+                model.save_weights(temp_weights_path) # Update best weights
+            else:
+                logger.info("Score degraded. Stopping extension.")
+                break
+        
+        # Restore best weights from extension phase
+        if os.path.exists(temp_weights_path):
+            model.load_weights(temp_weights_path)
+            logger.info(f"Restored best extension weights (Final Score: {final_val_acc:.4f})")
 
     # クリーンアップ
     if os.path.exists(temp_weights_path):

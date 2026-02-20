@@ -87,19 +87,16 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - `train_multitask_trial.py` に `--auto_lr_target_epoch` オプションあり（スタンドアロン用）。
     - `BEST_EPOCH: N` を標準出力し、キャリブレーション時に利用可能。
     - **Step 1 (初期LR):** グリッドサーチを廃止し、`calibrate_base_lr` を採用。
-        - 20 epoch の学習を最大5回繰り返し、Best epochが epoch 10 に来るようLRを調整。
-        - 調整式: `new_lr = current_lr × (best_epoch / 10)`、クランプ: 0.5〜2.0倍。
-        - 収束条件は `BestEpoch==10` を厳密採用（許容誤差0）。
-        - 各試行の候補から「epoch10への距離最小（同距離ならスコア高い方）」を最終採用。
-        - **Early Stopping無効化:** キャリブレーション時はEarly Stoppingを無効化し、必ず全Epoch学習して真のBest Epochを特定する。
-    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前に20 epoch用のLRキャリブレーションを実施。
-        - 20 epoch の学習を最大5回繰り返し、Best epochが epoch 10 に来るようLRを調整。
-        - `unfreeze_layers=60` を暫定値として使用し、キャリブレーション後にunfreeze_layersを最適化。
-        - Step 1で決定したLRを初期値として開始。
+        - 10 epoch の学習を繰り返し、Best epochが epoch 5 に来るようLRを調整。
+        - 調整後、取得したLRの **80% (0.8倍)** を初期（Warmup）のLRとして採用する。
+        - キャリブレーション時はEarly Stoppingを無効化し、必ず全Epoch学習して真のBest Epochを特定する。
+    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前にLRキャリブレーションを実施。
+        - Target Epochを **10〜15の範囲で探索（6点）** し、最も検証精度が高かったLRを採用する。（`search_ft_lr_by_targets`）
+        - `unfreeze_layers=60` を暫定値として使用。
     - **Step 4.5-4.7 (FT後の再最適化):**
-        - unfreeze_layers確定後、暫定値と異なる場合はFT LRを再キャリブレーション。
+        - unfreeze_layers確定後、必要に応じてFT LRを再探索（Target=10〜15）。
         - FT条件下でdropout, head_dropout, weight_decayを再最適化。
-        - 正則化パラメータ変更後にFinal LR Calibrationを実施。
+        - 正則化パラメータ変更後に Final FT LR Calibration (Target 10〜15探索) を実施。
 - **Fine-tuning:**
     - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
     - **FT LRの外部制御 (2026-02-14):** `train_multitask_trial.py` のPhase 2 LRハードコード(`/100`)を廃止。`--learning_rate` をそのまま使用し、`train_sequential.py` のLRキャリブレーションで最適値を決定。

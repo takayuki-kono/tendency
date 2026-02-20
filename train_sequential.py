@@ -354,40 +354,35 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
 
 def search_ft_lr_by_targets(current_params, initial_lr, targets=[10, 11, 12, 13, 14, 15], cal_epochs=20):
     """
-    指定された複数の Best Epoch の目標値それぞれに対してキャリブレーションを実行し、
-    最も高いスコア（Val Accuracy）を出した学習率を採用する。
+    複数のtarget_best_epochでキャリブレーションを行い、
+    最もval_accuracyが良かったLRを採用する（FT本番用）
     """
     logger.info(f"\n{'='*50}")
-    logger.info(f"FT LR Target Search: Testing targets {targets}")
+    logger.info(f"FT LR Search Start: Targets={targets}")
     logger.info(f"{'='*50}")
-
-    best_lr = initial_lr
-    best_score = -1.0
+    
+    best_candidate_val = -1.0
+    best_candidate_lr = None
     best_target = None
     
-    # current_params の変更を防ぐ
-    search_params = current_params.copy()
-
-    for target in targets:
-        logger.info(f"\n--- Testing Target Best Epoch = {target} ---")
-        # 各ターゲットに対してLRをピンポイントで合わせる（タプルではなく数値を渡す）
+    for t in targets:
+        logger.info(f"\n--- Searching for Target Epoch: {t} ---")
         lr, score = calibrate_base_lr(
-            search_params, initial_lr=initial_lr, cal_epochs=cal_epochs,
-            target_best_epoch=target, score_priority=True
+            current_params, initial_lr=initial_lr,
+            cal_epochs=cal_epochs, target_best_epoch=t, score_priority=True
         )
-        logger.info(f"Target={target} reached Score={score:.4f} with LR={lr:.8f}")
-        
-        if score > best_score:
-            best_score = score
-            best_lr = lr
-            best_target = target
-
+        if score > best_candidate_val:
+            best_candidate_val = score
+            best_candidate_lr = lr
+            best_target = t
+            
     logger.info(f"\n{'='*50}")
-    logger.info(f"FT LR Target Search Completed.")
-    logger.info(f"Selected Target={best_target}, Best LR={best_lr:.8f}, Score={best_score:.4f}")
+    logger.info(f"FT LR Search Complete")
+    logger.info(f"Best Target: {best_target}, Selected LR: {best_candidate_lr:.8f}, Val Acc: {best_candidate_val:.4f}")
     logger.info(f"{'='*50}")
     
-    return best_lr, best_score
+    return best_candidate_lr, best_candidate_val
+
 
 def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
@@ -413,14 +408,16 @@ def main():
     }
     
     # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
-    # 20 epoch中のepoch 10でベストになるLRをキャリブレーション
-    calibrated_lr, _ = calibrate_base_lr(
+    # Epoch 5でベストになるLRをキャリブレーションし、取得したLRの0.8倍を採用
+    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 5, then x0.8) <<<")
+    raw_base_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
-        cal_epochs=20, target_best_epoch=10
+        cal_epochs=10, target_best_epoch=5, score_priority=True
     )
+    calibrated_lr = raw_base_lr * 0.8
+    logger.info(f"Target 5 LR={raw_base_lr:.8f} -> Applied 80% LR={calibrated_lr:.8f}")
     current_params['learning_rate'] = calibrated_lr
     head_lr = calibrated_lr  # Phase 1 warmup用に保存
-
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで比較) ---
     best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
     current_params['model_name'] = best_model
@@ -490,11 +487,13 @@ def main():
     logger.info("="*50)
     
     # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # 20 epoch中のepoch 10-15でベストになるLRをそれぞれ探索し、最高スコアのLRを採用する
+    # FT本番: target 10〜15の範囲で探索し、最も良かったスコアのLRを採用
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
     current_params['warmup_lr'] = head_lr  # Phase 1はヘッド用の高いLRを使用
+    
+    logger.info("\n>>> Step 3.5: FT LR Search (Targets 10-15) <<<")
     ft_lr, _ = search_ft_lr_by_targets(
         current_params, initial_lr=current_params['learning_rate'],
         targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
