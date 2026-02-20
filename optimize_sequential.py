@@ -832,13 +832,13 @@ def main():
                 global_best_desc = f"Single Best ({param_name}={cand['val']})"
                 logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {cand['score']:.4f}")
 
-    # Phase 2: Efficiency-Based Greedy Integration (Grayscale無しで実行)
-    logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
+    # Phase 2: Score-Based Greedy Integration (Grayscale無しで実行)
+    logger.info("\n>>> Phase 2: Score-Based Greedy Integration <<<")
     
-    # 効率順にソート (降順)
-    # User Requirement: "score上昇かつ、効率の良い方をgreedyで採用"
-    # -> 効率順に試行し、スコアが上がるなら採用 (Greedy)
-    sorted_candidates = sorted(all_candidates, key=lambda x: x['efficiency'], reverse=True)
+    # スコア順にソート (降順)
+    # User Requirement (2026-02-20): "やっぱgreedyに関しては上昇効率でなくscoreで評価"
+    # -> 効率ではなく、単体スコアが高い順に統合を試し、最終スコアが上がるなら採用する
+    sorted_candidates = sorted(all_candidates, key=lambda x: x['score'], reverse=True)
     
     current_greedy_params = {k: 0 for k in current_params}
     

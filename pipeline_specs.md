@@ -136,12 +136,13 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
   - `optimize_sequential.py` は `base_lr` を設定ファイルから読み込み、`exponent` は上記数式で決定する。
     - 学習率スケジューラは前半5epochを固定LRとし、6epoch目からCosine Decayを開始。
     - 各trial: 20 epoch、Fine-tuning Off で評価。
+    - **学習延長 (Conditional Extension):** 評価スコアが極端に低い場合(<0.5)、または学習の最終エポックがベストスコアだった場合、未収束と判断してLRを最小値(初期値の5%)に落とし、精度が下がるまで最大20エポック学習を延長する (2026-02-20 更新)。
 - **Phase 1 - 独立パラメータ評価:**
     - 各パラメータ（ピッチ、対称性、画質など）を個別に評価し、ベースラインからの「精度向上分」と「フィルタリング枚数」を計測。
     - **効率 (Efficiency) = 精度向上 / (フィルタリング枚数 + 1)** を計算。
     - 単体でベストスコアを出したパラメータ (Single Best) を記録。
-- **Phase 2 - 効率ベースの貪欲法 (Efficiency-Based Greedy Integration):**
-    - 効率が高い順にパラメータをソートし、貪欲法的に統合。精度が下がった時点で統合を停止。
+- **Phase 2 - 単体スコアベースの貪欲法 (Score-Based Greedy Integration):** (2026-02-20 更新)
+    - 各候補を**単体スコアが高い順**にソートし、貪欲法的に統合。最終スコアが上がれば採用し、上がらなければ棄却する。
     - **Grayscaleは含めず**、フィルタパラメータのみで実行。
     - **適応型加重平均 LR Exponent (2026-02-20 変更):** 複数のフィルタが同時に適用される場合、各フィルタの強度（例: pitch=5 の 5）を重みとし、パラメータ固有の `exp` を用いた加重平均 (`sum(exp * power) / sum(power)`) を計算し、その時点の動的 `exponent` として採用する。
 - **Final Selection:**
