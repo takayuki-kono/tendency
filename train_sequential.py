@@ -179,6 +179,7 @@ def optimize_param(target_name, candidates, current_params):
 def run_calibration_trial(current_params, lr, cal_epochs=5):
     """
     LRキャリブレーション用: 指定パラメータで学習を実行し、BEST_EPOCHを返す。
+    ※キャッシュなし（毎回実行）
     
     Returns:
         tuple: (best_epoch, score)
@@ -186,18 +187,6 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     params = current_params.copy()
     params['learning_rate'] = lr
     params['epochs'] = cal_epochs
-    
-    # キャッシュ確認
-    params_str = json.dumps({k: params[k] for k in sorted(params.keys())})
-    file_count = count_files(DATA_SOURCE_DIR)
-    key_src = f"cal_{params_str}_count={file_count}"
-    cache_key = hashlib.md5(key_src.encode('utf-8')).hexdigest()
-    
-    cache = load_cache()
-    if cache_key in cache:
-        best_epoch, score = cache[cache_key]
-        logger.info(f"[Calibration] Cache Hit! LR={lr:.8f} -> BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
-        return best_epoch, score
 
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
     for key, value in params.items():
@@ -237,11 +226,6 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     score = float(match_score.group(1)) if match_score else 0.0
     
     logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
-    
-    # キャッシュ保存
-    cache = load_cache()
-    cache[cache_key] = (best_epoch, score)
-    save_cache(cache)
     
     return best_epoch, score
 
