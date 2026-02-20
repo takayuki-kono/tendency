@@ -241,7 +241,49 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
     file_count = count_files("train") + count_files("validation")
     # キャッシュキーにLR情報を含める（キャリブレーション後はLRが変わるため）
     lr_tag = f"_clr={CALIBRATED_BASE_LR:.8f}" if CALIBRATED_BASE_LR else ""
-    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}{lr_tag}_cnt={file_count}"
+    
+    # 動的加重平均されたExponentを事前計算してキャッシュキーに含める
+    mapping = {
+        'y_diff': 'y_diff_percentile', 'sym': 'symmetry_percentile', 'pitch': 'pitch_percentile',
+        'sharpness_low': 'sharpness_percentile_low', 'sharpness_high': 'sharpness_percentile_high',
+        'eb_eye_high': 'eyebrow_eye_percentile_high', 'eb_eye_low': 'eyebrow_eye_percentile_low',
+        'face_size_low': 'face_size_percentile_low', 'face_size_high': 'face_size_percentile_high',
+        'mouth_open': 'mouth_open_percentile', 'retouching': 'retouching_percentile',
+        'mask': 'mask_percentile', 'glasses': 'glasses_percentile'
+    }
+    current_vals = {
+        'pitch': pitch, 'sym': sym, 'y_diff': y_diff, 'mouth_open': mouth_open,
+        'eb_eye_high': eb_eye_high, 'eb_eye_low': eb_eye_low, 
+        'sharpness_low': sharpness_low, 'sharpness_high': sharpness_high,
+        'face_size_low': face_size_low, 'face_size_high': face_size_high,
+        'retouching': retouching, 'mask': mask, 'glasses': glasses
+    }
+    
+    total_weighted_exp = 0.0
+    total_power = 0.0
+    
+    for param_key, power in current_vals.items():
+        try:
+            power_val = float(power)
+        except ValueError:
+            power_val = 0.0
+        
+        if power_val > 0:
+            mapped_key = mapping.get(param_key) or param_key
+            if not mapped_key.endswith('_percentile') and not mapped_key.endswith('_low') and not mapped_key.endswith('_high'):
+                 mapped_key += '_percentile'
+                 
+            if mapped_key in LR_INDIVIDUAL_EXPONENTS:
+                p_exps = LR_INDIVIDUAL_EXPONENTS[mapped_key]
+                # キャッシュ検索時点では実際のratioが不明なため、exp1(High Ratio用)を代表値としてキー計算に用いる
+                # (ratioによってexp1/exp2が切り替わるが、探索パラメータが同じであれば使用されるexpも等しくなるため、事前計算キーとしての役割は満たす)
+                p_exp = p_exps['exp1']
+                total_weighted_exp += p_exp * power_val
+                total_power += power_val
+                
+    cache_exp_tag = f"_exp={total_weighted_exp/total_power:.4f}" if total_power > 0 else f"_exp_def"
+    
+    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}{lr_tag}{cache_exp_tag}_cnt={file_count}"
     
     cache = load_cache()
     if cache_key in cache:
