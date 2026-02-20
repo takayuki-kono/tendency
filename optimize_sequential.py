@@ -523,7 +523,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.error(f"Error in trial: {e}")
         return (0.0, 0, 0)
 
-def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, points=[0, 2, 5, 25, 50]):
+def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, points=[0, 25, 50, 75]):
     """
     1つのパラメータを最適化する。
     
@@ -625,6 +625,15 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
                 best_val = mid_val
                 best_filtered = filtered_count
                 logger.info(f"  [REFINED BEST] {target_name}={mid_val} (Score: {raw_score:.4f})")
+                
+            # 中間がbest2に入っているか確認（入っていなければ探索終了）
+            new_sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+            new_top1_val = new_sorted_items[0][0]
+            new_top2_val = new_sorted_items[1][0] if len(new_sorted_items) > 1 else None
+            
+            if mid_val != new_top1_val and mid_val != new_top2_val:
+                logger.info(f"  [Refinement] Midpoint {mid_val} is no longer in Top 2. Stopping binary search.")
+                break
                 
             refinement_iter += 1
     else:
