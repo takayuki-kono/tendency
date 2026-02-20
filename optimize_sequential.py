@@ -715,27 +715,15 @@ def main():
     global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
     logger.info("Starting Sequential Optimization (Efficiency-Based)")
 
-    # LRスケーリング設定（optimize_param_exp.py の結果）を読み込む
-    cal_score = 0.0
+    # LRスケーリング設定（optimize_param_exp.py の結果）を読み込む（exp/threshold情報のみ）
     LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
-    cal_score = 0.0
     if os.path.exists(LR_SCALING_CONFIG_FILE):
         try:
             with open(LR_SCALING_CONFIG_FILE, 'r', encoding='utf-8') as f:
                 lr_config = json.load(f)
             LR_LOW_RATIO_THRESHOLD = float(lr_config.get('threshold', LR_LOW_RATIO_THRESHOLD))
-            # BASE_RATIO = float(lr_config.get('base_ratio', 1.0)) # User request: Do not use cached base_ratio
-            BASE_RATIO = 1.0 # Default/Reset
-            
-            if 'base_lr' in lr_config:
-                CALIBRATED_BASE_LR = float(lr_config['base_lr'])
-                logger.info(f"Loaded CALIBRATED_BASE_LR from config: {CALIBRATED_BASE_LR:.8f}")
-            
-            if 'score' in lr_config:
-                cal_score = float(lr_config['score'])
-                logger.info(f"Loaded Base Score from config: {cal_score:.4f}")
+            BASE_RATIO = 1.0  # 毎回動的に計算するため固定値は使わない
 
-            # New Keys: exp1, exp2 (Deprecated/Unused with dynamic formula but loaded for log)
             if 'exp1' in lr_config:
                 LR_SCALING_EXP1 = float(lr_config['exp1'])
             if 'exp2' in lr_config:
@@ -747,7 +735,7 @@ def main():
             
             logger.info(
                 f"Loaded LR scaling config: threshold={LR_LOW_RATIO_THRESHOLD:.2f}, "
-                f"base_ratio={BASE_RATIO:.4f}, base_lr={CALIBRATED_BASE_LR}"
+                f"exp1={LR_SCALING_EXP1:.4f}, exp2={LR_SCALING_EXP2:.4f}"
             )
         except Exception as e:
             logger.warning(
@@ -768,41 +756,34 @@ def main():
     # 効率情報を記録する辞書
     param_efficiency = {}
     
-    # --- LR Calibration: epoch中間でベストになるbase LRを決定 ---
-    # 設定ファイルから読み込めなかった場合のみ実行
-    if CALIBRATED_BASE_LR is None:
-        logger.info("\n>>> LR Calibration: Finding optimal base learning rate (Fallback) <<<")
-        
-        # まずフィルタなしで前処理
-        cmd_pre_cal = [
-            PYTHON_PREPROCESS, "preprocess_multitask.py",
-            "--out_dir", "preprocessed_multitask",
-            "--pitch_percentile", "0", "--symmetry_percentile", "0",
-            "--y_diff_percentile", "0", "--mouth_open_percentile", "0",
-            "--eyebrow_eye_percentile_high", "0", "--eyebrow_eye_percentile_low", "0",
-            "--sharpness_percentile_low", "0", "--sharpness_percentile_high", "0",
-            "--face_size_percentile_low", "0", "--face_size_percentile_high", "0",
-            "--retouching_percentile", "0", "--mask_percentile", "0",
-            "--glasses_percentile", "0"
-        ]
-        logger.info("Preprocessing for LR calibration (no filters)...")
-        subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
-        
-        # LRキャリブレーション実行（20 epoch、epoch 10でベストをターゲット）
-        best_params = load_best_train_params()
-        initial_lr = best_params.get('learning_rate', 0.0001)
-        # Note: calibrate_base_lr function must be defined or imported. Assuming it exists based on lines 580-585.
-        # If it's imported from somewhere, fine. If it's not defined, this will error. 
-        # But since user showed log running it, it must be there.
-        CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
-            'EfficientNetV2B0',
-            initial_lr,
-            cal_epochs=20,
-            target_best_epoch=10,
-        )
-        logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}")
-    else:
-        logger.info(f"Skipping Re-Calibration. Using Base LR: {CALIBRATED_BASE_LR:.8f}")
+    # --- LR Calibration: 毎回キャリブレーション実行（キャッシュなし） ---
+    logger.info("\n>>> LR Calibration: Finding optimal base learning rate <<<")
+    
+    # まずフィルタなしで前処理
+    cmd_pre_cal = [
+        PYTHON_PREPROCESS, "preprocess_multitask.py",
+        "--out_dir", "preprocessed_multitask",
+        "--pitch_percentile", "0", "--symmetry_percentile", "0",
+        "--y_diff_percentile", "0", "--mouth_open_percentile", "0",
+        "--eyebrow_eye_percentile_high", "0", "--eyebrow_eye_percentile_low", "0",
+        "--sharpness_percentile_low", "0", "--sharpness_percentile_high", "0",
+        "--face_size_percentile_low", "0", "--face_size_percentile_high", "0",
+        "--retouching_percentile", "0", "--mask_percentile", "0",
+        "--glasses_percentile", "0"
+    ]
+    logger.info("Preprocessing for LR calibration (no filters)...")
+    subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    
+    # LRキャリブレーション実行
+    best_params = load_best_train_params()
+    initial_lr = best_params.get('learning_rate', 0.0005)
+    CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
+        'EfficientNetV2B0',
+        initial_lr,
+        cal_epochs=20,
+        target_best_epoch=10,
+    )
+    logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}, Score: {cal_score:.4f}")
     
     # --- Step 0: Model Architecture Selection & Baseline ---
     # キャリブレーション最終結果をB0のベースラインとして流用

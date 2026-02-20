@@ -227,84 +227,7 @@ def calibrate_lr_for_target(initial_lr, target_epoch=10, model_name='EfficientNe
     return chosen_lr, chosen_score, chosen_epoch
 
 
-def optimize_lr_range(initial_lr, model_name, cal_epochs):
-    """
-    Epoch 10 と Epoch 15 に収束するLRを特定し、その範囲内でScore最大化探索を行う
-    """
-    logger.info("Starting Range Optimization (Epoch 10 vs 15)...")
-    
-    # 1. Find LR for Epoch 10
-    logger.info(">>> Finding LR for BestEpoch=10...")
-    lr_10, score_10, epoch_10 = calibrate_lr_for_target(
-        initial_lr, target_epoch=10, model_name=model_name, 
-        cal_epochs=cal_epochs, max_iter=5, strict_target=True
-    )
-    logger.info(f"Found LR for Epoch 10: {lr_10:.8f} (Score={score_10:.4f}, Epoch={epoch_10})")
-    
-    # 2. Find LR for Epoch 15
-    # Search from a lower point (e.g. 0.5x of lr_10) to start from "slow learning" side
-    logger.info(">>> Finding LR for BestEpoch=15...")
-    lr_15_init = lr_10 * 0.5
-    lr_15, score_15, epoch_15 = calibrate_lr_for_target(
-        lr_15_init, target_epoch=15, model_name=model_name, 
-        cal_epochs=cal_epochs, max_iter=5, strict_target=True
-    )
-    logger.info(f"Found LR for Epoch 15: {lr_15:.8f} (Score={score_15:.4f}, Epoch={epoch_15})")
-    
-    # 3. Binary Search for Max Score in Range [lr_15, lr_10]
-    low = min(lr_10, lr_15)
-    high = max(lr_10, lr_15)
-    
-    logger.info(f">>> Binary Search in Range [{low:.8f}, {high:.8f}]...")
-    
-    best_lr = lr_10 if score_10 > score_15 else lr_15
-    best_score = max(score_10, score_15)
-    best_epoch = epoch_10 if score_10 > score_15 else epoch_15
-    
-    # Cache scores
-    scores = {lr_10: (score_10, epoch_10), lr_15: (score_15, epoch_15)}
-    
-    # 3 iterations of binary search refinement
-    for i in range(3): 
-        mid = (low + high) / 2
-        
-        logger.info(f"  [Range Search #{i+1}] Testing Mid LR: {mid:.8f}")
-        if mid in scores:
-            s, e = scores[mid]
-        else:
-            s, e = run_training_trial(mid, model_name, cal_epochs)
-            scores[mid] = (s, e)
-            
-        if s > best_score:
-            best_score = s
-            best_lr = mid
-            best_epoch = e
-            logger.info(f"    New Best! Score={best_score:.4f}")
-        elif abs(s - best_score) < 1e-6:
-             logger.info(f"    Tied Best! Score={best_score:.4f} (Checking between tied points)")
-            
-        # Decision Logic:
-        # Ensure we keep the best point and search its neighborhood.
-        # If tied, we favor the side that has the tied best.
-        
-        s_low = scores.get(low, (0,0))[0]
-        s_high = scores.get(high, (0,0))[0]
-        
-        # If mid became the new best (or tied), we want to narrow around it.
-        # Strict inequality handles "if same, search between" naturally:
-        # If s_low == s_high (both lower than mid?), rare.
-        # If s_low == s_high (both equal to mid?), search left/right?
-        
-        # Priority: Keep the interval containing the HIGHEST scores.
-        if s_low >= s_high:
-            # Low side is better. Peak is likely in [low, mid].
-            high = mid
-        else:
-            # High side is better. Peak is likely in [mid, high].
-            low = mid
-            
-    logger.info(f"Optimization Result: Best LR={best_lr:.8f} (Score={best_score:.4f}, Epoch={best_epoch})")
-    return best_lr, best_score, best_epoch
+
 
 
 def main():
@@ -322,66 +245,19 @@ def main():
     threshold = 0.5
 
     # --- Step 1: ベースライン（フィルタなし）---
-    logger.info("\n>>> Step 1: Baseline (no filter, optimize LR in Epoch 10-15 range) <<<")
+    logger.info("\n>>> Step 1: Baseline (no filter, optimize LR for Epoch 10) <<<")
     best_params = load_best_train_params()
     initial_lr = best_params.get('learning_rate', 0.0001)
+
+    total_base, saved_base = run_preprocess(0)
+    base_ratio = saved_base / total_base if total_base > 0 else 1.0
     
-    # キャリブレーション済みLRキャッシュを確認
-    cal_cache_file = "outputs/cache/calibrated_lr.json"
-    base_lr = None
-    base_score = None
-    base_epoch = None
-
-    base_ratio = 1.0
-    
-    if os.path.exists(cal_cache_file):
-        try:
-            with open(cal_cache_file, 'r', encoding='utf-8') as f:
-                cal_cache = json.load(f)
-            base_lr = cal_cache['lr']
-            base_score = cal_cache['score']
-            base_epoch = cal_cache.get('best_epoch')
-            base_ratio = cal_cache.get('base_ratio', 1.0) # Load base_ratio
-            cached_initial_lr_raw = cal_cache.get('initial_lr')
-            
-            # Check consistency
-            cached_initial_lr = None
-            if cached_initial_lr_raw is not None:
-                try: cached_initial_lr = float(cached_initial_lr_raw)
-                except: pass
-            
-            initial_lr_match = (
-                cached_initial_lr is not None and
-                abs(cached_initial_lr - float(initial_lr)) <= max(1e-12, abs(float(initial_lr)) * 1e-6)
-            )
-            
-            # キャッシュ利用条件: initial_lr情報が一致する場合 (ScoreベースなのでEpoch一致は問わない)
-            if initial_lr_match:
-                logger.info(f"Cache Hit! LR={base_lr:.8f}, Ratio={base_ratio:.4f}, Score={base_score:.4f}")
-            else:
-                logger.warning("Cache ignored (mismatch).")
-                base_lr = None
-        except Exception as e:
-            logger.warning(f"Failed to load cache: {e}")
-            base_lr = None
-
-    if base_lr is None:
-        total_base, saved_base = run_preprocess(0)
-        base_ratio = saved_base / total_base if total_base > 0 else 1.0
-        
-        # Optimize LR for Range (Replacing optimize_lr_score)
-        base_lr, base_score, base_epoch = optimize_lr_range(
-            initial_lr, model_name, cal_epochs
-        )
-        
-        logger.info(f"Baseline Selected: LR={base_lr:.8f}, Score={base_score:.4f}, Ratio={base_ratio:.4f}")
-        os.makedirs(os.path.dirname(cal_cache_file), exist_ok=True)
-        with open(cal_cache_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'lr': base_lr, 'score': base_score, 'best_epoch': base_epoch, 
-                'initial_lr': initial_lr, 'base_ratio': base_ratio
-            }, f, indent=4)
-
+    # 毎回キャリブレーション実行（キャッシュなし）
+    logger.info(">>> Finding Base LR for Target Epoch 10...")
+    base_lr, base_score, base_epoch = calibrate_lr_for_target(
+        initial_lr, target_epoch=10, model_name=model_name, 
+        cal_epochs=cal_epochs, max_iter=5, strict_target=True
+    )
 
 
     def optimize_exponent_for_levels(levels_subset, exp_range, param_name, initial_points=None):
@@ -488,8 +364,8 @@ def main():
         'glasses_percentile'
     ]
     
-    # フィルタ強度 (Percentiles)
-    filter_percentiles = [5, 25, 50, 75] 
+    # フィルタ強度 (Percentiles) - ユーザー指定: 50%のみ
+    filter_percentiles = [50] 
 
     param_results = {} # param -> { 'exp1': val, 'exp2': val, 'levels': [...] }
     all_high_exps = []
@@ -516,15 +392,24 @@ def main():
         if not levels_high and not levels_low:
             logger.warning(f"No valid levels for {param_name}. Skipping.")
             continue
-            
-        # Optimize for this parameter
-        p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High)", initial_points=[0.15, 0.5, 1.0])
-        p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low)", initial_points=[0.15, 0.5, 1.0])
+            # Optimize for this parameter (Only one of p_exp1 or p_exp2 will be calculated based on 50%'s ratio)
+        p_exp1 = 0.5 # Default
+        p_exp2 = 0.5 # Default
+        
+        if levels_high:
+            p_exp1, _ = optimize_exponent_for_levels(levels_high, range_exp1, f"{param_name} (High/50%)", initial_points=[0.15, 0.5, 1.0])
+            # Copy to exp2 if not computed (Assume same tendency)
+            p_exp2 = p_exp1
+        elif levels_low:
+            p_exp2, _ = optimize_exponent_for_levels(levels_low, range_exp2, f"{param_name} (Low/50%)", initial_points=[0.15, 0.5, 1.0])
+            # Copy to exp1 if not computed
+            p_exp1 = p_exp2
+        
+        logger.info(f"Set Exp for {param_name}: Exp1={p_exp1:.4f}, Exp2={p_exp2:.4f}")
         
         param_results[param_name] = {'exp1': p_exp1, 'exp2': p_exp2}
-        
-        if levels_high: all_high_exps.append(p_exp1)
-        if levels_low: all_low_exps.append(p_exp2)
+        all_high_exps.append(p_exp1)
+        all_low_exps.append(p_exp2)
 
     # --- Step 3: グローバル設定 (平均) ---
     if all_high_exps:
