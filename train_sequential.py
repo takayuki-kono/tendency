@@ -7,6 +7,7 @@ import json
 import hashlib
 import math
 import winsound
+import time
 
 # --- 設定 ---
 PYTHON_EXEC = r"d:\tendency\tendency.venv_tf210_gpu\Scripts\python.exe"
@@ -26,11 +27,13 @@ BEST_PARAMS_FILE = "outputs/best_train_params.json"
 if not os.path.exists(PYTHON_EXEC): PYTHON_EXEC = "python"
 
 # ログ設定
+timestamp = time.strftime("%Y%m%d_%H%M%S")
+log_filename = f"sequential_train_opt_log_{timestamp}.txt"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, 'sequential_train_opt_log.txt'), mode='w', encoding='utf-8'),
+        logging.FileHandler(os.path.join(LOG_DIR, log_filename), mode='w', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
