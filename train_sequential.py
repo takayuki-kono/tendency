@@ -408,13 +408,13 @@ def main():
     }
     
     # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
-    # Epoch 5でベストになるLRをキャリブレーション (そのまま使用)
-    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 5) <<<")
+    # Epoch 10でベストになるLRをキャリブレーション
+    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 10) <<<")
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=1e-3,
-        cal_epochs=10, target_best_epoch=5, score_priority=True
+        cal_epochs=20, target_best_epoch=10, score_priority=True
     )
-    logger.info(f"Target 5 LR={calibrated_lr:.8f}")
+    logger.info(f"Target 10 LR={calibrated_lr:.8f}")
     current_params['learning_rate'] = calibrated_lr
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで比較) ---
     best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
@@ -490,10 +490,10 @@ def main():
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
     
-    logger.info("\n>>> Step 3.5: FT LR Search (Targets 10-15) <<<")
-    ft_lr, _ = search_ft_lr_by_targets(
+    logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 10) <<<")
+    ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
+        cal_epochs=20, target_best_epoch=10, score_priority=True
     )
     current_params['learning_rate'] = ft_lr
     
@@ -504,9 +504,9 @@ def main():
     # --- Step 4.5: FT LR Re-calibration (unfreeze_layers確定後) ---
     if best_unfreeze != 60:
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
-        ft_lr2, _ = search_ft_lr_by_targets(
+        ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
+            cal_epochs=20, target_best_epoch=10, score_priority=True
         )
         current_params['learning_rate'] = ft_lr2
     else:

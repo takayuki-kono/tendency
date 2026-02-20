@@ -771,6 +771,7 @@ def main():
     # ベストスコア記録
     final_val_acc = 0.0
     best_epoch = 1
+    last_epoch_score = 0.0  # 最終エポックのスコア（延長判定用）
     if hasattr(history, 'history'):
         task_acc_keys = []
         if len(task_labels) == 1:
@@ -818,6 +819,7 @@ def main():
             final_val_acc = max(avg_scores)
             best_epoch_idx = avg_scores.index(final_val_acc)
             best_epoch = best_epoch_idx + 1  # 1-indexed
+            last_epoch_score = avg_scores[-1]  # 最終エポックのスコアを記録
             
             if args.fine_tune.lower() == 'true':
                 print(f"FT_BEST_EPOCH: {best_epoch}")
@@ -829,7 +831,9 @@ def main():
             logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
             
     # --- 延長学習の判定 (Conditional Extension) ---
-    is_best_at_last = (best_epoch == training_epochs)
+    # best_epochが最終エポック、または最終エポックのスコアがベストと同等の場合に延長
+    # (avg_scores.index()は最初の出現を返すため、同スコアが複数ある場合の対策)
+    is_best_at_last = (best_epoch == training_epochs) or (abs(last_epoch_score - final_val_acc) < 1e-8)
     
     temp_weights_path = 'temp_training_weights.weights.h5'
     
@@ -848,9 +852,11 @@ def main():
         
         max_ext_epochs = 20
         best_ext_score = final_val_acc
+        ext_patience = 3  # minLRで改善が見られない場合の猶予回数
+        no_improve_count = 0
         
         for i in range(max_ext_epochs):
-            logger.info(f"Extension Epoch {i+1}/{max_ext_epochs}...")
+            logger.info(f"Extension Epoch {i+1}/{max_ext_epochs} (no_improve: {no_improve_count}/{ext_patience})...")
             
             # 1 Epoch training (epochs=1 means run 1 epoch from scratch in this call)
             hist_ext = model.fit(
@@ -893,9 +899,13 @@ def main():
                 best_ext_score = current_ext_score
                 final_val_acc = best_ext_score
                 model.save_weights(temp_weights_path) # Update best weights
+                no_improve_count = 0
             else:
-                logger.info("Score degraded. Stopping extension.")
-                break
+                no_improve_count += 1
+                logger.info(f"No improvement ({no_improve_count}/{ext_patience})")
+                if no_improve_count >= ext_patience:
+                    logger.info("Patience exhausted. Stopping extension.")
+                    break
         
         # Restore best weights from extension phase
         if os.path.exists(temp_weights_path):

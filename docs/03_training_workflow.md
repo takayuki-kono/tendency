@@ -106,7 +106,7 @@
 ### 学習フェーズ (`train_multitask_trial.py` 内部)
 1.  **Phase 1: Warmup (転移学習)**
     - **対象**: `EfficientNetV2` のバックボーンを凍結 (Freeze)。Head層（全結合層）のみ学習。
-    - **設定**: LR = `1e-3`, Epochs = 5 (EarlyStoppingあり)。
+    - **設定**: LR = キャリブレーション済み (Target Epoch 10, cal_epochs=20), Epochs = 20。
     - **目的**: ランダム初期化されたHead層を、バックボーンの特徴量に馴染ませる。
 2.  **Phase 2: Fine-tuning (微調整)**
     - **対象**: バックボーンの上位層を解凍 (Unfreeze)。`--unfreeze_layers` で層数指定可能 (デフォルト40)。
@@ -128,9 +128,10 @@
     - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
     - **最低LR**: `initial_lr × 0.05` (ゼロにはしない)。
 - **条件付きEpoch拡張 (Conditional Extension)**:
-    - Phase 2終了時に `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
+    - ベストエポックが最終エポック、または最終エポックのスコアがベストスコアと同等の場合、または `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
-    - **終了条件**: スコアが前エポックを下回るまで、または最大20エポック追加。
+    - **終了条件**: patience=3（3エポック連続で改善なし）で停止、または最大20エポック追加。
+    - 改善があった場合はpatienceカウンタをリセットし、ベスト重みを更新する。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
