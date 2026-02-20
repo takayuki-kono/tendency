@@ -143,6 +143,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 - **Phase 2 - 効率ベースの貪欲法 (Efficiency-Based Greedy Integration):**
     - 効率が高い順にパラメータをソートし、貪欲法的に統合。精度が下がった時点で統合を停止。
     - **Grayscaleは含めず**、フィルタパラメータのみで実行。
+    - **適応型加重平均 LR Exponent (2026-02-20 変更):** 複数のフィルタが同時に適用される場合、各フィルタの強度（例: pitch=5 の 5）を重みとし、パラメータ固有の `exp` を用いた加重平均 (`sum(exp * power) / sum(power)`) を計算し、その時点の動的 `exponent` として採用する。
 - **Final Selection:**
     - Greedy Integration結果、Single Best、Original(全パラメータ適用)を比較し、最高スコアの戦略を選択。
 - **Grayscale Test (最終ベスト決定後):**

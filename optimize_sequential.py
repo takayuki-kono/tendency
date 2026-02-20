@@ -333,52 +333,57 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
-            # Fixed Exponent Logic (2026-02-17) -> Dynamic (2026-02-18)
-            # Use parameter specific exponent if available
-            exponent = LR_SCALING_EXP1 if ratio >= LR_LOW_RATIO_THRESHOLD else LR_SCALING_EXP2
+            # Fixed Exponent Logic (2026-02-17) -> Dynamic (2026-02-18) -> Weighted Average (2026-02-20)
+            mapping = {
+                'y_diff': 'y_diff_percentile',
+                'sym': 'symmetry_percentile',
+                'pitch': 'pitch_percentile',
+                'sharpness_low': 'sharpness_percentile_low',
+                'sharpness_high': 'sharpness_percentile_high',
+                'eb_eye_high': 'eyebrow_eye_percentile_high',
+                'eb_eye_low': 'eyebrow_eye_percentile_low',
+                'face_size_low': 'face_size_percentile_low',
+                'face_size_high': 'face_size_percentile_high',
+                'mouth_open': 'mouth_open_percentile',
+                'retouching': 'retouching_percentile',
+                'mask': 'mask_percentile',
+                'glasses': 'glasses_percentile'
+            }
             
-            if active_param_name:
-                # Map script param names to config param names (e.g. 'y_diff' -> 'y_diff_percentile')
-                # Config keys usually have '_percentile' suffix or similar?
-                # calibrate_lr_scaling.py keys: 'y_diff_percentile', etc.
-                # optimize_sequential param names: 'y_diff', 'pitch', etc.
+            current_vals = {
+                'pitch': pitch, 'sym': sym, 'y_diff': y_diff, 'mouth_open': mouth_open,
+                'eb_eye_high': eb_eye_high, 'eb_eye_low': eb_eye_low, 
+                'sharpness_low': sharpness_low, 'sharpness_high': sharpness_high,
+                'face_size_low': face_size_low, 'face_size_high': face_size_high,
+                'retouching': retouching, 'mask': mask, 'glasses': glasses
+            }
+            
+            total_weighted_exp = 0.0
+            total_power = 0.0
+            
+            for param_key, power in current_vals.items():
+                try:
+                    power_val = float(power)
+                except ValueError:
+                    power_val = 0.0
                 
-                # Try simple mapping
-                config_key = active_param_name
-                if not config_key.endswith('_percentile') and not config_key.endswith('_low') and not config_key.endswith('_high'):
-                     config_key += '_percentile'
-                
-                # Handle special cases if names don't match perfectly
-                # optimize: eb_eye_high -> config: eyebrow_eye_percentile_high?
-                # optimize: sharpness_low -> config: sharpness_percentile_low
-                
-                # Check direct match first
-                if config_key in LR_INDIVIDUAL_EXPONENTS:
-                    p_exps = LR_INDIVIDUAL_EXPONENTS[config_key]
-                    exponent = p_exps['exp1'] if ratio >= LR_LOW_RATIO_THRESHOLD else p_exps['exp2']
-                    logger.info(f"Using Per-Parameter Exponent for {active_param_name} ({config_key}): {exponent:.4f}")
-                else:
-                    # Fallback mapping
-                    mapping = {
-                        'y_diff': 'y_diff_percentile',
-                        'sym': 'symmetry_percentile',
-                        'pitch': 'pitch_percentile',
-                        'sharpness_low': 'sharpness_percentile_low',
-                        'sharpness_high': 'sharpness_percentile_high',
-                        'eb_eye_high': 'eyebrow_eye_percentile_high',
-                        'eb_eye_low': 'eyebrow_eye_percentile_low',
-                        'face_size_low': 'face_size_percentile_low',
-                        'face_size_high': 'face_size_percentile_high',
-                        'mouth_open': 'mouth_open_percentile',
-                        'retouching': 'retouching_percentile',
-                        'mask': 'mask_percentile',
-                        'glasses': 'glasses_percentile'
-                    }
-                    mapped_key = mapping.get(active_param_name, active_param_name)
+                if power_val > 0:
+                    mapped_key = mapping.get(param_key) or param_key
+                    if not mapped_key.endswith('_percentile') and not mapped_key.endswith('_low') and not mapped_key.endswith('_high'):
+                         mapped_key += '_percentile'
+                         
                     if mapped_key in LR_INDIVIDUAL_EXPONENTS:
                         p_exps = LR_INDIVIDUAL_EXPONENTS[mapped_key]
-                        exponent = p_exps['exp1'] if ratio >= LR_LOW_RATIO_THRESHOLD else p_exps['exp2']
-                        logger.info(f"Using Per-Parameter Exponent for {active_param_name} (mapped to {mapped_key}): {exponent:.4f}")
+                        p_exp = p_exps['exp1'] if ratio >= LR_LOW_RATIO_THRESHOLD else p_exps['exp2']
+                        total_weighted_exp += p_exp * power_val
+                        total_power += power_val
+            
+            if total_power > 0:
+                exponent = total_weighted_exp / total_power
+                logger.info(f"Using Weighted Average Exponent: {exponent:.4f} (Total Power: {total_power:.1f})")
+            else:
+                exponent = LR_SCALING_EXP1 if ratio >= LR_LOW_RATIO_THRESHOLD else LR_SCALING_EXP2
+                logger.info(f"Using Default Global Exponent: {exponent:.4f} (No active filters)")
             
             # y = 1.0 (Linear Scaling) -> Updated
             x = relative_ratio
