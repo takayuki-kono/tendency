@@ -122,16 +122,16 @@
     - Task B: `Dense(2, ...)` (d, e)
     - ...
 - **損失関数**: `SparseCategoricalCrossentropy` (Mixup/LabelSmoothing使用時は `CategoricalCrossentropy`)
-- **評価指標**: `BalancedSparseCategoricalAccuracy` (自作指標。データ不均衡に頑健)
-- **学習率スケジュール**: Linear Decay (常に有効)
+- **評価指標**: `MinClassAccuracy` (最弱クラスの精度、全タスク平均)
+- **EarlyStopping**: 全タスク平均MinClassAccuracyが改善しなくなったらpatience回猶予後に停止 (損失関数ではなく精度ベース)
+- **学習率スケジュール**: Polynomial Decay (常に有効)
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
     - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
     - **最低LR**: `initial_lr × 0.05` (ゼロにはしない)。
 - **条件付きEpoch拡張 (Conditional Extension)**:
     - ベストエポックが最終エポック、または最終エポックのスコアがベストスコアと同等の場合、または `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
-    - **終了条件**: patience=3（3エポック連続で改善なし）で停止、または最大20エポック追加。
-    - 改善があった場合はpatienceカウンタをリセットし、ベスト重みを更新する。
+    - **終了条件**: 精度（平均MinClassAccuracy）が下がったら即停止、または最大20エポック追加。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)

@@ -4,7 +4,6 @@ import random
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler
 from tensorflow.keras import mixed_precision
 
 from tensorflow.keras.applications import EfficientNetV2B0, EfficientNetV2S, ResNet50V2, Xception, DenseNet121
@@ -628,29 +627,59 @@ def main():
 
     # コールバック生成関数 (Balanced Accuracyを監視 + Conditional Cosine Decay)
     def create_callbacks(total_epochs, initial_lr, target_epoch=0, enable_early_stopping=True):
-        
-        # Early Stopping Monitor
-        if len(task_labels) == 1:
-            monitor_metric = 'val_min_class_accuracy'
-        else:
-            monitor_metric = 'val_task_a_output_min_class_accuracy'
 
-        # Conditional Early Stopping: Only behave as EarlyStopping after decay condition is met
-        class ConditionalEarlyStopping(EarlyStopping):
-            def __init__(self, monitor='val_loss', patience=0, verbose=0, mode='auto', baseline=None, restore_best_weights=False, decay_scheduler=None):
-                super().__init__(monitor=monitor, patience=patience, verbose=verbose, mode=mode, baseline=baseline, restore_best_weights=restore_best_weights)
-                self.decay_scheduler = decay_scheduler
+        # 精度ベースEarlyStopping: 全タスク平均MinClassAccuracyを監視
+        class AccuracyEarlyStopping(tf.keras.callbacks.Callback):
+            """
+            全タスクの平均val_min_class_accuracyが低下したらpatience回猶予後に停止。
+            損失関数ではなく精度を基準にする。
+            """
+            def __init__(self, task_labels, patience=5, verbose=1):
+                super().__init__()
+                self.task_labels = task_labels
+                self.patience = patience
+                self.verbose = verbose
+                self.best_score = -1.0
+                self.wait = 0
+                self.best_weights = None
+                self.best_epoch = 0
 
             def on_epoch_end(self, epoch, logs=None):
-                # Check if decay has started. If not, do NOT execute EarlyStopping logic.
-                if self.decay_scheduler and self.decay_scheduler.decay_start_epoch is None:
-                    # Decay logic in scheduler runs on_epoch_end as well.
-                    # Since callbacks are executed in order, if Scheduler is first, decay_start_epoch might be set in this epoch.
-                    # If it is NOT set, we definitely skip.
+                if logs is None:
                     return
-                
-                # If decay started, behave like normal EarlyStopping
-                super().on_epoch_end(epoch, logs)
+                # 全タスクの平均MinClassAccuracyを計算
+                task_mins = []
+                if len(self.task_labels) == 1:
+                    val = logs.get('val_min_class_accuracy')
+                    if val is not None:
+                        task_mins.append(float(val))
+                else:
+                    for i in range(len(self.task_labels)):
+                        key = f"val_task_{chr(ord('a')+i)}_output_min_class_accuracy"
+                        val = logs.get(key)
+                        if val is not None:
+                            task_mins.append(float(val))
+
+                if not task_mins:
+                    return
+
+                current_score = sum(task_mins) / len(task_mins)
+
+                if current_score > self.best_score:
+                    self.best_score = current_score
+                    self.wait = 0
+                    self.best_weights = self.model.get_weights()
+                    self.best_epoch = epoch
+                else:
+                    self.wait += 1
+                    if self.verbose > 0:
+                        logger.info(f"AccuracyEarlyStopping: 精度改善なし ({self.wait}/{self.patience}), best={self.best_score:.4f} at epoch {self.best_epoch+1}")
+                    if self.wait >= self.patience:
+                        if self.verbose > 0:
+                            logger.info(f"AccuracyEarlyStopping: Patience超過。Epoch {self.best_epoch+1}のベスト重みを復元")
+                        self.model.stop_training = True
+                        if self.best_weights is not None:
+                            self.model.set_weights(self.best_weights)
 
         # エポックごとの精度サマリー出力
         class EpochSummaryCallback(tf.keras.callbacks.Callback):
@@ -693,8 +722,8 @@ def main():
                 patience = max(3, target_epoch // 2)
             else:
                 patience = 5
-            # Use ConditionalEarlyStopping linked to the scheduler
-            callbacks_list.insert(0, ConditionalEarlyStopping(monitor=monitor_metric, patience=patience, restore_best_weights=True, verbose=1, mode='max', decay_scheduler=scheduler))
+            # 精度ベースEarlyStopping（全タスク平均MinClassAccuracy監視）
+            callbacks_list.insert(0, AccuracyEarlyStopping(task_labels=task_labels, patience=patience, verbose=1))
         
         return callbacks_list
 
@@ -852,11 +881,9 @@ def main():
         
         max_ext_epochs = 20
         best_ext_score = final_val_acc
-        ext_patience = 3  # minLRで改善が見られない場合の猶予回数
-        no_improve_count = 0
         
         for i in range(max_ext_epochs):
-            logger.info(f"Extension Epoch {i+1}/{max_ext_epochs} (no_improve: {no_improve_count}/{ext_patience})...")
+            logger.info(f"Extension Epoch {i+1}/{max_ext_epochs}...")
             
             # 1 Epoch training (epochs=1 means run 1 epoch from scratch in this call)
             hist_ext = model.fit(
@@ -899,13 +926,9 @@ def main():
                 best_ext_score = current_ext_score
                 final_val_acc = best_ext_score
                 model.save_weights(temp_weights_path) # Update best weights
-                no_improve_count = 0
             else:
-                no_improve_count += 1
-                logger.info(f"No improvement ({no_improve_count}/{ext_patience})")
-                if no_improve_count >= ext_patience:
-                    logger.info("Patience exhausted. Stopping extension.")
-                    break
+                logger.info("Accuracy dropped. Stopping extension.")
+                break
         
         # Restore best weights from extension phase
         if os.path.exists(temp_weights_path):
