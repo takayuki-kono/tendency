@@ -283,11 +283,24 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 
     cache_exp_tag = f"_exp={total_weighted_exp/total_power:.4f}" if total_power > 0 else f"_exp_def"
     
-    cache_key = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}{lr_tag}{cache_exp_tag}_cnt={file_count}"
+    # 互換性のため、以前の形式のキャッシュキーも生成
+    cache_key_legacy = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}{lr_tag}_cnt={file_count}"
+    
+    # 新しい形式のキャッシュキー (exp値加味)
+    cache_key = cache_key_legacy + cache_exp_tag
     
     cache = load_cache()
+    
+    # 新キー -> 旧キー の順で検索
+    hit_key = None
     if cache_key in cache:
-        cached = cache[cache_key]
+        hit_key = cache_key
+    elif cache_key_legacy in cache:
+        hit_key = cache_key_legacy
+        logger.info(f"Using legacy cache key (no _exp tag)")
+        
+    if hit_key:
+        cached = cache[hit_key]
         # キャッシュには(raw_score, total_images, filtered_count)を保存
         if isinstance(cached, (list, tuple)) and len(cached) >= 2:
             if len(cached) == 3:
