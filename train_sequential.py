@@ -111,18 +111,19 @@ def run_trial(params):
     logger.info(f"{'='*50}")
 
     try:
-        MAX_LR_RETRIES = 3
+        # LR自動調整: best_epoch=10を目指して調整
+        TARGET_EPOCH = 10
+        MAX_LR_ADJUSTMENTS = 5
         current_lr = params.get('learning_rate', 1e-3)
-        best_trial_score = -1.0
-        best_trial_output = None
+        all_results = []  # [(lr, score, best_epoch, last_accu, full_output)]
         training_epochs = int(params.get('epochs', 20))
         
-        for lr_retry in range(MAX_LR_RETRIES + 1):
+        for adj_iter in range(MAX_LR_ADJUSTMENTS):
             trial_params = params.copy()
             trial_params['learning_rate'] = current_lr
             
-            if lr_retry > 0:
-                logger.info(f"  [LR Retry #{lr_retry}] Re-running with adjusted LR={current_lr:.8f}...")
+            if adj_iter > 0:
+                logger.info(f"  [LR Adjust #{adj_iter}] LR={current_lr:.8f}...")
             
             cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
             for key, value in trial_params.items():
@@ -166,33 +167,73 @@ def run_trial(params):
             epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
             last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
             
-            # ベストスコア更新
-            if trial_score > best_trial_score:
-                best_trial_score = trial_score
-                best_trial_output = full_output
+            all_results.append((current_lr, trial_score, best_epoch, last_epoch_accu, full_output))
+            logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
             
-            # LR調整判定（累積学習率比に基づく調整）
-            need_retry = False
-            effective_epoch = best_epoch
-            if best_epoch <= 9:
-                need_retry = True
-            elif best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < 1e-6:
-                effective_epoch = training_epochs  # 最終epochまで改善が続いている
-                need_retry = True
-            
-            if need_retry:
-                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=10, total_epochs=training_epochs)
-                current_lr *= ratio
-                logger.info(f"  [LR Adjust] BestEpoch={best_epoch} (effective={effective_epoch}) -> LR *= {ratio:.4f} -> {current_lr:.8f}")
-            
-            if not need_retry or lr_retry >= MAX_LR_RETRIES:
-                if lr_retry >= MAX_LR_RETRIES and need_retry:
-                    logger.info(f"  [LR Adjust] Max retries ({MAX_LR_RETRIES}) reached. Using best result.")
+            # best_epoch == TARGET_EPOCH なら調整完了
+            if best_epoch == TARGET_EPOCH:
+                logger.info(f"  Target epoch {TARGET_EPOCH} reached.")
                 break
+            
+            # LR調整（累積和比率）
+            effective_epoch = best_epoch
+            if best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < 1e-6:
+                effective_epoch = training_epochs
+            ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=TARGET_EPOCH, total_epochs=training_epochs)
+            current_lr *= ratio
+            logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_lr:.8f}")
         
-        # ベスト結果を使用
-        full_output = best_trial_output if best_trial_output else "\n".join(output_lines)
-        score = best_trial_score
+        # ベストスコア選択
+        all_results.sort(key=lambda x: -x[1])
+        best_score_val = all_results[0][1]
+        
+        # 同率チェック: 同スコアが複数あればepoch 11ターゲットで比較
+        tied = [r for r in all_results if abs(r[1] - best_score_val) < 1e-6]
+        
+        if len(tied) > 1:
+            logger.info(f"  [Tiebreaker] {len(tied)} results tied at {best_score_val:.4f}. Testing at target epoch 11...")
+            TIEBREAK_TARGET = 11
+            best_tb_score = -1.0
+            best_tb_output = None
+            
+            for t_lr, t_score, t_best_epoch, t_last_accu, t_output in tied:
+                tb_ratio = compute_lr_adjustment_ratio(t_best_epoch, target_epoch=TIEBREAK_TARGET, total_epochs=training_epochs)
+                tb_lr = t_lr * tb_ratio
+                logger.info(f"    Tiebreak: original LR={t_lr:.8f} (epoch={t_best_epoch}) -> LR={tb_lr:.8f} (target={TIEBREAK_TARGET})")
+                
+                tb_params = params.copy()
+                tb_params['learning_rate'] = tb_lr
+                tb_cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
+                for key, value in tb_params.items():
+                    tb_cmd.extend([f"--{key}", str(value)])
+                tb_cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
+                
+                tb_process = subprocess.Popen(
+                    tb_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding='utf-8', errors='replace'
+                )
+                tb_lines = []
+                for line in tb_process.stdout:
+                    line = line.rstrip()
+                    tb_lines.append(line)
+                    if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
+                        logger.info(f"    [TB] {line}")
+                tb_process.wait()
+                
+                tb_full = "\n".join(tb_lines)
+                tb_match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", tb_full)
+                tb_score = float(tb_match.group(1)) if tb_match else 0.0
+                logger.info(f"    Tiebreak result: Score={tb_score:.4f}")
+                
+                if tb_score > best_tb_score:
+                    best_tb_score = tb_score
+                    best_tb_output = tb_full
+            
+            score = best_tb_score
+            full_output = best_tb_output
+        else:
+            score = best_score_val
+            full_output = all_results[0][4]
 
         # スコア抽出 (Task A)
         match_a = re.search(r"FINAL_VAL_ACCURACY:\s*(\d+\.\d+)", full_output)
