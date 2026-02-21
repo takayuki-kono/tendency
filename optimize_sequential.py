@@ -487,13 +487,16 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
 
         logger.info(f"Running training with {model_name} (epochs=20, fine_tune=False)...")
         
-        # LR自動調整: best_epoch=10を目指して調整
-        TARGET_EPOCH = 10
-        MAX_LR_ADJUSTMENTS = 5
+        # LR自動調整: best_epoch 11~19は許容、それ以外はtarget=13で再調整
+        TARGET_EPOCH = 13
+        ACCEPTABLE_MIN = 11
+        ACCEPTABLE_MAX = 19
+        MAX_LR_ADJUSTMENTS = 3
         current_training_lr = adjusted_lr
-        all_results = []  # [(lr, score, best_epoch, last_accu, full_output)]
+        best_trial_score = 0.0
+        best_trial_output = None
         
-        for adj_iter in range(MAX_LR_ADJUSTMENTS):
+        for adj_iter in range(MAX_LR_ADJUSTMENTS + 1):
             if adj_iter > 0:
                 logger.info(f"  [LR Adjust #{adj_iter}] LR={current_training_lr:.8f}...")
             
@@ -543,82 +546,38 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
             last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
             
-            all_results.append((current_training_lr, trial_score, best_epoch, last_epoch_accu, full_output))
+            # ベストスコア更新
+            if trial_score > best_trial_score:
+                best_trial_score = trial_score
+                best_trial_output = full_output
+            
             logger.info(f"  BestEpoch={best_epoch}/20, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
             
-            # best_epoch == TARGET_EPOCH なら調整完了
-            if best_epoch == TARGET_EPOCH:
-                logger.info(f"  Target epoch {TARGET_EPOCH} reached.")
+            # 許容範囲内なら調整完了
+            if ACCEPTABLE_MIN <= best_epoch <= ACCEPTABLE_MAX:
+                logger.info(f"  BestEpoch {best_epoch} is in acceptable range [{ACCEPTABLE_MIN}-{ACCEPTABLE_MAX}].")
                 break
             
-            # LR調整（累積和比率）
+            # 再調整条件: best_epoch<=10, ==20, or last_accu==best_accu
+            need_adjust = False
             effective_epoch = best_epoch
-            if best_epoch == 20 or abs(last_epoch_accu - trial_score) < 1e-6:
+            if best_epoch <= 10:
+                need_adjust = True
+            elif best_epoch == 20 or abs(last_epoch_accu - trial_score) < 1e-6:
                 effective_epoch = 20
-            ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=TARGET_EPOCH, total_epochs=20)
-            current_training_lr *= ratio
-            logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_training_lr:.8f}")
-        
-        # ベストスコア選択
-        all_results.sort(key=lambda x: -x[1])
-        best_score_val = all_results[0][1]
-        
-        # 同率チェック: 同スコアが複数あればepoch 11ターゲットで比較
-        tied = [r for r in all_results if abs(r[1] - best_score_val) < 1e-6]
-        
-        if len(tied) > 1:
-            logger.info(f"  [Tiebreaker] {len(tied)} results tied at {best_score_val:.4f}. Testing at target epoch 11...")
-            TIEBREAK_TARGET = 11
-            best_tb_score = -1.0
-            best_tb_output = None
+                need_adjust = True
             
-            for t_lr, t_score, t_best_epoch, t_last_accu, t_output in tied:
-                # この候補のLRをepoch 11ターゲットに調整
-                tb_ratio = compute_lr_adjustment_ratio(t_best_epoch, target_epoch=TIEBREAK_TARGET, total_epochs=20)
-                tb_lr = t_lr * tb_ratio
-                logger.info(f"    Tiebreak: original LR={t_lr:.8f} (epoch={t_best_epoch}) -> LR={tb_lr:.8f} (target={TIEBREAK_TARGET})")
-                
-                # LR差し替えて再実行
-                tb_cmd = []
-                skip_next = False
-                for ci, arg in enumerate(cmd_train):
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if arg == "--learning_rate":
-                        tb_cmd.extend(["--learning_rate", str(tb_lr)])
-                        skip_next = True
-                    else:
-                        tb_cmd.append(arg)
-                
-                tb_process = subprocess.Popen(
-                    tb_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding='utf-8', errors='replace'
-                )
-                tb_lines = []
-                for line in tb_process.stdout:
-                    line = line.rstrip()
-                    tb_lines.append(line)
-                    if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
-                        logger.info(f"    [TB] {line}")
-                tb_process.wait()
-                
-                tb_full = "\n".join(tb_lines)
-                tb_match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", tb_full)
-                tb_score = float(tb_match.group(1)) if tb_match else 0.0
-                tb_epoch_match = re.search(r"BEST_EPOCH:\s*(\d+)", tb_full)
-                tb_best_epoch = int(tb_epoch_match.group(1)) if tb_epoch_match else 20
-                logger.info(f"    Tiebreak result: Score={tb_score:.4f}, BestEpoch={tb_best_epoch}")
-                
-                if tb_score > best_tb_score:
-                    best_tb_score = tb_score
-                    best_tb_output = tb_full
-            
-            raw_score = best_tb_score
-            full_output = best_tb_output
-        else:
-            raw_score = best_score_val
-            full_output = all_results[0][4]
+            if need_adjust and adj_iter < MAX_LR_ADJUSTMENTS:
+                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=TARGET_EPOCH, total_epochs=20)
+                current_training_lr *= ratio
+                logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_training_lr:.8f}")
+            else:
+                break
+        
+        # ベスト結果を使用
+        if best_trial_output is not None:
+            full_output = best_trial_output
+        raw_score = best_trial_score
         
         # Extract Score
         match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
@@ -840,7 +799,7 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     if not candidates:
         logger.info("  No valid candidates found (no improvement).")
 
-    return candidates
+    return candidates, scores
 
 def main():
     global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
@@ -955,11 +914,14 @@ def main():
     # 全候補リスト (Best Score, Best Eff mixed)
     all_candidates = []
 
+    all_param_scores = {}  # パラメータごとの全スコア辞書（タイブレーカー用）
+
     for param_name in param_names:
-        # Returns list of dicts: [{'val':..., 'score':..., 'efficiency':...}, ...]
-        candidates = optimize_single_param(
+        # Returns (candidates, scores_dict)
+        candidates, param_scores = optimize_single_param(
             param_name, current_params, best_model, baseline_score, baseline_filtered
         )
+        all_param_scores[param_name] = param_scores
         
         for cand in candidates:
             cand['param_name'] = param_name
@@ -972,6 +934,95 @@ def main():
                 global_best_params[param_name] = cand['val']
                 global_best_desc = f"Single Best ({param_name}={cand['val']})"
                 logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {cand['score']:.4f}")
+
+    # --- Phase 1 Tiebreaker: 同率パラメータの再評価 ---
+    logger.info("\n>>> Phase 1 Tiebreaker: Checking for tied parameters <<<")
+    tied_found = False
+    
+    for param_name, param_scores in all_param_scores.items():
+        if not param_scores:
+            continue
+        # このパラメータのベストスコアを取得
+        best_param_score = max(s[0] for s in param_scores.values())
+        if best_param_score <= baseline_score:
+            continue
+        # 同率の値を検出
+        tied_values = [v for v, s in param_scores.items() if abs(s[0] - best_param_score) < 1e-6]
+        if len(tied_values) <= 1:
+            continue
+        
+        # 同率あり → キャッシュ削除して再評価
+        tied_found = True
+        logger.info(f"  [Tie] {param_name}: values {tied_values} tied at {best_param_score:.4f}. Re-evaluating...")
+        
+        # 該当キャッシュエントリを削除
+        cache = load_cache()
+        file_count = count_files(DATA_SOURCE_DIR)
+        keys_to_delete = []
+        for tv in tied_values:
+            # run_trialのキャッシュキーパターンに合わせて検索
+            param_pattern = f"{param_name.replace('_', '')}" if '_' not in param_name else param_name
+            for ck in list(cache.keys()):
+                # パラメータ値が含まれるキーを探す
+                # 各パラメータのキャッシュキーフォーマットに合致するか簡易チェック
+                param_key_map = {
+                    'pitch': f'pitch={tv}', 'sym': f'sym={tv}', 'y_diff': f'ydiff={tv}',
+                    'mouth_open': f'mouth={tv}', 'eb_eye_high': f'ebh={tv}', 'eb_eye_low': f'ebl={tv}',
+                    'sharpness_low': f'sharplow={tv}', 'sharpness_high': f'sharphigh={tv}',
+                    'face_size_low': f'fsl={tv}', 'face_size_high': f'fsh={tv}',
+                    'retouching': f'retouch={tv}', 'mask': f'mask={tv}', 'glasses': f'glasses={tv}'
+                }
+                if param_name in param_key_map and param_key_map[param_name] in ck:
+                    keys_to_delete.append(ck)
+        
+        for dk in set(keys_to_delete):
+            if dk in cache:
+                del cache[dk]
+                logger.info(f"    Cache cleared: {dk[:80]}...")
+        save_cache(cache)
+        
+        # 再評価
+        best_retry_score = -1.0
+        best_retry_val = tied_values[0]
+        for tv in tied_values:
+            eval_params = {k: 0 for k in current_params}
+            eval_params[param_name] = tv
+            res = run_trial(
+                eval_params['pitch'], eval_params['sym'], eval_params['y_diff'], eval_params['mouth_open'],
+                eval_params['eb_eye_high'], eval_params['eb_eye_low'],
+                eval_params['sharpness_low'], eval_params['sharpness_high'],
+                eval_params['face_size_low'], eval_params['face_size_high'],
+                eval_params['retouching'], eval_params['mask'], eval_params['glasses'],
+                grayscale=False, model_name=best_model, active_param_name=param_name
+            )
+            retry_score = res[0]
+            logger.info(f"    {param_name}={tv} -> Score: {retry_score:.4f}")
+            if retry_score > best_retry_score:
+                best_retry_score = retry_score
+                best_retry_val = tv
+        
+        logger.info(f"  [Tie Resolved] {param_name}: winner={best_retry_val} (Score={best_retry_score:.4f})")
+        
+        # all_candidates内の該当パラメータの候補を更新
+        for cand in all_candidates:
+            if cand['param_name'] == param_name and cand['val'] in tied_values:
+                if cand['val'] == best_retry_val:
+                    cand['score'] = best_retry_score
+                    cand['improvement'] = best_retry_score - baseline_score
+                    # efficiency再計算
+                    f_diff = cand['filtered'] - baseline_filtered
+                    cand['efficiency'] = cand['improvement'] / (f_diff + 1) if f_diff >= 0 else cand['improvement']
+        
+        # Global Best更新チェック
+        if best_retry_score > global_best_score:
+            global_best_score = best_retry_score
+            global_best_params = {k: 0 for k in current_params}
+            global_best_params[param_name] = best_retry_val
+            global_best_desc = f"Single Best ({param_name}={best_retry_val})"
+            logger.info(f"  [Global Best Update] {global_best_desc}, Score: {best_retry_score:.4f}")
+    
+    if not tied_found:
+        logger.info("  No tied parameters found.")
 
     # --- 精度上昇効率一覧 (Phase 1 結果サマリー) ---
     logger.info("\n" + "=" * 70)

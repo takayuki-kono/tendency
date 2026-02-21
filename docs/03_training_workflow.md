@@ -50,11 +50,14 @@
 - **モデル選択ステップ**:
     - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`):
-    - 各トレーニング実行後に `BEST_EPOCH` を確認し、**best_epoch == 10** になるまでLRを調整して再実行する（最大5回）。
-    - **調整計算**: `new_lr = current_lr * cumsum[effective_epoch] / cumsum[target=10]`
-      - `cumsum[n]` = 各epochの相対LR (`min_lr_ratio + (1-min_lr_ratio) * decay`) の1〜n合計
-      - best_epoch==20 or last_accu==best_accu の場合は `effective_epoch = 20`
-    - **同率処理**: 複数の試行が同じベストスコアの場合、各候補を **epoch 11** ターゲットに再調整して再実行し、高スコア側を採用。
+    - 各トレーニング実行後に `BEST_EPOCH` を確認し、許容範囲外なら再調整（最大3回）。
+    - **許容範囲**: best_epoch 11～19 → 調整不要
+    - **再調整条件**: best_epoch <= 10、best_epoch == 20、または last_accu == best_accu
+    - **調整計算**: `new_lr = current_lr * cumsum[effective_epoch] / cumsum[target=13]`
+    - 全試行中の最高スコアの結果を採用する。
+- **Phase 1 タイブレーカー**:
+    - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
+    - 該当キャッシュを削除して再評価し、勝者を決定。
 
 
 ### 学習率の動的スケーリング (Dynamic LR Scaling)
