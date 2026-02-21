@@ -42,6 +42,7 @@
 - **特徴**: SVMよりも最終的なタスクに近いが、1試行に時間がかかる（数分/回）。
 - **探索設定**:
     - **探索点**: `[0, 2, 5, 25, 50]` (初期探索) -> 1%刻みの二分探索 (Refinement)。
+- **Phase 1 結果サマリー**: 全パラメータの独立探索完了後に「精度上昇効率一覧」をログ出力。各パラメータの Best Score 候補と Best Efficiency 候補をテーブル形式で表示し、全体の Overall Best Score / Best Efficiency も出力する。
 - **出力アーティファクト**:
     - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。
     - `outputs/optimization_analysis.json`: 最適化プロセスの全候補、Greedy統合の履歴、最終パラメータを含む詳細ログ。
@@ -68,6 +69,13 @@
     - 探索範囲: `0.15` ～ `1.0`
     - 固定探索点: `[0.25, 0.5, 0.75, 1.0]`
     - 主要パラメータ（Y-Diff, Sharpness, Symmetry等）ごとに個別の最適値を算出し、最適化時に使い分ける。
+
+### 学習パラメータ最適化（LRキャリブレーション付き）
+- **スクリプト**: `optimize_param_exp2.py`
+- **目的**: 各ハイパーパラメータの候補ごとにLRキャリブレーション（best_epoch=10）を行い、公平な条件で比較する。
+- **背景**: パラメータ変更（dropout増加、flip追加等）により最適LRが変わるため、固定LRでの比較は不公平になる。
+- **対象パラメータ**: model_name, weight_decay, num_dense_layers, dense_units, dropout, label_smoothing, mixup_alpha, rotation_range, shift_range, zoom_range, horizontal_flip
+- **出力**: `outputs/optimized_train_params.json`
 
 ---
 
@@ -106,8 +114,9 @@
 ### 学習フェーズ (`train_multitask_trial.py` 内部)
 1.  **Phase 1: Warmup (転移学習)**
     - **対象**: `EfficientNetV2` のバックボーンを凍結 (Freeze)。Head層（全結合層）のみ学習。
-    - **設定**: LR = キャリブレーション済み (Target Epoch 10, cal_epochs=20), Epochs = 20。
+    - **設定**: LR = `warmup_lr`（キャリブレーション済み）, Epochs = `warmup_epochs`（デフォルト5）。
     - **目的**: ランダム初期化されたHead層を、バックボーンの特徴量に馴染ませる。
+    - **条件**: `warmup_lr > 0` かつ `fine_tune=True` の場合のみFT前に実行。
 2.  **Phase 2: Fine-tuning (微調整)**
     - **対象**: バックボーンの上位層を解凍 (Unfreeze)。`--unfreeze_layers` で層数指定可能 (デフォルト40)。
     - **設定**: LR = `1e-5` (低学習率), Epochs = 50。

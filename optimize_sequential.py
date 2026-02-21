@@ -842,6 +842,54 @@ def main():
                 global_best_desc = f"Single Best ({param_name}={cand['val']})"
                 logger.info(f"  [Global Best Update] New best found in single trial: {global_best_desc}, Score: {cand['score']:.4f}")
 
+    # --- 精度上昇効率一覧 (Phase 1 結果サマリー) ---
+    logger.info("\n" + "=" * 70)
+    logger.info("精度上昇効率一覧 (Phase 1 Summary)")
+    logger.info("=" * 70)
+    logger.info(f"Baseline Score: {baseline_score:.4f}, Baseline Filtered: {baseline_filtered}")
+    logger.info("-" * 70)
+    logger.info(f"{'Param':<18} {'Type':<10} {'Val':>5} {'Score':>8} {'Improv':>8} {'Filtered':>8} {'Efficiency':>12}")
+    logger.info("-" * 70)
+    
+    # パラメータごとに Best Score / Best Efficiency をグループ化して表示
+    for param_name in param_names:
+        param_cands = [c for c in all_candidates if c['param_name'] == param_name]
+        if not param_cands:
+            logger.info(f"{param_name:<18} {'---':<10} {'':>5} {'N/A':>8} {'':>8} {'':>8} {'':>12}")
+            continue
+        
+        # Best Score 候補
+        best_score_cand = max(param_cands, key=lambda x: x['score'])
+        logger.info(
+            f"{param_name:<18} {'BestScore':<10} {best_score_cand['val']:>5} "
+            f"{best_score_cand['score']:>8.4f} {best_score_cand['improvement']:>+8.4f} "
+            f"{best_score_cand['filtered']:>8} {best_score_cand['efficiency']:>12.6f}"
+        )
+        
+        # Best Efficiency 候補 (Best Scoreと異なる場合のみ表示)
+        best_eff_cand = max(param_cands, key=lambda x: x['efficiency'])
+        if best_eff_cand['val'] != best_score_cand['val']:
+            logger.info(
+                f"{'':>18} {'BestEff':<10} {best_eff_cand['val']:>5} "
+                f"{best_eff_cand['score']:>8.4f} {best_eff_cand['improvement']:>+8.4f} "
+                f"{best_eff_cand['filtered']:>8} {best_eff_cand['efficiency']:>12.6f}"
+            )
+    
+    logger.info("-" * 70)
+    logger.info(f"Total candidates: {len(all_candidates)}")
+    if all_candidates:
+        overall_best_score_cand = max(all_candidates, key=lambda x: x['score'])
+        overall_best_eff_cand = max(all_candidates, key=lambda x: x['efficiency'])
+        logger.info(
+            f"Overall Best Score:      {overall_best_score_cand['param_name']}={overall_best_score_cand['val']} "
+            f"(Score={overall_best_score_cand['score']:.4f}, Eff={overall_best_score_cand['efficiency']:.6f})"
+        )
+        logger.info(
+            f"Overall Best Efficiency: {overall_best_eff_cand['param_name']}={overall_best_eff_cand['val']} "
+            f"(Score={overall_best_eff_cand['score']:.4f}, Eff={overall_best_eff_cand['efficiency']:.6f})"
+        )
+    logger.info("=" * 70)
+
     # Phase 2: Efficiency-Based Greedy Integration (Grayscale無しで実行)
     logger.info("\n>>> Phase 2: Efficiency-Based Greedy Integration <<<")
     
