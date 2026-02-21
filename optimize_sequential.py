@@ -65,7 +65,7 @@ def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, mi
         for e in range(1, min(n, total_epochs) + 1):
             progress = e / total_epochs
             decay = 1.0 - progress
-            relative_lr = min_lr_ratio + (1.0 - min_lr_ratio) * decay
+            relative_lr = (1.0 - min_lr_ratio) * decay
             s += relative_lr
         return s
     
@@ -164,7 +164,11 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     # スコア抽出
     match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
     score = float(match_score.group(1)) if match_score else 0.0
-    
+    if match_score is None:
+        logger.warning("[Calibration] FINAL_VAL_ACCURACY not found in output (score=0). Last 15 lines:")
+        for line in output_lines[-15:]:
+            logger.warning("  %s", line.rstrip())
+
     logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
     return best_epoch, score
 
@@ -485,21 +489,22 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         cmd_train.extend(["--fine_tune", "False"])
         cmd_train.extend(["--auto_lr_target_epoch", "0"]) # 内部自動スケーリングを無効化
 
-        logger.info(f"Running training with {model_name} (epochs=20, fine_tune=False)...")
-        
-        # LR自動調整: best_epoch 11~19は許容、それ以外はtarget=13で再調整
+        # train_sequential.py と同じ LR 再調整条件（許容 11〜19、target=13、最大3回）
+        training_epochs = 20
         TARGET_EPOCH = 13
         ACCEPTABLE_MIN = 11
         ACCEPTABLE_MAX = 19
         MAX_LR_ADJUSTMENTS = 3
+        logger.info(f"Running training with {model_name} (epochs={training_epochs}, fine_tune=False)...")
+
         current_training_lr = adjusted_lr
         best_trial_score = 0.0
         best_trial_output = None
-        
+
         for adj_iter in range(MAX_LR_ADJUSTMENTS + 1):
             if adj_iter > 0:
                 logger.info(f"  [LR Adjust #{adj_iter}] LR={current_training_lr:.8f}...")
-            
+
             # LR更新: cmd_trainの--learning_rateを差し替え
             retry_cmd = []
             skip_next = False
@@ -512,63 +517,63 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                     skip_next = True
                 else:
                     retry_cmd.append(arg)
-            
+
             # Popenでリアルタイム出力 + スコア抽出
             process = subprocess.Popen(
                 retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding='utf-8', errors='replace'
             )
-            
+
             train_output = []
             for line in process.stdout:
                 line = line.rstrip()
                 train_output.append(line)
                 if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
                     logger.info(f"  [Train] {line}")
-            
+
             process.wait()
-            
+
             if process.returncode != 0:
                 logger.error(f"Training failed (returncode={process.returncode})")
                 return (0.0, 0, 0)
-            
+
             full_output = "\n".join(train_output)
-            
+
             # BEST_EPOCH抽出
             match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
-            best_epoch = int(match_epoch.group(1)) if match_epoch else 20
-            
+            best_epoch = int(match_epoch.group(1)) if match_epoch else training_epochs
+
             # スコア抽出
             match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
             trial_score = float(match_score.group(1)) if match_score else 0.0
-            
+
             # 各エポックのMinClassAccスコアを抽出してlast epoch accuを取得
             epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
             last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
-            
+
             # ベストスコア更新
             if trial_score > best_trial_score:
                 best_trial_score = trial_score
                 best_trial_output = full_output
-            
-            logger.info(f"  BestEpoch={best_epoch}/20, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
-            
-            # 許容範囲内なら調整完了
+
+            logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
+
+            # 許容範囲内なら調整完了（train と同じ）
             if ACCEPTABLE_MIN <= best_epoch <= ACCEPTABLE_MAX:
                 logger.info(f"  BestEpoch {best_epoch} is in acceptable range [{ACCEPTABLE_MIN}-{ACCEPTABLE_MAX}].")
                 break
-            
-            # 再調整条件: best_epoch<=10, ==20, or last_accu==best_accu
+
+            # 再調整条件: best_epoch<=10, ==最終epoch, or last_accu==best_accu（train と同じ）
             need_adjust = False
             effective_epoch = best_epoch
             if best_epoch <= 10:
                 need_adjust = True
-            elif best_epoch == 20 or abs(last_epoch_accu - trial_score) < 1e-6:
-                effective_epoch = 20
+            elif best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < 1e-6:
+                effective_epoch = training_epochs
                 need_adjust = True
-            
+
             if need_adjust and adj_iter < MAX_LR_ADJUSTMENTS:
-                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=TARGET_EPOCH, total_epochs=20)
+                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=TARGET_EPOCH, total_epochs=training_epochs)
                 current_training_lr *= ratio
                 logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_training_lr:.8f}")
             else:

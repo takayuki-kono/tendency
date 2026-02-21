@@ -49,10 +49,10 @@
     - `run_optimized_preprocess.bat`: 最適化されたパラメータを適用するための実行バッチファイル。
 - **モデル選択ステップ**:
     - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
-- **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`):
+- **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、許容範囲外なら再調整（最大3回）。
     - **許容範囲**: best_epoch 11～19 → 調整不要
-    - **再調整条件**: best_epoch <= 10、best_epoch == 20、または last_accu == best_accu
+    - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu == best_accu
     - **調整計算**: `new_lr = current_lr * cumsum[effective_epoch] / cumsum[target=13]`
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
