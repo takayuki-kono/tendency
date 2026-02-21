@@ -49,13 +49,20 @@
     - `run_optimized_preprocess.bat`: 最適化されたパラメータを適用するための実行バッチファイル。
 - **モデル選択ステップ**:
     - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
+- **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`):
+    - 各トレーニング実行後に `BEST_EPOCH` を確認し、不適切な場合はLRを調整して最大3回リトライする。
+    - **BestEpoch <= 9**: LR高すぎ → 累積和比率で下げる
+    - **BestEpoch == 最終Epoch** または **最終Epochのスコア == ベストスコア**: LR低すぎ → 累積和比率で上げる
+    - **調整計算**: `new_lr = current_lr * cumsum[effective_epoch] / cumsum[target_epoch=10]`
+      - `cumsum[n]` = 各epochの相対LR (`min_lr_ratio + (1-min_lr_ratio) * decay`) の1〜n合計
+    - リトライ中で最もスコアの高い結果を採用する。
 
 
 ### 学習率の動的スケーリング (Dynamic LR Scaling)
 前処理フィルタによりデータ量が減少した場合、学習率を以下の多項式曲線に基づいて自動調整します。
 - **目的**: データ数が少ない場合（フィルタで厳しく選別した場合）に適した学習率へ動的に補正する。
 - **計算式** (2026-02-18更新):
-  - `exponent`: **パラメータごとに個別最適化** された値を使用（`optimize_param_exp.py` で算出）。
+  - `exponent`: `outputs/lr_scaling_config.json` に保存された値を使用（パラメータごとに個別最適化済み）。
   - Exp Range: `0.15` ~ `1.0` (Binary Search)
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
   - データ残存率 (`ratio`) が閾値（0.5）以上 (`High Ratio`) の場合は `exp1`、未満 (`Low Ratio`) の場合は `exp2` を適用。
@@ -69,13 +76,6 @@
     - 探索範囲: `0.15` ～ `1.0`
     - 固定探索点: `[0.25, 0.5, 0.75, 1.0]`
     - 主要パラメータ（Y-Diff, Sharpness, Symmetry等）ごとに個別の最適値を算出し、最適化時に使い分ける。
-
-### 学習パラメータ最適化（LRキャリブレーション付き）
-- **スクリプト**: `optimize_param_exp2.py`
-- **目的**: 各ハイパーパラメータの候補ごとにLRキャリブレーション（best_epoch=10）を行い、公平な条件で比較する。
-- **背景**: パラメータ変更（dropout増加、flip追加等）により最適LRが変わるため、固定LRでの比較は不公平になる。
-- **対象パラメータ**: model_name, weight_decay, num_dense_layers, dense_units, dropout, label_smoothing, mixup_alpha, rotation_range, shift_range, zoom_range, horizontal_flip
-- **出力**: `outputs/optimized_train_params.json`
 
 ---
 

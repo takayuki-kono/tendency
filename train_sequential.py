@@ -39,6 +39,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
+    """
+    学習率スケジュールの累積和に基づいてLR調整比率を計算する。
+    best_epochの累積学習量がtarget_epochの累積学習量と等しくなるようにLRを調整する比率。
+    new_lr = current_lr * cumsum[best_epoch] / cumsum[target_epoch]
+    """
+    def lr_cumsum(n):
+        s = 0.0
+        for e in range(1, min(n, total_epochs) + 1):
+            progress = e / total_epochs
+            decay = 1.0 - progress
+            relative_lr = min_lr_ratio + (1.0 - min_lr_ratio) * decay
+            s += relative_lr
+        return s
+    
+    cs_best = lr_cumsum(best_epoch)
+    cs_target = lr_cumsum(target_epoch)
+    
+    if cs_target <= 0:
+        return 1.0
+    
+    return cs_best / cs_target
+
+
 def count_files(directory):
     if not os.path.exists(directory):
         return 0
@@ -86,35 +110,89 @@ def run_trial(params):
     logger.info(f"Cache Miss. Running process... (File Count: {file_count})")
     logger.info(f"{'='*50}")
 
-    cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
-    for key, value in params.items():
-        cmd.extend([f"--{key}", str(value)])
-        
-    # シングルタスクモード設定
-    cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
-
     try:
-        # Popenでリアルタイム出力
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding='utf-8', errors='replace'
-        )
+        MAX_LR_RETRIES = 3
+        current_lr = params.get('learning_rate', 1e-3)
+        best_trial_score = -1.0
+        best_trial_output = None
+        training_epochs = int(params.get('epochs', 20))
         
-        output_lines = []
-        for line in process.stdout:
-            line = line.rstrip()
-            output_lines.append(line)
-            # エポック情報やスコアを含む行をリアルタイム表示
-            if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=']):
-                logger.info(f"  [Train] {line}")
-        
-        process.wait()
-        
-        if process.returncode != 0:
-            logger.error(f"Training failed (returncode={process.returncode})")
-            return 0.0
+        for lr_retry in range(MAX_LR_RETRIES + 1):
+            trial_params = params.copy()
+            trial_params['learning_rate'] = current_lr
+            
+            if lr_retry > 0:
+                logger.info(f"  [LR Retry #{lr_retry}] Re-running with adjusted LR={current_lr:.8f}...")
+            
+            cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
+            for key, value in trial_params.items():
+                cmd.extend([f"--{key}", str(value)])
+            cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
 
-        full_output = "\n".join(output_lines)
+            # Popenでリアルタイム出力
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace'
+            )
+            
+            output_lines = []
+            for line in process.stdout:
+                line = line.rstrip()
+                output_lines.append(line)
+                if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH', 'FT_BEST_EPOCH']):
+                    logger.info(f"  [Train] {line}")
+            
+            process.wait()
+            
+            if process.returncode != 0:
+                logger.error(f"Training failed (returncode={process.returncode})")
+                return 0.0
+
+            full_output = "\n".join(output_lines)
+            
+            # スコア抽出
+            match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
+            trial_score = float(match_score.group(1)) if match_score else 0.0
+            
+            # BEST_EPOCH抽出
+            is_ft = str(trial_params.get('fine_tune', 'False')).lower() == 'true'
+            if is_ft:
+                match_epoch = re.search(r"FT_BEST_EPOCH:\s*(\d+)", full_output)
+            else:
+                match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
+            best_epoch = int(match_epoch.group(1)) if match_epoch else training_epochs
+            
+            # 各エポックのMinClassAccスコアを抽出してlast epoch accuを取得
+            epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
+            last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
+            
+            # ベストスコア更新
+            if trial_score > best_trial_score:
+                best_trial_score = trial_score
+                best_trial_output = full_output
+            
+            # LR調整判定（累積学習率比に基づく調整）
+            need_retry = False
+            effective_epoch = best_epoch
+            if best_epoch <= 9:
+                need_retry = True
+            elif best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < 1e-6:
+                effective_epoch = training_epochs  # 最終epochまで改善が続いている
+                need_retry = True
+            
+            if need_retry:
+                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=10, total_epochs=training_epochs)
+                current_lr *= ratio
+                logger.info(f"  [LR Adjust] BestEpoch={best_epoch} (effective={effective_epoch}) -> LR *= {ratio:.4f} -> {current_lr:.8f}")
+            
+            if not need_retry or lr_retry >= MAX_LR_RETRIES:
+                if lr_retry >= MAX_LR_RETRIES and need_retry:
+                    logger.info(f"  [LR Adjust] Max retries ({MAX_LR_RETRIES}) reached. Using best result.")
+                break
+        
+        # ベスト結果を使用
+        full_output = best_trial_output if best_trial_output else "\n".join(output_lines)
+        score = best_trial_score
 
         # スコア抽出 (Task A)
         match_a = re.search(r"FINAL_VAL_ACCURACY:\s*(\d+\.\d+)", full_output)
@@ -122,7 +200,7 @@ def run_trial(params):
         # 他のタスクも抽出してログに出す
         for char_code in range(ord('A'), ord('Z') + 1):
             task_label = chr(char_code)
-            match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*(\d+\.\d+)", full_output)
+            match_task = re.search(rf"TASK_{task_label}_ACCURACY:\s*(\d+\.\d+)", full_output)
             if match_task:
                 logger.info(f"Task {task_label} Accuracy: {float(match_task.group(1))}")
 
@@ -133,7 +211,7 @@ def run_trial(params):
             logger.info(details_match.group(0).strip())
 
         if match_a:
-            score = float(match_a.group(1))
+            score = max(score, float(match_a.group(1)))
             logger.info(f"Result: Val Accuracy = {score}")
             
             # キャッシュ保存
@@ -232,12 +310,10 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
 
 def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None, score_priority=False):
     """
-    cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを探す。
-    
-    原理:
-    - best_epoch < target → LR高すぎ → 下げる
-    - best_epoch > target → LR低すぎ → 上げる
-    - best_epoch / target の比率でLRをスケーリング
+    cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを二分探索で探す。
+    - best_epoch < target → LR高すぎ → 下げる（上限記録）
+    - best_epoch > target → LR低すぎ → 上げる（下限記録）
+    - 両方の境界が揃ったら中間値を試す
     
     Returns:
         tuple: (calibrated_lr, final_score)
@@ -250,8 +326,6 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
     else:
         target_min = target_max = float(target_best_epoch)
         
-    target_in_cal = (target_min + target_max) / 2.0
-    
     current_lr = initial_lr
     
     logger.info(f"\n{'='*50}")
@@ -263,12 +337,15 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
     logger.info(f"  initial_lr = {initial_lr:.8f}")
     logger.info(f"{'='*50}")
     
-    best_candidate = None  # (distance, -score, lr, best_epoch, score)
-    epoch_history = []  # 中央値ベースの収束判定用
-    max_iterations = 5
+    best_candidate = None  # (sort_key, lr, best_epoch, score)
+    max_iterations = 10
+    
+    # 二分探索の境界 (LR値で管理)
+    lr_low = None   # best_epoch > target になった最大LR（LR低すぎ側）
+    lr_high = None  # best_epoch < target になった最小LR（LR高すぎ側）
+    
     for iteration in range(max_iterations):
         best_epoch, score = run_calibration_trial(current_params, current_lr, cal_epochs)
-        epoch_history.append(best_epoch)
         
         if best_epoch < target_min:
             distance = target_min - best_epoch
@@ -284,43 +361,43 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
         
-        # 中央値を計算
-        sorted_epochs = sorted(epoch_history)
-        median_epoch = sorted_epochs[len(sorted_epochs) // 2]
+        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}, Distance={distance:.0f}")
         
-        if median_epoch < target_min:
-            median_distance = target_min - median_epoch
-        elif median_epoch > target_max:
-            median_distance = median_epoch - target_max
-        else:
-            median_distance = 0.0
-        
-        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
-        logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}, median_dist={median_distance:.0f}")
-        
-        # 中央値がターゲット範囲に一致（または内包）したら収束
-        if target_min <= median_epoch <= target_max:
-            logger.info(f"Calibration converged! median={median_epoch} is within target [{target_min:.0f}, {target_max:.0f}]")
+        # ターゲットに一致したら終了
+        if target_min <= best_epoch <= target_max:
+            logger.info(f"Target Hit! best_epoch={best_epoch} is within [{target_min:.0f}, {target_max:.0f}]")
             break
         
-        # LRスケーリング: (best_epoch / target) ^ 0.75 で比率を計算
+        # 境界更新
         if best_epoch < target_min:
-            raw_scale = best_epoch / target_min
-        elif best_epoch > target_max:
-            raw_scale = best_epoch / target_max
+            # LR高すぎ → 上限を記録
+            if lr_high is None or current_lr < lr_high:
+                lr_high = current_lr
         else:
-            raw_scale = 1.0
-            
-        scale = raw_scale ** 0.75 if raw_scale >= 0 else 0.5
-        scale = max(0.5, min(scale, 2.0))
-        new_lr = current_lr * scale
+            # LR低すぎ → 下限を記録
+            if lr_low is None or current_lr > lr_low:
+                lr_low = current_lr
         
-        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target_range=[{target_min:.0f}, {target_max:.0f}], raw={raw_scale:.2f}, scale(^0.75)={scale:.2f}")
+        # 次のLR決定
+        if lr_low is not None and lr_high is not None:
+            # 両境界あり → 二分探索（中間値）
+            new_lr = (lr_low + lr_high) / 2.0
+            logger.info(f"  Binary search: low={lr_low:.8f}, high={lr_high:.8f}, mid={new_lr:.8f}")
+        else:
+            # 片側のみ → 累積学習率比でスケーリング
+            target_mid = (target_min + target_max) / 2.0
+            scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
+            scale = max(0.3, min(scale, 3.0))  # 極端な変更を防ぐ
+            new_lr = current_lr * scale
+            logger.info(f"  Cumsum ratio scaling: scale={scale:.4f}")
+        
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
-        # 変化が小さすぎる場合は停滞とみなし終了
-        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
-            logger.info("Calibration update became too small; stopping early.")
+        
+        # 収束判定: LR変化が十分小さい
+        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.02:
+            logger.info(f"  LR change too small. Stopping.")
             break
+        
         current_lr = new_lr
 
     if best_candidate is not None:
@@ -395,7 +472,7 @@ def main():
     # Epoch 10でベストになるLRをキャリブレーション
     logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 10) <<<")
     calibrated_lr, _ = calibrate_base_lr(
-        current_params, initial_lr=1e-3,
+        current_params, initial_lr=5e-4,
         cal_epochs=20, target_best_epoch=10, score_priority=True
     )
     logger.info(f"Target 10 LR={calibrated_lr:.8f}")
@@ -469,10 +546,14 @@ def main():
     logger.info("="*50)
     
     # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # FT本番: target 10〜15の範囲で探索し、最も良かったスコアのLRを採用
+    # FT本番: Head学習のLRをwarmupとして引き継ぎ、FT用LRをキャリブレーション
+    warmup_lr = current_params['learning_rate']  # Head学習で最適化したLR
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
+    current_params['warmup_lr'] = warmup_lr
+    current_params['warmup_epochs'] = 5
+    logger.info(f"Warmup LR set to {warmup_lr:.8f} (from Head training calibration)")
     
     logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 10) <<<")
     ft_lr, _ = calibrate_base_lr(

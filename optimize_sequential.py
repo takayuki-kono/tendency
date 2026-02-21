@@ -54,6 +54,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
+    """
+    学習率スケジュールの累積和に基づいてLR調整比率を計算する。
+    best_epochの累積学習量がtarget_epochの累積学習量と等しくなるようにLRを調整する比率。
+    new_lr = current_lr * cumsum[best_epoch] / cumsum[target_epoch]
+    """
+    def lr_cumsum(n):
+        s = 0.0
+        for e in range(1, min(n, total_epochs) + 1):
+            progress = e / total_epochs
+            decay = 1.0 - progress
+            relative_lr = min_lr_ratio + (1.0 - min_lr_ratio) * decay
+            s += relative_lr
+        return s
+    
+    cs_best = lr_cumsum(best_epoch)
+    cs_target = lr_cumsum(target_epoch)
+    
+    if cs_target <= 0:
+        return 1.0
+    
+    return cs_best / cs_target
+
+
 def count_files(directory):
     if not os.path.exists(directory):
         return 0
@@ -198,16 +222,12 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             logger.info(f"Calibration converged! median={median_epoch} == target={target_in_cal:.0f}")
             break
         
-        # LRスケーリング: (best_epoch / target) ^ 0.75 で比率を計算
-        # best_epoch=2, target=10 → 0.2^0.75=0.30 → LRを下げる
-        # best_epoch=15, target=10 → 1.5^0.75=1.36 → LRを上げる
-        raw_scale = best_epoch / target_in_cal
-        scale = raw_scale ** 0.75 if raw_scale >= 0 else 0.5
-        # 極端な変更を防ぐ（収束しやすいように少し保守的）
-        scale = max(0.5, min(scale, 2.0))
+        # LRスケーリング: 学習率スケジュールの累積和比率で調整
+        scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_in_cal), total_epochs=cal_epochs)
+        scale = max(0.3, min(scale, 3.0))  # 極端な変更を防ぐ
         new_lr = current_lr * scale
         
-        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.1f}, raw={raw_scale:.2f}, scale(^0.75)={scale:.2f}")
+        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.0f}, cumsum_ratio={scale:.4f}")
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         # 変化が小さすぎる場合は停滞とみなし終了
         # if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
@@ -467,37 +487,102 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
 
         logger.info(f"Running training with {model_name} (epochs=20, fine_tune=False)...")
         
-        # Popenでリアルタイム出力 + スコア抽出
-        process = subprocess.Popen(
-            cmd_train, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding='utf-8', errors='replace'
-        )
+        MAX_LR_RETRIES = 3
+        current_training_lr = adjusted_lr
+        best_trial_score = 0.0
+        best_trial_output = None
         
-        train_output = []
-        for line in process.stdout:
-            line = line.rstrip()
-            train_output.append(line)
-            # エポック情報やスコアを含む行のみ表示
-            if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
-                logger.info(f"  [Train] {line}")
+        for lr_retry in range(MAX_LR_RETRIES + 1):
+            if lr_retry > 0:
+                logger.info(f"  [LR Retry #{lr_retry}] Re-running with adjusted LR={current_training_lr:.8f}...")
+            
+            # LR更新: cmd_trainの--learning_rateを差し替え
+            retry_cmd = []
+            skip_next = False
+            for ci, arg in enumerate(cmd_train):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == "--learning_rate":
+                    retry_cmd.extend(["--learning_rate", str(current_training_lr)])
+                    skip_next = True
+                else:
+                    retry_cmd.append(arg)
+            
+            # Popenでリアルタイム出力 + スコア抽出
+            process = subprocess.Popen(
+                retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace'
+            )
+            
+            train_output = []
+            for line in process.stdout:
+                line = line.rstrip()
+                train_output.append(line)
+                # エポック情報やスコアを含む行のみ表示
+                if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
+                    logger.info(f"  [Train] {line}")
+            
+            process.wait()
+            
+            if process.returncode != 0:
+                logger.error(f"Training failed (returncode={process.returncode})")
+                return (0.0, 0, 0)
+            
+            full_output = "\n".join(train_output)
+            
+            # BEST_EPOCH抽出
+            match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
+            best_epoch = int(match_epoch.group(1)) if match_epoch else 20
+            
+            # スコア抽出
+            match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
+            trial_score = float(match_score.group(1)) if match_score else 0.0
+            
+            # 各エポックのMinClassAccスコアを抽出してlast epoch accuを取得
+            epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
+            last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
+            
+            # ベストスコア更新
+            if trial_score > best_trial_score:
+                best_trial_score = trial_score
+                best_trial_output = full_output
+            
+            logger.info(f"  BestEpoch={best_epoch}/20, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
+            
+            # LR調整判定（累積学習率比に基づく調整）
+            need_retry = False
+            effective_epoch = best_epoch
+            if best_epoch <= 9:
+                need_retry = True
+            elif best_epoch == 20 or abs(last_epoch_accu - trial_score) < 1e-6:
+                effective_epoch = 20  # 最終epochまで改善が続いている
+                need_retry = True
+            
+            if need_retry:
+                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=10, total_epochs=20)
+                current_training_lr *= ratio
+                logger.info(f"  [LR Adjust] BestEpoch={best_epoch} (effective={effective_epoch}) -> LR *= {ratio:.4f} -> {current_training_lr:.8f}")
+            
+            if not need_retry or lr_retry >= MAX_LR_RETRIES:
+                if lr_retry >= MAX_LR_RETRIES and need_retry:
+                    logger.info(f"  [LR Adjust] Max retries ({MAX_LR_RETRIES}) reached. Using best result.")
+                break
         
-        process.wait()
+        # ベストスコアの結果を使用
+        if best_trial_output is not None:
+            full_output = best_trial_output
+        raw_score = best_trial_score
         
-        if process.returncode != 0:
-            logger.error(f"Training failed (returncode={process.returncode})")
-            return (0.0, 0, 0)
-        
-        full_output = "\n".join(train_output)
-
         # Extract Score
         match = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
         if match:
-            raw_score = float(match.group(1))
+            raw_score = max(raw_score, float(match.group(1)))
             
             # 各タスクのスコアを抽出してログに出力
             for char_code in range(ord('A'), ord('Z') + 1):
                 task_label = chr(char_code)
-                match_task = re.search(f"TASK_{task_label}_ACCURACY:\s*([\d\.]+)", full_output)
+                match_task = re.search(rf"TASK_{task_label}_ACCURACY:\s*([\d.]+)", full_output)
                 if match_task:
                     logger.info(f"  Task {task_label}: {float(match_task.group(1)):.4f}")
 
