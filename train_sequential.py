@@ -39,6 +39,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# LR再調整・キャリブレーション共通定数（本番許容範囲とtarget。run_trial と calibrate_base_lr で共用）
+LR_TARGET_EPOCH = 13
+LR_ACCEPTABLE_MIN = 11
+LR_ACCEPTABLE_MAX = 19
+LR_MAX_ADJUSTMENTS = 3
+
 def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
     """
     学習率スケジュールの累積和に基づいてLR調整比率を計算する。
@@ -50,7 +56,7 @@ def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, mi
         for e in range(1, min(n, total_epochs) + 1):
             progress = e / total_epochs
             decay = 1.0 - progress
-            relative_lr = min_lr_ratio + (1.0 - min_lr_ratio) * decay
+            relative_lr = (1.0 - min_lr_ratio) * decay
             s += relative_lr
         return s
     
@@ -111,17 +117,13 @@ def run_trial(params):
     logger.info(f"{'='*50}")
 
     try:
-        # LR自動調整: best_epoch 11~19は許容、それ以外はtarget=13で再調整
-        TARGET_EPOCH = 13
-        ACCEPTABLE_MIN = 11
-        ACCEPTABLE_MAX = 19
-        MAX_LR_ADJUSTMENTS = 3
+        # LR自動調整: 許容範囲外なら target で再調整（定数はモジュール共通）
         current_lr = params.get('learning_rate', 1e-3)
         best_trial_score = -1.0
         best_trial_output = None
         training_epochs = int(params.get('epochs', 20))
         
-        for adj_iter in range(MAX_LR_ADJUSTMENTS + 1):
+        for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
             trial_params = params.copy()
             trial_params['learning_rate'] = current_lr
             
@@ -178,8 +180,8 @@ def run_trial(params):
             logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
             
             # 許容範囲内なら調整完了
-            if ACCEPTABLE_MIN <= best_epoch <= ACCEPTABLE_MAX:
-                logger.info(f"  BestEpoch {best_epoch} is in acceptable range [{ACCEPTABLE_MIN}-{ACCEPTABLE_MAX}].")
+            if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX:
+                logger.info(f"  BestEpoch {best_epoch} is in acceptable range [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}].")
                 break
             
             # 再調整条件: best_epoch<=10, ==20, or last_accu==best_accu
@@ -191,8 +193,8 @@ def run_trial(params):
                 effective_epoch = training_epochs
                 need_adjust = True
             
-            if need_adjust and adj_iter < MAX_LR_ADJUSTMENTS:
-                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=TARGET_EPOCH, total_epochs=training_epochs)
+            if need_adjust and adj_iter < LR_MAX_ADJUSTMENTS:
+                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=LR_TARGET_EPOCH, total_epochs=training_epochs)
                 current_lr *= ratio
                 logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_lr:.8f}")
             else:
@@ -310,10 +312,12 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     # スコア抽出
     match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
     score = float(match_score.group(1)) if match_score else 0.0
-    
+    # 最終エポックの精度（LR調整終了条件と合わせるため）
+    epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
+    last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
+
     logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
-    
-    return best_epoch, score
+    return best_epoch, score, last_epoch_accu
 
 
 def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None, score_priority=False):
@@ -346,15 +350,15 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
     logger.info(f"{'='*50}")
     
     best_candidate = None  # (sort_key, lr, best_epoch, score)
-    max_iterations = 10
-    
+    max_iterations = LR_MAX_ADJUSTMENTS + 1  # trainのLR調整と同じ最大試行数
+
     # 二分探索の境界 (LR値で管理)
     lr_low = None   # best_epoch > target になった最大LR（LR低すぎ側）
     lr_high = None  # best_epoch < target になった最小LR（LR高すぎ側）
-    
+
     for iteration in range(max_iterations):
-        best_epoch, score = run_calibration_trial(current_params, current_lr, cal_epochs)
-        
+        best_epoch, score, last_epoch_accu = run_calibration_trial(current_params, current_lr, cal_epochs)
+
         if best_epoch < target_min:
             distance = target_min - best_epoch
         elif best_epoch > target_max:
@@ -375,7 +379,19 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         if target_min <= best_epoch <= target_max:
             logger.info(f"Target Hit! best_epoch={best_epoch} is within [{target_min:.0f}, {target_max:.0f}]")
             break
-        
+        # 本番のLR再調整と同じ許容範囲なら打ち切り
+        if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX:
+            logger.info(f"BestEpoch {best_epoch} is in acceptable range [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}]. Stopping calibration.")
+            break
+        # 本番と同じ need_adjust: 再調整しないなら打ち切り
+        need_adjust = best_epoch <= 10 or best_epoch == cal_epochs or abs(last_epoch_accu - score) < 1e-6
+        if not need_adjust:
+            logger.info(f"BestEpoch {best_epoch} not in adjust range (no need_adjust). Stopping calibration.")
+            break
+        if iteration >= LR_MAX_ADJUSTMENTS:
+            logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping calibration.")
+            break
+
         # 境界更新
         if best_epoch < target_min:
             # LR高すぎ → 上限を記録
