@@ -530,6 +530,8 @@ def main():
     parser.add_argument('--auto_lr_target_epoch', type=int, default=0)
     parser.add_argument('--enable_early_stopping', type=str, default='True')
     parser.add_argument('--decay_exponent', type=float, default=1.0) # Decay curve exponent (1.0=Linear, 0.5=Sqrt, 2.0=Poly)
+    parser.add_argument('--warmup_lr', type=float, default=0.0) # Warmup LR (0=warmupなし, >0=FT前にHead学習)
+    parser.add_argument('--warmup_epochs', type=int, default=5) # Warmupのエポック数
 
     args = parser.parse_args()
     
@@ -732,6 +734,63 @@ def main():
         logger.info(f"--- Fine-tuning Mode ({args.epochs} epochs) ---")
         training_epochs = args.epochs
         
+        # --- Warmup Phase (Head層のみ事前学習) ---
+        if args.warmup_lr > 0:
+            warmup_epochs = args.warmup_epochs
+            logger.info(f"--- Warmup Phase: Head only, LR={args.warmup_lr:.8f}, {warmup_epochs} epochs ---")
+            
+            # Warmup用コンパイル（バックボーン凍結のまま）
+            output_names_wu = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
+            label_smoothing_wu = augment_params.get('label_smoothing', 0.0)
+            use_categorical_wu = augment_params.get('mixup_alpha', 0.0) > 0.0 or label_smoothing_wu > 0.0
+            if use_categorical_wu:
+                loss_dict_wu = {name: tf.keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing_wu) for name in output_names_wu}
+            else:
+                loss_dict_wu = {name: 'sparse_categorical_crossentropy' for name in output_names_wu}
+            loss_weights_wu = {name: 1.0 / len(task_labels) for name in output_names_wu}
+            metrics_dict_wu = {}
+            for name, labels in zip(output_names_wu, task_labels):
+                m_list = ['accuracy']
+                if use_categorical_wu:
+                    m_list = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')]
+                m_list.append(BalancedSparseCategoricalAccuracy(len(labels), name='balanced_accuracy'))
+                m_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
+                metrics_dict_wu[name] = m_list
+            
+            try:
+                opt_wu = tf.keras.optimizers.legacy.Adam(learning_rate=args.warmup_lr, clipnorm=1.0)
+            except AttributeError:
+                opt_wu = tf.keras.optimizers.Adam(learning_rate=args.warmup_lr, clipnorm=1.0)
+            
+            model.compile(
+                optimizer=opt_wu,
+                loss=loss_dict_wu,
+                loss_weights=loss_weights_wu,
+                metrics=metrics_dict_wu,
+                jit_compile=False
+            )
+
+            # Warmup中ベストの重みを保存し、終了後に復元（epoch2がbestなど道中が良い場合に対応）
+            warmup_best_path = 'temp_warmup_best.weights.h5'
+            warmup_monitor = f"val_task_{chr(ord('a'))}_output_min_class_accuracy" if len(task_labels) > 1 else 'val_min_class_accuracy'
+            warmup_callbacks = list(create_callbacks(warmup_epochs, args.warmup_lr, target_epoch=0, enable_early_stopping=False))
+            warmup_callbacks.append(tf.keras.callbacks.ModelCheckpoint(
+                warmup_best_path, monitor=warmup_monitor, mode='max', save_best_only=True, save_weights_only=True, verbose=0
+            ))
+            warmup_history = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=warmup_epochs,
+                callbacks=warmup_callbacks,
+                verbose=2
+            )
+            if os.path.exists(warmup_best_path):
+                model.load_weights(warmup_best_path)
+                logger.info("Restored best warmup weights (by min_class_accuracy).")
+            if os.path.exists(warmup_best_path):
+                os.remove(warmup_best_path)
+            logger.info(f"--- Warmup Complete ---")
+        
         # ベースモデル解凍
         base_model_layer = None
         for layer in model.layers:
@@ -787,7 +846,7 @@ def main():
         jit_compile=False
     )
     
-    # --- 学習実行 (単一フェーズ) ---
+    # --- 学習実行 (FTフェーズ or Head学習フェーズ) ---
     enable_early_stopping = args.enable_early_stopping.lower() == 'true'
     history = model.fit(
         train_ds,
@@ -953,123 +1012,105 @@ def main():
     # 最終結果出力 (全タスク)
     # print(f"FINAL_VAL_ACCURACY: {final_val_acc}") # 計算方法を変更するため一旦コメントアウト
 
-    # 全タスクのスコアを表示
-    if 'history' in locals() and hasattr(history, 'history'):
-        task_names = [chr(65+i) for i in range(len(task_labels))] # A, B, C...
-        for char_code, task_label in zip(range(ord('a'), ord('a') + len(task_labels)), task_names):
-            # Try Balanced Accuracy first
-            task_key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
-            task_key_balanced = f"val_task_{chr(char_code)}_output_balanced_accuracy"
-            task_key_acc = f"val_task_{chr(char_code)}_output_accuracy"
-            
-            if task_key_min in history.history:
-                best_task_score = max(history.history[task_key_min])
-                print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (MinClass)")
-            elif task_key_balanced in history.history:
-                best_task_score = max(history.history[task_key_balanced])
-                print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (Balanced)")
-            elif task_key_acc in history.history:
-                best_task_score = max(history.history[task_key_acc])
-                print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (Normal)")
-
-    # --- 詳細なクラス別精度の出力 ---
-    logger.info("Computing detailed per-class accuracy...")
-    
-    # バリデーションデータの予測
-    val_preds = model.predict(val_ds, verbose=0)
-    
-    # Datasetから正解ラベルを回収
-    val_labels_dict = {}
-    for _, y_batch, *_ in val_ds: # y_batch is dict
-        for k, v in y_batch.items():
-            if k not in val_labels_dict: val_labels_dict[k] = []
-            val_labels_dict[k].append(v.numpy())
-            
-    # Concatenate
-    for k in val_labels_dict:
-        val_labels_dict[k] = np.concatenate(val_labels_dict[k], axis=0)
-        
-    # 各タスクごとに計算
-    # model.outputs の順序と shape を考慮
-    output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
-    
-    # validation予測値の整形 (単一タスクの場合はリストではない可能性がある)
-    if isinstance(val_preds, np.ndarray):
-        val_preds = [val_preds] # リスト化
-        
-    for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
-        # 予測ラベル
-        pred_probs = val_preds[i] # [N, NumClasses]
-        pred_labels = np.argmax(pred_probs, axis=-1)
-        
-        # 正解ラベル
-        true_labels_raw = val_labels_dict[task_name] # [N, ] or [N, NumClasses] (OneHot)
-        
-        # One-hotならインデックスに戻す
-        if len(true_labels_raw.shape) > 1 and true_labels_raw.shape[-1] > 1:
-            true_labels = np.argmax(true_labels_raw, axis=-1)
-        else:
-            true_labels = true_labels_raw.astype(int)
-            
-        print(f"\n--- Task {chr(65+i)} Details ({len(class_names)} classes) ---")
-        
-        # クラスごとの精度計算
-        # Confusion Matrix的なものを手計算
-        for cls_idx, cls_name in enumerate(class_names):
-            # このクラスが正解であるインデックス
-            mask = (true_labels == cls_idx)
-            count = np.sum(mask)
-            
-            if count > 0:
-                correct = np.sum(pred_labels[mask] == cls_idx)
-                accuracy = correct / count
-                print(f"  Class '{cls_name}': {accuracy:.4f} ({correct}/{count})")
-            else:
-                print(f"  Class '{cls_name}': N/A (0 samples)")
-
-    logger.info("Detailed metrics complete.")
-    
-    # --- 最終スコア出力 ---
-    # final_val_acc は history から計算した全エポック中のベスト（Phase1/Phase2含む）
-    # model.predict による再計算は最終エポックの重みを使うため、
-    # restore_best_weightsが効かないケースではベストと乖離する。
-    # よって history ベースの final_val_acc を優先する。
-    
-    # 参考: 現在のモデル重みでの再計算スコアもログに出す
-    task_min_accuracies = []
-    for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
-        pred_probs = val_preds[i]
-        pred_labels = np.argmax(pred_probs, axis=-1)
-        
-        true_labels_raw = val_labels_dict[task_name]
-        if len(true_labels_raw.shape) > 1 and true_labels_raw.shape[-1] > 1:
-            true_labels = np.argmax(true_labels_raw, axis=-1)
-        else:
-            true_labels = true_labels_raw.astype(int)
-            
-        class_accuracies = []
-        for cls_idx, cls_name in enumerate(class_names):
-            mask = (true_labels == cls_idx)
-            count = np.sum(mask)
-            if count > 0:
-                correct = np.sum(pred_labels[mask] == cls_idx)
-                accuracy = correct / count
-                class_accuracies.append(accuracy)
+    try:
+        # 全タスクのスコアを表示
+        if 'history' in locals() and hasattr(history, 'history'):
+            task_names = [chr(65+i) for i in range(len(task_labels))] # A, B, C...
+            for char_code, task_label in zip(range(ord('a'), ord('a') + len(task_labels)), task_names):
+                # Try Balanced Accuracy first
+                task_key_min = f"val_task_{chr(char_code)}_output_min_class_accuracy"
+                task_key_balanced = f"val_task_{chr(char_code)}_output_balanced_accuracy"
+                task_key_acc = f"val_task_{chr(char_code)}_output_accuracy"
                 
-        if class_accuracies:
-            task_min_acc = min(class_accuracies)
-            task_min_accuracies.append(task_min_acc)
-            
-    if task_min_accuracies:
-        current_model_score = sum(task_min_accuracies) / len(task_min_accuracies)
-        logger.info(f"Current model weights score (MinClass): {current_model_score:.8f}")
-        logger.info(f"History best score (MinClass): {final_val_acc:.8f}")
-        # historyのベストと現在のモデル重みスコアの大きい方を使用
-        best_score = max(final_val_acc, current_model_score)
-        print(f"FINAL_VAL_ACCURACY: {best_score:.8f}")
-        logger.info(f"FINAL_VAL_ACCURACY (max of history/current): {best_score:.8f}")
-    else:
-        print(f"FINAL_VAL_ACCURACY: {final_val_acc}")
+                if task_key_min in history.history:
+                    best_task_score = max(history.history[task_key_min])
+                    print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (MinClass)")
+                elif task_key_balanced in history.history:
+                    best_task_score = max(history.history[task_key_balanced])
+                    print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (Balanced)")
+                elif task_key_acc in history.history:
+                    best_task_score = max(history.history[task_key_acc])
+                    print(f"TASK_{task_label}_ACCURACY: {best_task_score:.4f} (Normal)")
+
+        # --- 詳細なクラス別精度の出力 ---
+        logger.info("Computing detailed per-class accuracy...")
+
+        # バリデーションデータの予測
+        val_preds = model.predict(val_ds, verbose=0)
+
+        # Datasetから正解ラベルを回収
+        val_labels_dict = {}
+        for _, y_batch, *_ in val_ds:  # y_batch is dict
+            for k, v in y_batch.items():
+                if k not in val_labels_dict:
+                    val_labels_dict[k] = []
+                val_labels_dict[k].append(v.numpy())
+
+        # Concatenate
+        for k in val_labels_dict:
+            val_labels_dict[k] = np.concatenate(val_labels_dict[k], axis=0)
+
+        # 各タスクごとに計算
+        output_names = [f'task_{chr(97+i)}_output' for i in range(len(task_labels))]
+
+        if isinstance(val_preds, np.ndarray):
+            val_preds = [val_preds]
+
+        for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
+            pred_probs = val_preds[i]
+            pred_labels = np.argmax(pred_probs, axis=-1)
+            true_labels_raw = val_labels_dict[task_name]
+            if len(true_labels_raw.shape) > 1 and true_labels_raw.shape[-1] > 1:
+                true_labels = np.argmax(true_labels_raw, axis=-1)
+            else:
+                true_labels = true_labels_raw.astype(int)
+            print(f"\n--- Task {chr(65+i)} Details ({len(class_names)} classes) ---")
+            for cls_idx, cls_name in enumerate(class_names):
+                mask = (true_labels == cls_idx)
+                count = np.sum(mask)
+                if count > 0:
+                    correct = np.sum(pred_labels[mask] == cls_idx)
+                    accuracy = correct / count
+                    print(f"  Class '{cls_name}': {accuracy:.4f} ({correct}/{count})")
+                else:
+                    print(f"  Class '{cls_name}': N/A (0 samples)")
+
+        logger.info("Detailed metrics complete.")
+
+        # 現在のモデル重みでの再計算スコア
+        task_min_accuracies = []
+        for i, (task_name, class_names) in enumerate(zip(output_names, task_labels)):
+            pred_probs = val_preds[i]
+            pred_labels = np.argmax(pred_probs, axis=-1)
+            true_labels_raw = val_labels_dict[task_name]
+            if len(true_labels_raw.shape) > 1 and true_labels_raw.shape[-1] > 1:
+                true_labels = np.argmax(true_labels_raw, axis=-1)
+            else:
+                true_labels = true_labels_raw.astype(int)
+            class_accuracies = []
+            for cls_idx, cls_name in enumerate(class_names):
+                mask = (true_labels == cls_idx)
+                count = np.sum(mask)
+                if count > 0:
+                    correct = np.sum(pred_labels[mask] == cls_idx)
+                    accuracy = correct / count
+                    class_accuracies.append(accuracy)
+            if class_accuracies:
+                task_min_accuracies.append(min(class_accuracies))
+
+        if task_min_accuracies:
+            current_model_score = sum(task_min_accuracies) / len(task_min_accuracies)
+            logger.info(f"Current model weights score (MinClass): {current_model_score:.8f}")
+            logger.info(f"History best score (MinClass): {final_val_acc:.8f}")
+            best_score = max(final_val_acc, current_model_score)
+            if np.isnan(best_score) or best_score is None:
+                best_score = safe_score
+            print(f"FINAL_VAL_ACCURACY: {float(best_score):.8f}")
+            logger.info(f"FINAL_VAL_ACCURACY (max of history/current): {best_score:.8f}")
+        else:
+            print(f"FINAL_VAL_ACCURACY: {safe_score:.8f}")
+    except Exception as e:
+        logger.exception("Detailed metrics failed (FINAL_VAL_ACCURACY already printed): %s", e)
 
 if __name__ == "__main__":
     main()

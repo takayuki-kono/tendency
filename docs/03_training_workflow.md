@@ -120,6 +120,7 @@
     - **設定**: LR = `warmup_lr`（キャリブレーション済み）, Epochs = `warmup_epochs`（デフォルト5）。
     - **目的**: ランダム初期化されたHead層を、バックボーンの特徴量に馴染ませる。
     - **条件**: `warmup_lr > 0` かつ `fine_tune=True` の場合のみFT前に実行。
+    - **ベスト重みの復元**: Warmup 中に val min_class_accuracy が最良だったエポックの重みを保存し、Warmup 終了後に復元してから FT に進む（epoch 2 が best など道中が良い場合に対応）。
 2.  **Phase 2: Fine-tuning (微調整)**
     - **対象**: バックボーンの上位層を解凍 (Unfreeze)。`--unfreeze_layers` で層数指定可能 (デフォルト40)。
     - **設定**: LR = `1e-5` (低学習率), Epochs = 50。

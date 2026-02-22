@@ -219,7 +219,8 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         best_epoch, score, last_epoch_accu = run_calibration_trial(model_name, current_lr, cal_epochs)
         epoch_history.append(best_epoch)
         distance = abs(best_epoch - target_in_cal)
-        candidate = (distance, -score, current_lr, best_epoch, score)
+        # 道中で一番良かったスコアを採用するため、スコア最優先で候補を比較
+        candidate = (-score, distance, current_lr, best_epoch, score)
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
         
