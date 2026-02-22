@@ -229,19 +229,10 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         
         logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
         logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}")
-        
-        # 中央値がターゲットに一致したら収束
-        if median_epoch == target_in_cal:
-            logger.info(f"Calibration converged! median={median_epoch} == target={target_in_cal:.0f}")
-            break
-        # 本番のLR再調整と同じ許容範囲（モジュール定数）ならそれでよしとして打ち切る
-        if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX:
-            logger.info(f"BestEpoch {best_epoch} is in acceptable range [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}]. Stopping calibration.")
-            break
-        # 本番と同じ need_adjust: 再調整しないなら打ち切り
-        need_adjust = best_epoch <= 10 or best_epoch == cal_epochs or abs(last_epoch_accu - score) < 1e-6
-        if not need_adjust:
-            logger.info(f"BestEpoch {best_epoch} not in adjust range (no need_adjust). Stopping calibration.")
+
+        # 終了条件: (1) 11≤best_epoch≤19 かつ last_epoch_accu≠best (2) 試行回数が LR_MAX_ADJUSTMENTS に達した
+        if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - score) >= 1e-6:
+            logger.info(f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Stopping calibration.")
             break
         if iteration >= LR_MAX_ADJUSTMENTS:
             logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping calibration.")

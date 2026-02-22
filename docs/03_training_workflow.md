@@ -73,7 +73,7 @@
   - **ターゲットEpoch**: **10** (2026-02-19変更)。
    - **手順**:
      1. Epoch 10 に収束するLR (`lr_10`) を特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**: train の LR 調整終了条件をすべて適用。(1) ターゲット一致 (2) 許容 11～19 (3) need_adjust でないとき (4) 最大試行数 = LR_MAX_ADJUSTMENTS+1。run_calibration_trial は last_epoch_accu も返す。
+  - **キャリブレーションの打ち切り**: (1) **11≤best_epoch≤19 かつ last_epoch_accu≠best** → 終了 (2) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
 - **キャリブレーション設定**:
   - **学習率減衰特性 (Exponent) の探索**:
     - 探索範囲: `0.15` ～ `1.0`
