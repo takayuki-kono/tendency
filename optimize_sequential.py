@@ -59,6 +59,7 @@ LR_TARGET_EPOCH = 13
 LR_ACCEPTABLE_MIN = 11
 LR_ACCEPTABLE_MAX = 19
 LR_MAX_ADJUSTMENTS = 3
+LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ以上で「last≠best」とみなす
 
 def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
     """
@@ -232,7 +233,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}")
 
         # 終了条件: (1) 11≤best_epoch≤19 かつ last_epoch_accu≠best (2) 試行回数が LR_MAX_ADJUSTMENTS に達した
-        if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - score) >= 1e-6:
+        if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - score) >= LR_LAST_ACCU_EPS:
             logger.info(f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Stopping calibration.")
             break
         if iteration >= LR_MAX_ADJUSTMENTS:
@@ -567,17 +568,17 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
 
             logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
 
-            # 許容範囲内なら調整完了（train と同じ）
-            if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX:
-                logger.info(f"  BestEpoch {best_epoch} is in acceptable range [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}].")
+            # 許容範囲内かつ last≠best なら調整完了（キャリブレーションと同じ2条件に揃える）
+            if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - trial_score) >= LR_LAST_ACCU_EPS:
+                logger.info(f"  BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Done.")
                 break
 
-            # 再調整条件: best_epoch<=10, ==最終epoch, or last_accu==best_accu（train と同じ）
+            # 再調整条件: best_epoch<=10, ==最終epoch, or last_accu≈best_accu
             need_adjust = False
             effective_epoch = best_epoch
             if best_epoch <= 10:
                 need_adjust = True
-            elif best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < 1e-6:
+            elif best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < LR_LAST_ACCU_EPS:
                 effective_epoch = training_epochs
                 need_adjust = True
 

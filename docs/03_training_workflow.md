@@ -50,9 +50,9 @@
 - **モデル選択ステップ**:
     - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
-    - 各トレーニング実行後に `BEST_EPOCH` を確認し、許容範囲外なら再調整（最大3回）。
-    - **許容範囲**: best_epoch 11～19 → 調整不要
-    - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu == best_accu
+    - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（最大3回）。
+    - **終了条件（キャリブレーションと同じ）**: (1) best_epoch 11～19 **かつ** last_epoch_accu≠best（差が LR_LAST_ACCU_EPS=0.01 以上）→ 調整終了 (2) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
+    - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01）
     - **調整計算**: `new_lr = current_lr * cumsum[effective_epoch] / cumsum[target=13]`
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
@@ -73,7 +73,7 @@
   - **ターゲットEpoch**: **10** (2026-02-19変更)。
    - **手順**:
      1. Epoch 10 に収束するLR (`lr_10`) を特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**: (1) **11≤best_epoch≤19 かつ last_epoch_accu≠best** → 終了 (2) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
+  - **キャリブレーションの打ち切り**: (1) **11≤best_epoch≤19 かつ last_epoch_accu≠best**（差が LR_LAST_ACCU_EPS=0.01 以上で「≠best」）→ 終了 (2) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
 - **キャリブレーション設定**:
   - **学習率減衰特性 (Exponent) の探索**:
     - 探索範囲: `0.15` ～ `1.0`
