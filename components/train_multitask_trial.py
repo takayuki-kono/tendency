@@ -433,6 +433,27 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
     return model
 
 
+class LinearWarmupScheduler(tf.keras.callbacks.Callback):
+    """
+    Warmup用: LR を 0 から target_lr までエポックごとに線形で増やす。
+    Epoch 0 → target_lr/total_epochs, Epoch total_epochs-1 → target_lr.
+    """
+    def __init__(self, target_lr, total_epochs, verbose=0):
+        super(LinearWarmupScheduler, self).__init__()
+        self.target_lr = target_lr
+        self.total_epochs = max(1, total_epochs)
+        self.verbose = verbose
+
+    def on_epoch_begin(self, epoch, logs=None):
+        if not hasattr(self.model.optimizer, 'lr'):
+            return
+        # 1-based progress: 1/total -> 1.0
+        lr = self.target_lr * (epoch + 1) / self.total_epochs
+        tf.keras.backend.set_value(self.model.optimizer.lr, lr)
+        if self.verbose > 0:
+            print(f'\nEpoch {epoch + 1}: Warmup LR = {lr:.8f} (linear ramp to {self.target_lr:.8f})')
+
+
 class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
     """
     MinClassAccuracy > 0.5 を達成した次のエポックから減衰を開始する... 
@@ -628,7 +649,8 @@ def main():
     )
 
     # コールバック生成関数 (Balanced Accuracyを監視 + Conditional Cosine Decay)
-    def create_callbacks(total_epochs, initial_lr, target_epoch=0, enable_early_stopping=True):
+    def create_callbacks(total_epochs, initial_lr, target_epoch=0, enable_early_stopping=True, use_linear_warmup=False):
+        """use_linear_warmup=True のときは LR を 0→initial_lr に線形増加（Warmup 用）。"""
 
         # 精度ベースEarlyStopping: 全タスク平均MinClassAccuracyを監視
         class AccuracyEarlyStopping(tf.keras.callbacks.Callback):
@@ -711,8 +733,11 @@ def main():
                     parts.append(f"Loss={val_loss:.4f}")
                 logger.info(" | ".join(parts))
 
-        scheduler = ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, decay_exponent=args.decay_exponent, verbose=1)
-        
+        if use_linear_warmup:
+            scheduler = LinearWarmupScheduler(initial_lr, total_epochs, verbose=1)
+        else:
+            scheduler = ConditionalLearningRateScheduler(initial_lr, total_epochs, task_labels, decay_exponent=args.decay_exponent, verbose=1)
+
         callbacks_list = [
             scheduler,
             EpochSummaryCallback()
@@ -773,7 +798,7 @@ def main():
             # Warmup中ベストの重みを保存し、終了後に復元（epoch2がbestなど道中が良い場合に対応）
             warmup_best_path = 'temp_warmup_best.weights.h5'
             warmup_monitor = f"val_task_{chr(ord('a'))}_output_min_class_accuracy" if len(task_labels) > 1 else 'val_min_class_accuracy'
-            warmup_callbacks = list(create_callbacks(warmup_epochs, args.warmup_lr, target_epoch=0, enable_early_stopping=False))
+            warmup_callbacks = list(create_callbacks(warmup_epochs, args.warmup_lr, target_epoch=0, enable_early_stopping=False, use_linear_warmup=True))
             warmup_callbacks.append(tf.keras.callbacks.ModelCheckpoint(
                 warmup_best_path, monitor=warmup_monitor, mode='max', save_best_only=True, save_weights_only=True, verbose=0
             ))

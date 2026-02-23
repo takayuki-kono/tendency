@@ -117,7 +117,8 @@
 ### 学習フェーズ (`train_multitask_trial.py` 内部)
 1.  **Phase 1: Warmup (転移学習)**
     - **対象**: `EfficientNetV2` のバックボーンを凍結 (Freeze)。Head層（全結合層）のみ学習。
-    - **設定**: LR = `warmup_lr`（キャリブレーション済み）, Epochs = `warmup_epochs`（デフォルト5）。
+    - **設定**: 目標 LR = `warmup_lr`（キャリブレーション済み）, Epochs = `warmup_epochs`（デフォルト5）。
+    - **LR スケジュール**: Warmup 中は **LinearWarmupScheduler** により、Epoch 1 で `warmup_lr/n`、Epoch n で `warmup_lr` まで線形に増加（本来の warmup: 徐々に LR を上げる）。
     - **目的**: ランダム初期化されたHead層を、バックボーンの特徴量に馴染ませる。
     - **条件**: `warmup_lr > 0` かつ `fine_tune=True` の場合のみFT前に実行。
     - **ベスト重みの復元**: Warmup 中に val min_class_accuracy が最良だったエポックの重みを保存し、Warmup 終了後に復元してから FT に進む（epoch 2 が best など道中が良い場合に対応）。
