@@ -564,9 +564,12 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             effective_epoch = best_epoch
             if best_epoch <= 10:
                 need_adjust = True
-            elif best_epoch == training_epochs or abs(last_epoch_accu - trial_score) < LR_LAST_ACCU_EPS:
-                effective_epoch = training_epochs
+            elif best_epoch == training_epochs:
                 need_adjust = True
+                # ベストが最終epochのときだけ effective = training_epochs
+            elif abs(last_epoch_accu - trial_score) < LR_LAST_ACCU_EPS:
+                need_adjust = True
+                # last≈best で plateau のときはベスト位置が effective なので effective_epoch は best_epoch のまま
 
             if need_adjust and adj_iter < LR_MAX_ADJUSTMENTS:
                 ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=LR_TARGET_EPOCH, total_epochs=training_epochs)
