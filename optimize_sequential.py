@@ -54,21 +54,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# LR再調整・キャリブレーション共通定数（本番許容範囲とtarget。run_trial と calibrate_base_lr で共用）
-LR_TARGET_EPOCH = 13
-LR_ACCEPTABLE_MIN = 11
-LR_ACCEPTABLE_MAX = 19
-LR_MAX_ADJUSTMENTS = 3
-LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ以上で「last≠best」とみなす
-
-def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
-    """
-    時間軸でLR調整比率を計算する。new_lr = current_lr * best_epoch / target_epoch。
-    best_epoch が target より前なら LR を下げ、後なら上げる。
-    """
-    if target_epoch <= 0:
-        return 1.0
-    return best_epoch / target_epoch
+from components.lr_adjustment import (
+    LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
+    LR_MAX_ADJUSTMENTS, LR_LAST_ACCU_EPS,
+    compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
+)
 
 
 def count_files(directory):
@@ -218,9 +208,9 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
         logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}")
 
-        # 終了条件: (1) 11≤best_epoch≤19 かつ last_epoch_accu≠best (2) 試行回数が LR_MAX_ADJUSTMENTS に達した
-        if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - score) >= LR_LAST_ACCU_EPS:
-            logger.info(f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Stopping calibration.")
+        should_stop, stop_msg = lr_calibration_should_stop(best_epoch, last_epoch_accu, score)
+        if should_stop and stop_msg:
+            logger.info(stop_msg)
             break
         if iteration >= LR_MAX_ADJUSTMENTS:
             logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping calibration.")
@@ -553,29 +543,13 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 best_trial_output = full_output
 
             logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
-
-            # 許容範囲内かつ last≠best なら調整完了（キャリブレーションと同じ2条件に揃える）
-            if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - trial_score) >= LR_LAST_ACCU_EPS:
-                logger.info(f"  BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Done.")
+            should_exit, log_msg, need_adjust, effective_epoch = lr_adjustment_decision(
+                best_epoch, last_epoch_accu, trial_score, training_epochs
+            )
+            if should_exit and log_msg:
+                logger.info(log_msg)
                 break
-            # 11≤best_epoch≤15 で last < best（ピーク後に下降）なら再調整しないで終了
-            if 11 <= best_epoch <= 15 and last_epoch_accu < trial_score:
-                logger.info(f"  BestEpoch {best_epoch} in [11,15] and last_accu < best (peaked then declined). Done.")
-                break
-
-            # 再調整条件: best_epoch<=10, ==最終epoch, or last_accu≈best_accu（plateau）
-            need_adjust = False
-            effective_epoch = best_epoch
-            if best_epoch <= 10:
-                need_adjust = True
-            elif best_epoch == training_epochs:
-                need_adjust = True
-                # ベストが最終epochのときだけ effective = training_epochs
-            elif abs(last_epoch_accu - trial_score) < LR_LAST_ACCU_EPS:
-                need_adjust = True
-                # last≈best で plateau のときはベスト位置が effective なので effective_epoch は best_epoch のまま
-
-            if need_adjust and adj_iter < LR_MAX_ADJUSTMENTS:
+            if need_adjust and adj_iter < LR_MAX_ADJUSTMENTS and effective_epoch is not None:
                 ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=LR_TARGET_EPOCH, total_epochs=training_epochs)
                 current_training_lr *= ratio
                 logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_training_lr:.8f}")
