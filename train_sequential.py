@@ -48,26 +48,12 @@ LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ
 
 def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
     """
-    学習率スケジュールの累積和に基づいてLR調整比率を計算する。
-    best_epochの累積学習量がtarget_epochの累積学習量と等しくなるようにLRを調整する比率。
-    new_lr = current_lr * cumsum[best_epoch] / cumsum[target_epoch]
+    時間軸でLR調整比率を計算する。new_lr = current_lr * best_epoch / target_epoch。
+    best_epoch が target より前なら LR を下げ、後なら上げる。
     """
-    def lr_cumsum(n):
-        s = 0.0
-        for e in range(1, min(n, total_epochs) + 1):
-            progress = e / total_epochs
-            decay = 1.0 - progress
-            relative_lr = (1.0 - min_lr_ratio) * decay
-            s += relative_lr
-        return s
-    
-    cs_best = lr_cumsum(best_epoch)
-    cs_target = lr_cumsum(target_epoch)
-    
-    if cs_target <= 0:
+    if target_epoch <= 0:
         return 1.0
-    
-    return cs_best / cs_target
+    return best_epoch / target_epoch
 
 
 def count_files(directory):

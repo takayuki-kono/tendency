@@ -53,7 +53,7 @@
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（最大3回）。
     - **終了条件（キャリブレーションと同じ）**: (1) best_epoch 11～19 **かつ** last_epoch_accu≠best（差が LR_LAST_ACCU_EPS=0.01 以上）→ 調整終了 (2) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
     - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01）
-    - **調整計算**: `new_lr = current_lr * cumsum[effective_epoch] / cumsum[target=13]`
+    - **調整計算（時間軸）**: `new_lr = current_lr * best_epoch / target_epoch`（scale は 0.3～3.0 にクリップ）
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
