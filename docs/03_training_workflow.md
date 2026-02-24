@@ -51,8 +51,8 @@
     - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（最大3回）。
-    - **終了条件（キャリブレーションと同じ）**: (1) best_epoch 11～19 **かつ** last_epoch_accu≠best（差が LR_LAST_ACCU_EPS=0.01 以上）→ 調整終了 (2) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
-    - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01）
+    - **終了条件（キャリブレーションと同じ）**: (1) best_epoch 11～19 **かつ** last_epoch_accu≠best（差が LR_LAST_ACCU_EPS=0.01 以上）→ 調整終了 (2) **11≤best_epoch≤15 かつ last_epoch_accu < trial_score**（ピーク後下降）→ 再調整せず終了 (3) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
+    - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01、plateau）
     - **調整計算（時間軸）**: `new_lr = current_lr * best_epoch / target_epoch`（scale は 0.3～3.0 にクリップ）
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
@@ -107,6 +107,39 @@
     - 各画像について、全指標が閾値内であれば「採用」。一つでも超えれば「不採用（スキップ）」。
 3.  **アンダーサンプリング**:
     - クラス間のデータ数差を埋めるため、最も少ないクラス（または平均）に合わせて多いクラスのデータをランダムに間引く処理。
+
+### preprocess_multitask.py の詳細
+
+**入力**: `train/`, `validation/`, `test/`（各ディレクトリ直下に `{タスク}/{人物名}/` または `{タスク}/{サブフォルダ}/` のような相対パスで画像が並んでいる想定）。
+
+**処理フロー**:
+1. **スキャン**: 各ソースを `os.walk` で走査。画像拡張子 `.jpg/.png/.jpeg/.bmp` のファイルを列挙。各ファイルの「グループキー」= そのファイルがあるディレクトリの相対パス（例: `a/森口瑤子`）。
+2. **顔分析（キャッシュあり）**: `outputs/cache/metrics_<hash>.pkl` をキー（ソース名+ファイル数）で参照。キャッシュがなければ InsightFace で全画像を解析し、顔検出・106ランドマークを取得。検出失敗・読込失敗は `valid=False` で除外。
+3. **閾値計算**:
+   - **グローバル閾値**: 全 valid 画像の指標分布から算出。`pitch_percentile=10` なら「上位10%を落とす」ので `th_pitch = percentile(pitch, 90)`。同様に symmetry, y_diff, mouth_open, sharpness(低/高), face_size(低/高), aspect_ratio(両側), retouching, mask, glasses を計算。
+   - **個人閾値**: グループ（ディレクトリパス）ごとに **眉-目距離 (eb_eye_dist)** だけ、そのグループ内の分布で `eyebrow_eye_percentile_low` / `eyebrow_eye_percentile_high` の閾値を計算。
+4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `eb_eye_low_personal`, `undersampling` などでログに集計される。
+5. **アンダーサンプリング**: グループごとの採用枚数の**平均** `target_count = mean(counts)` を算出。あるグループの採用枚数が `target_count` を超えていれば、そのグループ内でランダムシャッフルしたうえで先頭 `target_count` 枚だけ残し、残りはスキップ（`skip_reasons['undersampling']`）。train/validation/test いずれも同じロジック（`skip_undersampling` は通常 False）。
+6. **コピー**: 採用された画像を `out_dir/train/`, `out_dir/validation/`, `out_dir/test/` にコピー。出力ファイル名は `rel = os.path.relpath(src, src_root)` の `parts` の先頭をディレクトリ、`parts[1:]` を `_` で連結した名前（例: `a/森口瑤子/foo.jpg` → `out_dir/train/a/森口瑤子_foo.jpg`）。`--grayscale` 指定時はグレースケール変換してから保存。
+
+**指標の定義（実装準拠）**:
+
+| 指標 | 計算 | 閾値の向き（percentile>0 のとき） |
+|------|------|-----------------------------------|
+| Pitch | `abs(face.pose[0])`（InsightFace） | 値 **>** 閾値 → 除外（上向き/下向きが大きい） |
+| Symmetry | `abs(face_center_x - image_center_x)`（両目中心と画像中心の差） | 値 **>** 閾値 → 除外（横顔寄り） |
+| Y-Diff | `abs(left_eye_y - right_eye_y)` | 値 **>** 閾値 → 除外（首の傾き） |
+| Mouth Open | `abs(lower_lip_y - upper_lip_y)`（ランドマーク） | 値 **>** 閾値 → 除外（口開きすぎ） |
+| Eb-Eye Dist | 左右の (眉Y−目Y) の平均（ピクセル） | **個人内**で 値 **>** th_high または 値 **<** th_low → 除外 |
+| Sharpness | `cv2.Laplacian(gray).var()` | 値 **<** th_low → 除外（ボケ）、値 **>** th_high → 除外（ノイズ/過シャープ） |
+| Face Size | ファイル名の `_sz(\d+)` から取得（0 の場合は対象外） | 値 **<** th_low または **>** th_high → 除外 |
+| Aspect Ratio | 顔検出枠の `height/width` | 値 **<** th_low または **>** th_high → 除外 |
+| Retouching | 肌領域の Sobel 高周波成分の平均（低いほど加工疑い） | 値 **<** 閾値 → 除外 |
+| Mask | 上顔/下顔の肌色比率から算出（高いほどマスク疑い） | 値 **>** 閾値 → 除外 |
+| Glasses | 目周辺エッジと額エッジの比（高いほど眼鏡疑い） | 値 **>** 閾値 → 除外 |
+
+**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`。  
+**出力**: `preprocessed_multitask/train/`, `preprocessed_multitask/validation/`, `preprocessed_multitask/test/`。これが `train_sequential.py` の直接の入力。
 
 ---
 

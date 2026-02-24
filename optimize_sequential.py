@@ -558,9 +558,9 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - trial_score) >= LR_LAST_ACCU_EPS:
                 logger.info(f"  BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Done.")
                 break
-            # 許容範囲内で last < best（ピーク後に下降）なら再調整しないで終了
-            if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and last_epoch_accu < trial_score:
-                logger.info(f"  BestEpoch {best_epoch} in range and last_accu < best (peaked then declined). Done.")
+            # 11≤best_epoch≤15 で last < best（ピーク後に下降）なら再調整しないで終了
+            if 11 <= best_epoch <= 15 and last_epoch_accu < trial_score:
+                logger.info(f"  BestEpoch {best_epoch} in [11,15] and last_accu < best (peaked then declined). Done.")
                 break
 
             # 再調整条件: best_epoch<=10, ==最終epoch, or last_accu≈best_accu（plateau）
