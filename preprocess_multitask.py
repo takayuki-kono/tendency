@@ -362,10 +362,10 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     for root, dirs, filenames in os.walk(src_root):
         for f in filenames:
             if f.lower().endswith(('.jpg', '.png', '.jpeg', '.bmp')):
-                rel = os.path.relpath(root, src_root)
-                label = rel.split(os.sep)[0]
-                if label == '.': label = 'root'
-                files.append((os.path.join(root, f), label))
+                rel_dir = os.path.relpath(root, src_root)
+                if rel_dir == '.': rel_dir = 'root'
+                # グループ化キー = ディレクトリパス（タスク/個人など）。個人単位で percentile / undersampling するため。
+                files.append((os.path.join(root, f), rel_dir))
     
     total = len(files)
     
