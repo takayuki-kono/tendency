@@ -70,10 +70,10 @@
   - データ残存率 (`ratio`) が閾値（0.5）以上 (`High Ratio`) の場合は `exp1`、未満 (`Low Ratio`) の場合は `exp2` を適用。
 - **Base LR決定ロジック**:
   - **目的**: **Validation Score 最大化** を最優先指標とする。
-  - **ターゲットEpoch**: **10** (2026-02-19変更)。
+  - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
    - **手順**:
-     1. Epoch 10 に収束するLR (`lr_10`) を特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**（`lr_calibration_should_stop`）: (1) **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）→ 終了 (2) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
+     1. Epoch 13 に収束するLRを特定し、ベースLRとして採用。
+  - **キャリブレーションの打ち切り**（`lr_calibration_should_stop`、run_trial の終了条件と同一）: (1) **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）→ 終了 (2) **11≤best_epoch≤15 かつ last_accu < best**（ピーク後下降）→ 終了 (3) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
 - **キャリブレーション設定**:
   - **学習率減衰特性 (Exponent) の探索**:
     - 探索範囲: `0.15` ～ `1.0`
