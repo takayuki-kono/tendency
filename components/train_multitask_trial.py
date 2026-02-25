@@ -553,6 +553,7 @@ def main():
     parser.add_argument('--decay_exponent', type=float, default=1.0) # Decay curve exponent (1.0=Linear, 0.5=Sqrt, 2.0=Poly)
     parser.add_argument('--warmup_lr', type=float, default=0.0) # Warmup LR (0=warmupなし, >0=FT前にHead学習)
     parser.add_argument('--warmup_epochs', type=int, default=5) # Warmupのエポック数
+    parser.add_argument('--no_extension', action='store_true', help='延長学習を行わない（LR逐一調整で冗長なためオフ可）')
 
     args = parser.parse_args()
     
@@ -950,7 +951,7 @@ def main():
     
     temp_weights_path = 'temp_training_weights.weights.h5'
     
-    if final_val_acc < 0.5 or is_best_at_last:
+    if not getattr(args, 'no_extension', False) and (final_val_acc < 0.5 or is_best_at_last):
         reason = f"Score {final_val_acc:.4f} < 0.5" if final_val_acc < 0.5 else f"Best Epoch reached at last epoch ({training_epochs})"
         logger.info(f"--- Extension Training ({reason}) ---")
         

@@ -111,6 +111,7 @@ def run_trial(params):
             for key, value in trial_params.items():
                 cmd.extend([f"--{key}", str(value)])
             cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
+            cmd.extend(["--no_extension"])  # LR逐一調整するため延長学習は省略
 
             # Popenでリアルタイム出力
             process = subprocess.Popen(
@@ -251,6 +252,7 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
         cmd.extend([f"--{key}", str(value)])
     cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
     cmd.extend(["--enable_early_stopping", "False"])
+    cmd.extend(["--no_extension"])
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
     
@@ -452,11 +454,11 @@ def main():
     }
     
     # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
-    # Epoch 10でベストになるLRをキャリブレーション
-    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 10) <<<")
+    # LR_TARGET_EPOCH(13)でベストになるLRをキャリブレーション
+    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=5e-4,
-        cal_epochs=20, target_best_epoch=10, score_priority=True
+        cal_epochs=20, target_best_epoch=13, score_priority=True
     )
     logger.info(f"Target 10 LR={calibrated_lr:.8f}")
     current_params['learning_rate'] = calibrated_lr
@@ -538,10 +540,10 @@ def main():
     current_params['warmup_epochs'] = 5
     logger.info(f"Warmup LR set to {warmup_lr:.8f} (from Head training calibration)")
     
-    logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 10) <<<")
+    logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=current_params['learning_rate'],
-        cal_epochs=20, target_best_epoch=10, score_priority=True
+        cal_epochs=20, target_best_epoch=13, score_priority=True
     )
     current_params['learning_rate'] = ft_lr
     
@@ -554,7 +556,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=20, target_best_epoch=10, score_priority=True
+            cal_epochs=20, target_best_epoch=13, score_priority=True
         )
         current_params['learning_rate'] = ft_lr2
     else:

@@ -30,12 +30,9 @@ MIN_EFFICIENCY_THRESHOLD = 0.00001  # 最小効率閾値（これ以下は除外
 # LRキャリブレーション結果（main()で設定される）
 CALIBRATED_BASE_LR = None
 LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
-LR_LOW_RATIO_THRESHOLD = 0.5
-LR_LOW_RATIO_THRESHOLD = 0.5
-LR_SCALING_EXP1 = 0.65 # Default
-LR_SCALING_EXP2 = 1.25 # Default
-BASE_RATIO = 1.0 # Default
-LR_INDIVIDUAL_EXPONENTS = {} # Parameter specific exponents
+LR_SCALING_EXP = 0.65  # 単一exponent（relative_ratio ** exp でLRスケーリング）
+BASE_RATIO = 1.0
+LR_INDIVIDUAL_EXPONENTS = {}  # パラメータ別 exponent (param_key -> float)
 
 # パスが存在しない場合はデフォルトを使用
 if not os.path.exists(PYTHON_PREPROCESS): PYTHON_PREPROCESS = "python"
@@ -122,6 +119,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     cmd_train.extend(["--epochs", str(cal_epochs)])
     cmd_train.extend(["--fine_tune", "False"])
     cmd_train.extend(["--enable_early_stopping", "False"])
+    cmd_train.extend(["--no_extension"])
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
     
@@ -288,10 +286,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                  mapped_key += '_percentile'
                  
             if mapped_key in LR_INDIVIDUAL_EXPONENTS:
-                p_exps = LR_INDIVIDUAL_EXPONENTS[mapped_key]
-                # キャッシュ検索時点では実際のratioが不明なため、exp1(High Ratio用)を代表値としてキー計算に用いる
-                # (ratioによってexp1/exp2が切り替わるが、探索パラメータが同じであれば使用されるexpも等しくなるため、事前計算キーとしての役割は満たす)
-                p_exp = p_exps['exp1']
+                p_exp = float(LR_INDIVIDUAL_EXPONENTS[mapped_key])
                 total_weighted_exp += p_exp * power_val
                 total_power += power_val
                 
@@ -393,8 +388,6 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 cmd_train.extend([f"--{k}", str(v)])
         
         # 学習率の設定 (2026-02-14 改良):
-        # ratio >= threshold -> exp1
-        # ratio < threshold  -> exp2
         if CALIBRATED_BASE_LR is not None and total_images > 0 and saved_images > 0:
             ratio = saved_images / total_images
             safe_ratio = max(ratio, 0.001)
@@ -402,7 +395,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
-            # Fixed Exponent Logic (2026-02-17) -> Dynamic (2026-02-18) -> Weighted Average (2026-02-20)
+            # 単一exponent: パラメータ別に設定されていれば重み付き平均、なければ LR_SCALING_EXP
             mapping = {
                 'y_diff': 'y_diff_percentile',
                 'sym': 'symmetry_percentile',
@@ -442,8 +435,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                          mapped_key += '_percentile'
                          
                     if mapped_key in LR_INDIVIDUAL_EXPONENTS:
-                        p_exps = LR_INDIVIDUAL_EXPONENTS[mapped_key]
-                        p_exp = p_exps['exp1'] if ratio >= LR_LOW_RATIO_THRESHOLD else p_exps['exp2']
+                        p_exp = float(LR_INDIVIDUAL_EXPONENTS[mapped_key])
                         total_weighted_exp += p_exp * power_val
                         total_power += power_val
             
@@ -451,8 +443,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 exponent = total_weighted_exp / total_power
                 logger.info(f"Using Weighted Average Exponent: {exponent:.4f} (Total Power: {total_power:.1f})")
             else:
-                exponent = LR_SCALING_EXP1 if ratio >= LR_LOW_RATIO_THRESHOLD else LR_SCALING_EXP2
-                logger.info(f"Using Default Global Exponent: {exponent:.4f} (No active filters)")
+                exponent = LR_SCALING_EXP
+                logger.info(f"Using Default Exponent: {exponent:.4f} (No active filters)")
             
             # y = 1.0 (Linear Scaling) -> Updated
             x = relative_ratio
@@ -477,7 +469,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         # 評価用なのでFine-tuningはOff、Epochs=20
         cmd_train.extend(["--epochs", "20"])
         cmd_train.extend(["--fine_tune", "False"])
-        cmd_train.extend(["--auto_lr_target_epoch", "0"]) # 内部自動スケーリングを無効化
+        cmd_train.extend(["--auto_lr_target_epoch", "0"])  # 内部自動スケーリングを無効化
+        cmd_train.extend(["--no_extension"])  # LR逐一調整するため延長学習は省略
 
         # train_sequential.py と同じ LR 再調整条件（モジュール定数で共用）
         training_epochs = 20
@@ -784,39 +777,27 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     return candidates, scores
 
 def main():
-    global CALIBRATED_BASE_LR, LR_LOW_RATIO_THRESHOLD, LR_SCALING_EXP1, LR_SCALING_EXP2, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
+    global CALIBRATED_BASE_LR, LR_SCALING_EXP, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
     logger.info("Starting Sequential Optimization (Efficiency-Based)")
 
-    # LRスケーリング設定（optimize_param_exp.py の結果）を読み込む（exp/threshold情報のみ）
+    # LRスケーリング設定を読み込む（exponent は単一値）
     LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
     if os.path.exists(LR_SCALING_CONFIG_FILE):
         try:
             with open(LR_SCALING_CONFIG_FILE, 'r', encoding='utf-8') as f:
                 lr_config = json.load(f)
-            LR_LOW_RATIO_THRESHOLD = float(lr_config.get('threshold', LR_LOW_RATIO_THRESHOLD))
             BASE_RATIO = 1.0  # 毎回動的に計算するため固定値は使わない
-
-            if 'exp1' in lr_config:
-                LR_SCALING_EXP1 = float(lr_config['exp1'])
-            if 'exp2' in lr_config:
-                LR_SCALING_EXP2 = float(lr_config['exp2'])
-                
+            if 'exponent' in lr_config:
+                LR_SCALING_EXP = float(lr_config['exponent'])
             if 'individual_exponents' in lr_config:
-                LR_INDIVIDUAL_EXPONENTS = lr_config['individual_exponents']
+                raw = lr_config['individual_exponents']
+                LR_INDIVIDUAL_EXPONENTS = {k: float(v) for k, v in raw.items()}
                 logger.info(f"Loaded {len(LR_INDIVIDUAL_EXPONENTS)} individual exponents.")
-            
-            logger.info(
-                f"Loaded LR scaling config: threshold={LR_LOW_RATIO_THRESHOLD:.2f}, "
-                f"exp1={LR_SCALING_EXP1:.4f}, exp2={LR_SCALING_EXP2:.4f}"
-            )
+            logger.info(f"Loaded LR scaling config: exponent={LR_SCALING_EXP:.4f}")
         except Exception as e:
-            logger.warning(
-                f"Failed to load {LR_SCALING_CONFIG_FILE}: {e}. Using defaults."
-            )
+            logger.warning(f"Failed to load {LR_SCALING_CONFIG_FILE}: {e}. Using defaults.")
     else:
-        logger.info(
-            f"LR scaling config {LR_SCALING_CONFIG_FILE} not found. Using defaults."
-        )
+        logger.info(f"LR scaling config {LR_SCALING_CONFIG_FILE} not found. Using defaults.")
     
     # Initial Params
     current_params = {
@@ -853,7 +834,7 @@ def main():
         'EfficientNetV2B0',
         initial_lr,
         cal_epochs=20,
-        target_best_epoch=10,
+        target_best_epoch=13,
     )
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}, Score: {cal_score:.4f}")
     
