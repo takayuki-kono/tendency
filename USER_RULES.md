@@ -1,5 +1,14 @@
 # User Global Rules (Project Level)
 
+## 毎回の流れ（チェックリスト・忘れない）
+依頼を受けたら **必ずこの順で** 行う：
+1. **Prompt**: 依頼内容を `docs/prompt.md` に追記（末尾を確認してから APPEND、上書きしない）
+2. **Docs**: 関連する `docs/*.md` を更新（仕様・仕様変更を先に書く）
+3. **Code**: 仕様に基づいて実装・修正
+4. **Git共有**: 修正後は必ず `git add` / `git commit` コマンドを**日本語メッセージ・--author 付き**で提示（自動実行しない）
+
+---
+
 ## Command Execution Rules
 - **NEVER execute .bat files automatically.**
 - Always create or update .bat files, then ask the user to execute them manually.
@@ -7,9 +16,11 @@
 
 ## 【重要】グローバルルール (ユーザー指定)
 以下のルールは常に優先して適用すること：
-1. **開発フローの厳守 (Prompt -> Docs -> Code)**:
-   - **Step 1 (Critical)**: ユーザーの依頼内容を `docs/prompt.md` に**追記(APPEND)**する。**重要: 最終行を上書きしないよう、必ずファイル末尾を確認してから追記すること。**
-   - **Step 2**: 実装前に、関連する仕様書（`pipeline_specs.md`や`docs/*.md`）を更新し、変更内容を定義する。
+1. **【最優先】開発フローの厳守 (Prompt -> Docs -> Code) ※これを忘れることは許されない**:
+   - **Step 1 (Critical & Mandatory)**: ユーザーから新しい指示が来たら、**いかなる解析や修正よりも先に**、その依頼内容を `docs/prompt.md` に**追記(APPEND)**すること。
+     - **このステップをスキップすることは固く禁じる。** 直前に言われた「prompt.md 忘れず徹底するようgrobalに記憶」の指示を確実に遵守せよ。
+     - **重要**: 最終行を上書きしないよう、必ずファイル末尾を確認してから追記すること。
+   - **Step 2**: 追記後、実装の前に、関連する仕様書（`pipeline_specs.md`や`docs/*.md`）を更新し、変更内容を定義する。
    - **Step 3**: コードを実装・修正する。
    - **Step 4**: `git add/commit` コマンドを提示する。
 2. **ドキュメント更新の徹底**: コード修正時は必ず関連ドキュメント (.md) も更新すること。**Prompt -> Docs -> Code の順序を厳守。**
