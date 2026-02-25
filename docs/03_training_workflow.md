@@ -67,7 +67,7 @@
   - `exponent`: `outputs/lr_scaling_config.json` に保存された値を使用（パラメータごとに個別最適化済み）。
   - Exp Range: `0.15` ~ `1.0` (Binary Search)
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
-  - データ残存率 (`ratio`) が閾値（0.5）以上 (`High Ratio`) の場合は `exp1`、未満 (`Low Ratio`) の場合は `exp2` を適用。
+  - 単一の exponent で `adjusted_lr = base_lr * (relative_ratio ** exponent)`。パラメータ別に individual_exponents が設定されていればその重み付き平均、なければデフォルト exponent を使用。
 - **Base LR決定ロジック**:
   - **目的**: **Validation Score 最大化** を最優先指標とする。
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
@@ -178,7 +178,7 @@
 - **条件付きEpoch拡張 (Conditional Extension)**:
     - ベストエポックが最終エポック、または最終エポックのスコアがベストスコアと同等の場合、または `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
-    - **終了条件**: 精度（平均MinClassAccuracy）が下がったら即停止、または最大20エポック追加。
+    - **終了条件**: 精度が**厳密に下がったときのみ**停止（plateau＝同じのときは継続）。最大20エポック追加。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)

@@ -1009,10 +1009,11 @@ def main():
             if current_ext_score > best_ext_score:
                 best_ext_score = current_ext_score
                 final_val_acc = best_ext_score
-                model.save_weights(temp_weights_path) # Update best weights
-            else:
+                model.save_weights(temp_weights_path)  # Update best weights
+            elif current_ext_score < best_ext_score:
                 logger.info("Accuracy dropped. Stopping extension.")
                 break
+            # current_ext_score == best_ext_score (plateau) のときは続行し、本当に下がるまで延長する
         
         # Restore best weights from extension phase
         if os.path.exists(temp_weights_path):
