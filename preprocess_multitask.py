@@ -364,6 +364,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             if f.lower().endswith(('.jpg', '.png', '.jpeg', '.bmp')):
                 rel_dir = os.path.relpath(root, src_root)
                 if rel_dir == '.': rel_dir = 'root'
+                else: rel_dir = rel_dir.replace(os.sep, '/')
                 # グループ化キー = ディレクトリパス（タスク/個人など）。個人単位で percentile / undersampling するため。
                 files.append((os.path.join(root, f), rel_dir))
     
@@ -395,6 +396,10 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         try:
             with open(cache_file, 'rb') as f:
                 results = pickle.load(f)
+            # キャッシュが古いコード（label=タスクのみ）で保存されていても、パスから個人単位のlabelに上書きする
+            for r in results:
+                rel_dir = os.path.relpath(os.path.dirname(r['path']), src_root)
+                r['label'] = (rel_dir.replace(os.sep, '/') if rel_dir else 'root')
             logger.info("Cache loaded successfully.")
         except Exception as e:
             logger.warning(f"Failed to load cache: {e}. Re-analyzing...")
