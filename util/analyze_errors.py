@@ -1,6 +1,8 @@
 """
 エラー分析スクリプト
-学習済みモデルの予測ミスを可視化・分析する
+学習済みモデルの予測ミスを可視化・分析する。
+デフォルト: 前処理前の train と validation の両方で実行（out_dir/train/, out_dir/val/ に出力）。
+単一ディレクトリのみ分析する場合は --data_dir を指定する。
 """
 import os
 import shutil
@@ -19,8 +21,10 @@ import json
 # --- 設定 ---
 # 分析対象のモデル
 DEFAULT_MODEL_PATH = 'outputs/models/best_sequential_model.keras'
-# 検証データのディレクトリ
+# デフォルト: 前処理前の train / validation の両方で実行
 VALIDATION_DIR = 'preprocessed_multitask/validation'
+DEFAULT_TRAIN_DIR = 'train'
+DEFAULT_VAL_DIR = 'validation'
 # 出力ディレクトリ
 OUTPUT_DIR = 'error_analysis'
 CACHE_DIR = 'outputs/cache'
@@ -533,171 +537,154 @@ def analyze_metrics_distribution(image_paths, label_prefix=""):
             summary[k] = 0.0
     return summary
 
-def main():
-    # グローバル変数を更新してディレクトリを切り替え可能にする
+def run_analysis_for_dataset(model, data_dir, output_dir, dataset_name="data"):
+    """
+    指定データディレクトリに対してエラー分析を実行し、結果を output_dir に保存する。
+    VALIDATION_DIR と OUTPUT_DIR を一時的に更新してから実行する。
+    """
     global VALIDATION_DIR, OUTPUT_DIR
+    VALIDATION_DIR = data_dir
+    OUTPUT_DIR = output_dir
 
-    parser = argparse.ArgumentParser(description="Error Analysis Script")
-    parser.add_argument('--model', type=str, default=DEFAULT_MODEL_PATH, help='Path to the model file')
-    parser.add_argument('--data_dir', type=str, default=VALIDATION_DIR, help='Path to validation data directory')
-    parser.add_argument('--out_dir', type=str, default=OUTPUT_DIR, help='Path to output directory')
-    args = parser.parse_args()
-    
-    MODEL_PATH = args.model
-    
-    VALIDATION_DIR = args.data_dir
-    OUTPUT_DIR = args.out_dir
-
-    print("=" * 60)
-    print("Error Analysis Script")
-    print("=" * 60)
-    print(f"Target Data: {VALIDATION_DIR}")
-    print(f"Output Dir : {OUTPUT_DIR}")
-    
-    # 出力ディレクトリをクリーンアップ
     if os.path.exists(OUTPUT_DIR):
-        print(f"Cleaning up old output directory: {OUTPUT_DIR}")
         shutil.rmtree(OUTPUT_DIR)
-    
-    # 出力ディレクトリ作成
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # モデル読み込み
-    print(f"\nLoading model: {MODEL_PATH}")
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model not found at {MODEL_PATH}")
-        print("Available .keras files:")
-        for f in os.listdir('.'):
-            if f.endswith('.keras'):
-                print(f"  - {f}")
-        return
-    
-    model = models.load_model(MODEL_PATH, compile=False)
-    print("Model loaded successfully.")
-    
-    # 検証データ読み込み
-    print(f"\nLoading data from: {VALIDATION_DIR}")
-    image_paths, true_labels = load_validation_data(VALIDATION_DIR)
-    print(f"Found {len(image_paths)} validation images.")
-    
+
+    print(f"\nLoading data from: {data_dir} ({dataset_name})")
+    image_paths, true_labels = load_validation_data(data_dir)
+    print(f"Found {len(image_paths)} images.")
+
     if len(image_paths) == 0:
-        print("Error: No validation images found.")
+        print(f"Warning: No images in {data_dir}. Skipping.")
         return
-    
-    # データ分布を表示
+
     analyze_data_distribution(image_paths)
-    
-    # 予測実行
+
     print("\nRunning predictions...")
     predictions = predict_batch(model, image_paths)
-    
-    # 各タスクの分析
+
     report = {}
     print("\n" + "=" * 60)
-    print("Analysis Results")
+    print(f"Analysis Results ({dataset_name})")
     print("=" * 60)
-    
+
     for task_idx, (task_labels, task_name) in enumerate(zip(ALL_TASK_LABELS, TASK_NAMES)):
         print(f"\n--- {task_name} ---")
-        
-        # 混同行列
+
         cm, accuracy = create_confusion_matrix(
             true_labels, predictions, task_idx, task_labels, task_name
         )
         print(f"Accuracy: {accuracy:.4f}")
-        
-        # エラー収集
+
         errors = collect_errors(
             image_paths, true_labels, predictions, task_idx, task_labels, task_name
         )
-        
         error_summary = {k: len(v) for k, v in errors.items()}
         print(f"Errors: {sum(error_summary.values())} total")
         for error_type, count in sorted(error_summary.items(), key=lambda x: -x[1]):
             print(f"  {error_type}: {count}")
-        
-        report[task_name] = {
-            'accuracy': accuracy,
-            'errors': error_summary
-        }
-        
-        # 正解収集
+
+        report[task_name] = {'accuracy': accuracy, 'errors': error_summary}
+
         correct = collect_correct(
             image_paths, true_labels, predictions, task_idx, task_labels, task_name
         )
         correct_summary = {k: len(v) for k, v in correct.items()}
         print(f"Correct: {sum(correct_summary.values())} total")
         report[task_name]['correct'] = correct_summary
-        
-        # --- Metrics Analysis ---
+
         print(f"\n  [Preprocess Metrics Analysis]")
-        
-        # エラー画像のパスを収集
         error_paths = []
         for paths in errors.values():
             error_paths.extend(paths)
-            
-        # 正解画像のパスを収集 (ランダムサンプリングしても良いが、一応全部やるか、エラーと同数程度にする)
-        # 比較のため、エラー数が多い場合は正解も多く見るべきだが、時間がかかる。
-        # ここではエラー画像と同数程度（最大200枚）をランダムサンプリングして比較する
         correct_paths = []
         for paths in correct.values():
             correct_paths.extend(paths)
-            
+
         import random
         random.seed(42)
         if len(correct_paths) > len(error_paths) and len(error_paths) > 0:
-             # エラーがある程度あるなら、それと同じ数だけ正解を見る（比較の公平性）
-             # ただし少なすぎると意味がないので、Min 50 Max ErrorNum
-             sample_size = max(50, len(error_paths))
-             if len(correct_paths) > sample_size:
-                 correct_paths_sample = random.sample(correct_paths, sample_size)
-             else:
-                 correct_paths_sample = correct_paths
+            sample_size = max(50, len(error_paths))
+            correct_paths_sample = random.sample(correct_paths, sample_size) if len(correct_paths) > sample_size else correct_paths
         else:
-             # エラーが多い、または正解が少ない場合は全部使う
-             correct_paths_sample = correct_paths
-        
-        # 指標計算
+            correct_paths_sample = correct_paths
+
         error_metrics = analyze_metrics_distribution(error_paths, "Errors")
         correct_metrics = analyze_metrics_distribution(correct_paths_sample, "Correct (Sampled)")
-        
-        # 結果表示
+
         print(f"\n    {'Metric':<15} | {'Errors (Avg)':<15} | {'Correct (Avg)':<15} | {'Diff':<10}")
         print(f"    {'-'*15}-+-{'-'*15}-+-{'-'*15}-+-{'-'*10}")
-        
         for k in ['pitch', 'symmetry', 'y_diff', 'mouth_open', 'eb_eye_dist', 'sharpness', 'face_size']:
             e_val = error_metrics.get(k, 0.0)
             c_val = correct_metrics.get(k, 0.0)
-            diff = e_val - c_val
-            
-            # format
-            print(f"    {k:<15} | {e_val:>15.4f} | {c_val:>15.4f} | {diff:>+10.4f}")
-            
-        report[task_name]['metrics_comparison'] = {
-            'errors': error_metrics,
-            'correct': correct_metrics
-        }
-    
-    # マルチラベル組み合わせ単位の分析
+            print(f"    {k:<15} | {e_val:>15.4f} | {c_val:>15.4f} | {e_val - c_val:>+10.4f}")
+
+        report[task_name]['metrics_comparison'] = {'errors': error_metrics, 'correct': correct_metrics}
+
     print("\n--- Per-Combination Accuracy (全タスク正解率) ---")
     combo_results = analyze_per_combination(image_paths, true_labels, predictions)
     report['combination_accuracy'] = combo_results
-    
     for combo, stats in combo_results.items():
-        acc_pct = stats['accuracy'] * 100
-        print(f"  {combo}: {acc_pct:.1f}% ({stats['correct']}/{stats['total']})")
-    
-    # レポート保存
+        print(f"  {combo}: {stats['accuracy']*100:.1f}% ({stats['correct']}/{stats['total']})")
+
     with open(os.path.join(OUTPUT_DIR, 'report.json'), 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
-    
-    print("\n" + "=" * 60)
-    print(f"Analysis complete! Results saved to: {OUTPUT_DIR}/")
-    print("  - confusion_matrix_*.png: 混同行列の可視化")
-    print("  - task_*/: エラー画像（正解_予測でフォルダ分け）")
-    print("  - report.json: 分析レポート")
+
+    print(f"\nResults saved to: {OUTPUT_DIR}/")
+
+
+def main():
+    global VALIDATION_DIR, OUTPUT_DIR
+
+    parser = argparse.ArgumentParser(description="Error Analysis Script (default: train+val 前処理前)")
+    parser.add_argument('--model', type=str, default=DEFAULT_MODEL_PATH, help='Path to the model file')
+    parser.add_argument('--data_dir', type=str, default=None, help='Single run only: 指定時はこのディレクトリのみ分析（未指定時は train+val 両方）')
+    parser.add_argument('--train_dir', type=str, default=None, help='Train データ（未指定時は train）')
+    parser.add_argument('--val_dir', type=str, default=None, help='Val データ（未指定時は validation）')
+    parser.add_argument('--out_dir', type=str, default=OUTPUT_DIR, help='Path to output directory')
+    args = parser.parse_args()
+
+    MODEL_PATH = args.model
+    base_out = args.out_dir
+
     print("=" * 60)
+    print("Error Analysis Script")
+    print("=" * 60)
+    print(f"Model: {MODEL_PATH}")
+
+    if not os.path.exists(MODEL_PATH):
+        print(f"Error: Model not found at {MODEL_PATH}")
+        for f in os.listdir('.'):
+            if f.endswith('.keras'):
+                print(f"  - {f}")
+        return
+
+    model = models.load_model(MODEL_PATH, compile=False)
+    print("Model loaded successfully.")
+
+    # デフォルト: 前処理前の train と validation の両方で実行
+    if args.data_dir is not None:
+        print(f"Mode: single (--data_dir)")
+        print(f"Target Data: {args.data_dir}")
+        print(f"Output Dir : {base_out}")
+        run_analysis_for_dataset(model, args.data_dir, base_out, "data")
+        print("\n" + "=" * 60)
+        print(f"Analysis complete! Results saved to: {base_out}/")
+        print("  - confusion_matrix_*.png, errors/, correct/, report.json")
+        print("=" * 60)
+    else:
+        train_dir = args.train_dir if args.train_dir is not None else DEFAULT_TRAIN_DIR
+        val_dir = args.val_dir if args.val_dir is not None else DEFAULT_VAL_DIR
+        print(f"Mode: train + val (前処理前: {train_dir}, {val_dir})")
+        print(f"  Train: {train_dir} -> {os.path.join(base_out, 'train')}")
+        print(f"  Val:   {val_dir} -> {os.path.join(base_out, 'val')}")
+        os.makedirs(base_out, exist_ok=True)
+        run_analysis_for_dataset(model, train_dir, os.path.join(base_out, 'train'), "train")
+        run_analysis_for_dataset(model, val_dir, os.path.join(base_out, 'val'), "val")
+        print("\n" + "=" * 60)
+        print(f"Analysis complete! Results: {base_out}/train/ and {base_out}/val/")
+        print("  - confusion_matrix_*.png, errors/, correct/, report.json in each")
+        print("=" * 60)
 
 
 if __name__ == "__main__":
