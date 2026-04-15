@@ -279,7 +279,8 @@ def main():
     face_app.prepare(ctx_id=0, det_size=(640, 640))
 
     # Search Variations
-    search_keywords = [f"{keyword} 女優"]
+    # 固定語（例: 「女優」「顔」）は自動付与しない。指定の人物名のみで検索する。
+    search_keywords = [str(keyword)]
 
     temp_root = os.path.abspath('temp_part1_raw')
     if os.path.exists(temp_root):

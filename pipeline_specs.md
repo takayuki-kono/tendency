@@ -33,7 +33,7 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 **処理内容:**
 1.  **ダウンロード:** 指定キーワードの画像をマルチエンジンで収集。
     -   **エンジン:** Yahoo, Bing, Baidu, Google (pyimagedl使用)
-    -   **キーワード:** 「〇〇 女優」に固定。
+    -   **キーワード:** 指定の人物名のみ（検索クエリに「女優」「顔」などの固定語を自動付与しない）。
     -   **枚数制限:** 各エンジン最大1000枚。
     -   **ドメインフィルタリング:** Malwarebytes等で警告される不正ドメイン（clubberia, xxupなど）からのダウンロードをブロック。
 2.  **Part 1 (`components/part1_setup.py`):** ※2パス方式
