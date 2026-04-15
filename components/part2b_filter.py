@@ -160,57 +160,66 @@ def filter_by_main_person_insightface(input_dir, physical_delete):
     if len(counts) == 0: 
         logger.warning("No main cluster found, only noise.")
         return
-    
-    main_cluster_label = unique_labels[np.argmax(counts)]
-    logger.info(f"Main cluster label: {main_cluster_label} with {counts.max()} images.")
-
-    images_to_keep = []
-    for i, label in enumerate(labels):
-        if label == main_cluster_label:
-            images_to_keep.append(image_path_list[i])
 
     # deleted ディレクトリは親ディレクトリに作成（論理削除の場合のみ）
     parent_dir = os.path.dirname(input_dir)
+    
+    # Keep top-N clusters (default: 2) to mitigate "second person" dominance.
+    keep_top_n = 2
+    order = np.argsort(-counts)  # cluster sizes desc
+    keep_labels = unique_labels[order[:min(keep_top_n, len(unique_labels))]].tolist()
+    keep_counts_sorted = counts[order].tolist()
+    logger.info(f"Keeping top-{len(keep_labels)} clusters: {keep_labels} (counts_sorted={keep_counts_sorted})")
+
+    # Create destination folders per kept cluster rank under parent_dir
+    clusters_root_dir = os.path.join(parent_dir, "person_clusters")
+    os.makedirs(clusters_root_dir, exist_ok=True)
+    label_to_rank = {lab: (ri + 1) for ri, lab in enumerate(keep_labels)}
+    rank_to_dir = {}
+    for rank in label_to_rank.values():
+        d = os.path.join(clusters_root_dir, f"person_{rank}")
+        os.makedirs(d, exist_ok=True)
+        rank_to_dir[rank] = d
+
+    # Move kept images into per-person folders (remove from input_dir)
+    for i, label in enumerate(labels):
+        if label in label_to_rank:
+            src = image_path_list[i]
+            rank = label_to_rank[label]
+            dst = os.path.join(rank_to_dir[rank], os.path.basename(src))
+            try:
+                if os.path.exists(dst):
+                    os.remove(dst)
+                shutil.move(src, dst)
+            except Exception as e:
+                logger.error(f"Error moving kept file {src} -> {dst}: {e}")
+
     deleted_dir = os.path.join(parent_dir, "deleted_outliers")
     if not physical_delete and not os.path.exists(deleted_dir):
         os.makedirs(deleted_dir)
 
     all_images = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
     for path in all_images:
-        if path not in images_to_keep:
-            try:
-                if physical_delete:
-                    os.remove(path)
-                    logger.info(f"Deleted non-main person file: {path}")
-                else:
-                    dst = os.path.join(deleted_dir, os.path.basename(path))
-                    if os.path.exists(dst): os.remove(dst)
-                    shutil.move(path, dst)
-                    logger.info(f"Moved non-main person file: {path}")
-            except Exception as e:
-                logger.error(f"Error removing {path}: {e}")
+        # At this point, kept images have been moved out of input_dir.
+        # Remaining files in input_dir are outliers/noise and should be removed/moved.
+        try:
+            if physical_delete:
+                os.remove(path)
+                logger.info(f"Deleted outlier file: {path}")
+            else:
+                dst = os.path.join(deleted_dir, os.path.basename(path))
+                if os.path.exists(dst): os.remove(dst)
+                shutil.move(path, dst)
+                logger.info(f"Moved outlier file: {path}")
+        except Exception as e:
+            logger.error(f"Error removing {path}: {e}")
 
 def cleanup_directories(input_dir):
     """
     フィルタリング後の整理:
-    - input_dir (rotated) 内の残り画像を親ディレクトリに移動
     - 空になった rotated フォルダを削除
     """
     logger.info("Starting final cleanup.")
-    parent_dir = os.path.dirname(input_dir)
-    
-    # rotated 内の画像を親ディレクトリに移動
-    for item_name in os.listdir(input_dir):
-        item_path = os.path.join(input_dir, item_name)
-        if os.path.isfile(item_path):
-            try:
-                dst = os.path.join(parent_dir, item_name)
-                if os.path.exists(dst):
-                    os.remove(dst)
-                shutil.move(item_path, dst)
-                logger.info(f"Moved to parent: {item_name}")
-            except Exception as e:
-                logger.error(f"Error moving {item_path}: {e}")
     
     # 空になった rotated フォルダを削除
     try:

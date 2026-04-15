@@ -55,9 +55,10 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     -   **顔位置フィルター:** 内側目ランドマーク(89,39)を使用し、横向きの顔を検出・除外。
     -   **3D頬幅フィルター:** 3Dランドマーク(3,13)の3Dユークリッド距離を使用し、頬幅比率0.7未満の横顔を除外。
     -   **アスペクト比フィルター:** 0.9〜1.8の範囲外を除外。
-    -   **外れ値除去:** DBSCANクラスタリング(eps=0.35)を行い、主となる人物以外を除去。
+    -   **外れ値除去:** DBSCANクラスタリングを行い、**上位2人物（上位2クラスタ）**を残し、それ以外を除去。
+    -   **人物フォルダ分け:** 残したクラスタは `person_clusters/person_1/`, `person_clusters/person_2/` に分けて保存。
     -   **削除先:** `deleted_outliers/`（論理削除モード時）
-    -   **整理:** 処理後、`rotated/` から親ディレクトリへ画像を移動。
+    -   **整理:** `rotated/` は空になるため削除する（残す画像は `person_clusters/` 側に移動済み）。
 
 **出力:** `master_data/{label}/...`（クリーニング済みの224x224顔画像）
 
