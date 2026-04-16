@@ -68,6 +68,12 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 **スクリプト:** `preprocess_multitask.py`
 ... (以下、変更なし) ...
 
+### 補助: 未分類フォルダの自動振り分け（最新モデル）
+`master_data/未分類/{人物フォルダ}/` がある場合、最新の学習済みモデルでフォルダ内画像を推論し、
+多数決でラベル（例: `adfh`）を決定して `master_data/{ラベル}/{人物フォルダ}/` に移動する。
+
+- **スクリプト**: `util/reorganize_unclassified_by_model.py`
+
 ### ユーティリティ
 #### データ集計
 **スクリプト:** `util/count_data.py`

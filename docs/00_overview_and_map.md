@@ -17,6 +17,7 @@
 | `components/part2a_similarity.py` | `docs/02_data_filtering.md` |
 | `components/part2b_filter.py` | `docs/02_data_filtering.md` |
 | `reorganize_by_label.py` | `docs/02_data_filtering.md` |
+| `util/reorganize_unclassified_by_model.py` | `docs/02_data_filtering.md`, `pipeline_specs.md` |
 | `create_person_split.py` | `docs/02_data_filtering.md`, `pipeline_specs.md` |
 | `preprocess_multitask.py` | `docs/02_data_filtering.md`, `pipeline_specs.md` |
 | **学習・評価 (Stage 3)** | |
