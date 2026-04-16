@@ -57,7 +57,7 @@ def load_best_params():
 
 def _get_head_lr_from_best(best_params: dict, default: float) -> float:
     # 新キー優先。互換として warmup_lr（FT用warmupに使われていた）も見る。
-    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
+    for k in ("learning_rate_nohead", "learning_rate_head", "warmup_lr", "learning_rate"):
         if k in best_params:
             try:
                 return float(best_params[k])
@@ -671,7 +671,9 @@ def main():
     best_params['seed'] = best_seed
     best_params['epochs'] = FINAL_EPOCHS
     # 互換: learning_rate はFT側として残す。head/ft は明示キーで保存する。
-    best_params['learning_rate_head'] = float(best_params.get('learning_rate_head', head_lr))
+    # headなし側は learning_rate_nohead を正とし、互換で learning_rate_head も併記する
+    best_params['learning_rate_nohead'] = float(best_params.get('learning_rate_nohead', best_params.get('learning_rate_head', head_lr)))
+    best_params['learning_rate_head'] = float(best_params.get('learning_rate_head', best_params['learning_rate_nohead']))
     best_params['learning_rate_ft'] = float(best_params.get('learning_rate_ft', best_params.get('learning_rate', final_lr)))
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
         json.dump(best_params, f, indent=4)

@@ -97,7 +97,7 @@ def load_best_train_params():
 
 def _get_head_lr_from_best(best_params: dict, default: float) -> float:
     # optimize_sequential は fine_tune=False の評価が中心なので head 側LRを優先する
-    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
+    for k in ("learning_rate_nohead", "learning_rate_head", "warmup_lr", "learning_rate"):
         if k in best_params:
             try:
                 return float(best_params[k])
@@ -855,9 +855,11 @@ def main():
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}, Score: {cal_score:.4f}")
     # base_lr が確定した時点で、次回の初期値として head 側LRを更新しておく
     try:
-        best_params["learning_rate_head"] = float(CALIBRATED_BASE_LR)
+        # headなし側は learning_rate_nohead を正とし、互換で learning_rate_head も併記する
+        best_params["learning_rate_nohead"] = float(CALIBRATED_BASE_LR)
+        best_params["learning_rate_head"] = float(best_params.get("learning_rate_head", best_params["learning_rate_nohead"]))
         save_best_train_params(best_params)
-        logger.info(f"Updated best_train_params learning_rate_head -> {CALIBRATED_BASE_LR:.8f}")
+        logger.info(f"Updated best_train_params learning_rate_nohead -> {CALIBRATED_BASE_LR:.8f}")
     except Exception as e:
         logger.warning(f"Failed to persist learning_rate_head to {BEST_TRAIN_PARAMS_FILE}: {e}")
     

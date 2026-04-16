@@ -188,11 +188,12 @@
 ### `outputs/best_train_params.json` の学習率の扱い
 - `train_sequential.py` の最終採用ハイパラを保存する。
 - LRは **head学習（凍結 / `fine_tune=False`）用** と **FT（`fine_tune=True`）用** を分離して保持する。
-    - **`learning_rate_head`**: head学習（凍結）で使うLR（次回の凍結キャリブレーションの初期値にも使う）
+    - **`learning_rate_nohead`**: headなし（凍結 / `fine_tune=False`）で使うLR（次回の凍結キャリブレーションの初期値にも使う）
+        - 互換のため旧キー **`learning_rate_head`** も当面は読み書きする（非推奨）。
     - **`learning_rate_ft`**: FT本番で使うLR（次回のFTキャリブレーションの初期値にも使う）
     - **互換用**: 既存キーの `learning_rate` は主にFT側のLRとして残す（古いファイル読み込み時の互換のため）
     - **更新元**:
-        - `optimize_sequential.py` は、LRキャリブレーションで `CALIBRATED_BASE_LR`（base_lr）が確定したタイミングで `learning_rate_head` を上書き更新する（次回のoptimize開始時の初期値に反映させるため）。
+        - `optimize_sequential.py` は、LRキャリブレーションで `CALIBRATED_BASE_LR`（base_lr）が確定したタイミングで `learning_rate_nohead`（互換: `learning_rate_head`）を上書き更新する（次回のoptimize開始時の初期値に反映させるため）。
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`
