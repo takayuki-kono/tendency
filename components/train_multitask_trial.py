@@ -964,18 +964,25 @@ def main():
             tf.keras.backend.set_value(model.optimizer.lr, extension_lr)
         logger.info(f"Extension LR set to {extension_lr:.8f}")
         
-        max_ext_epochs = 20
+        # 延長は「精度が厳密に下がるまで」継続したいが、無限ループ防止のため安全上限を設ける
+        base_ext_epochs = 20
+        max_ext_epochs_hard = 200
+        planned_ext_epochs = base_ext_epochs
         best_ext_score = final_val_acc
         
-        for i in range(max_ext_epochs):
-            logger.info(f"Extension Epoch {i+1}/{max_ext_epochs}...")
+        ext_epoch = 0  # 1-indexedで扱う（ログ表示用）
+        while ext_epoch < max_ext_epochs_hard:
+            ext_epoch += 1
+            abs_epoch = training_epochs + ext_epoch
+            abs_total_planned = training_epochs + planned_ext_epochs
+            logger.info(f"Extension Epoch {abs_epoch}/{abs_total_planned} (ext={ext_epoch}/{planned_ext_epochs})...")
             
             # 1 Epoch training (epochs=1 means run 1 epoch from scratch in this call)
             hist_ext = model.fit(
                 train_ds,
                 validation_data=val_ds,
                 epochs=1,
-                verbose=2
+                verbose=0
             )
             
             # Score Calculation
@@ -1005,7 +1012,9 @@ def main():
                             val_scores.append(history_keys[key_acc][0])
             
             current_ext_score = sum(val_scores) / len(val_scores) if val_scores else 0.0
-            logger.info(f"Extension Score: {current_ext_score:.4f} (Best: {best_ext_score:.4f})")
+            logger.info(
+                f"[Extension] abs_epoch={abs_epoch} score={current_ext_score:.4f} best={best_ext_score:.4f}"
+            )
             
             if current_ext_score > best_ext_score:
                 best_ext_score = current_ext_score
@@ -1015,6 +1024,14 @@ def main():
                 logger.info("Accuracy dropped. Stopping extension.")
                 break
             # current_ext_score == best_ext_score (plateau) のときは続行し、本当に下がるまで延長する
+
+            # planned_ext_epochs（デフォルト20）に到達しても last==best（=下がってない）なら延長枠を追加
+            if ext_epoch >= planned_ext_epochs and planned_ext_epochs < max_ext_epochs_hard:
+                # ここに来る時点で current_ext_score >= best_ext_score（plateau or improved）なので継続する
+                planned_ext_epochs = min(planned_ext_epochs + base_ext_epochs, max_ext_epochs_hard)
+                logger.info(
+                    f"[Extension] Reached planned end but not dropped; extending plan to {planned_ext_epochs} epochs (hard_cap={max_ext_epochs_hard})."
+                )
         
         # Restore best weights from extension phase
         if os.path.exists(temp_weights_path):

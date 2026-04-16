@@ -178,7 +178,8 @@
 - **条件付きEpoch拡張 (Conditional Extension)**:
     - ベストエポックが最終エポック、または最終エポックのスコアがベストスコアと同等の場合、または `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
-    - **終了条件**: 精度が**厳密に下がったときのみ**停止（plateau＝同じのときは継続）。最大20エポック追加。
+    - **終了条件**: 精度が**厳密に下がったときのみ**停止（plateau＝同じのときは継続）。
+    - **延長上限**: 20epoch単位で延長し、下がらない限り継続（安全上限あり）。
     - `train_sequential.py` / `optimize_sequential.py` から呼ぶ場合も、未収束（例: bestが最終epoch、または score<0.5）なら延長学習が走る（`--no_extension` で抑止しない）。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
