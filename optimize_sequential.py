@@ -119,8 +119,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     cmd_train.extend(["--epochs", str(cal_epochs)])
     cmd_train.extend(["--fine_tune", "False"])
     cmd_train.extend(["--enable_early_stopping", "False"])
-    # Calibrationでは延長学習は不要（cal_epochsが短いため）
-    cmd_train.extend(["--no_extension"])
+    # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
     

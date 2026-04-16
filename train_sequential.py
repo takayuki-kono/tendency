@@ -252,8 +252,7 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
         cmd.extend([f"--{key}", str(value)])
     cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
     cmd.extend(["--enable_early_stopping", "False"])
-    # Calibrationでは延長学習は不要（cal_epochsが短いため）
-    cmd.extend(["--no_extension"])
+    # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
     
