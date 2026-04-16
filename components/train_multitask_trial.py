@@ -1009,8 +1009,9 @@ def main():
                             val_scores.append(history_keys[key_acc][0])
             
             current_ext_score = sum(val_scores) / len(val_scores) if val_scores else 0.0
+            # optimize_sequential 側のログ抽出条件（'Epoch ', 'MinClassAcc'）に確実に拾わせる
             logger.info(
-                f"[Extension] abs_epoch={abs_epoch} score={current_ext_score:.4f} best={best_ext_score:.4f}"
+                f"Epoch {abs_epoch} | MinClassAcc={current_ext_score:.4f} | Extension best={best_ext_score:.4f}"
             )
             
             if current_ext_score > best_ext_score:
