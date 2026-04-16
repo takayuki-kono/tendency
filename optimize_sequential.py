@@ -119,6 +119,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     cmd_train.extend(["--epochs", str(cal_epochs)])
     cmd_train.extend(["--fine_tune", "False"])
     cmd_train.extend(["--enable_early_stopping", "False"])
+    # Calibrationでは延長学習は不要（cal_epochsが短いため）
     cmd_train.extend(["--no_extension"])
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
@@ -470,7 +471,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         cmd_train.extend(["--epochs", "20"])
         cmd_train.extend(["--fine_tune", "False"])
         cmd_train.extend(["--auto_lr_target_epoch", "0"])  # 内部自動スケーリングを無効化
-        cmd_train.extend(["--no_extension"])  # LR逐一調整するため延長学習は省略
+        # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
 
         # train_sequential.py と同じ LR 再調整条件（モジュール定数で共用）
         training_epochs = 20

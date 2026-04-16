@@ -111,7 +111,7 @@ def run_trial(params):
             for key, value in trial_params.items():
                 cmd.extend([f"--{key}", str(value)])
             cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
-            cmd.extend(["--no_extension"])  # LR逐一調整するため延長学習は省略
+            # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
 
             # Popenでリアルタイム出力
             process = subprocess.Popen(
@@ -252,6 +252,7 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
         cmd.extend([f"--{key}", str(value)])
     cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
     cmd.extend(["--enable_early_stopping", "False"])
+    # Calibrationでは延長学習は不要（cal_epochsが短いため）
     cmd.extend(["--no_extension"])
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
