@@ -179,11 +179,18 @@
     - ベストエポックが最終エポック、または最終エポックのスコアがベストスコアと同等の場合、または `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
     - **終了条件**: 精度が**厳密に下がったときのみ**停止（plateau＝同じのときは継続）。
-    - **延長上限**: 20epoch単位で延長し、下がらない限り継続（安全上限あり）。
+    - **延長上限**: 1epochずつ継続し、下がらない限り続行（安全上限あり）。
     - `train_sequential.py` / `optimize_sequential.py` から呼ぶ場合も、未収束（例: bestが最終epoch、または score<0.5）なら延長学習が走る（`--no_extension` で抑止しない）。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
+
+### `outputs/best_train_params.json` の学習率の扱い
+- `train_sequential.py` の最終採用ハイパラを保存する。
+- LRは **head学習（凍結 / `fine_tune=False`）用** と **FT（`fine_tune=True`）用** を分離して保持する。
+    - **`learning_rate_head`**: head学習（凍結）で使うLR（次回の凍結キャリブレーションの初期値にも使う）
+    - **`learning_rate_ft`**: FT本番で使うLR（次回のFTキャリブレーションの初期値にも使う）
+    - **互換用**: 既存キーの `learning_rate` は主にFT側のLRとして残す（古いファイル読み込み時の互換のため）
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`

@@ -45,6 +45,35 @@ from components.lr_adjustment import (
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
 
+def load_best_params():
+    """前回の最終採用パラメータ（存在すれば）を読む。"""
+    if os.path.exists(BEST_PARAMS_FILE):
+        try:
+            with open(BEST_PARAMS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as e:
+            logger.warning(f"Failed to load {BEST_PARAMS_FILE}: {e}")
+    return {}
+
+def _get_head_lr_from_best(best_params: dict, default: float) -> float:
+    # 新キー優先。互換として warmup_lr（FT用warmupに使われていた）も見る。
+    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
+        if k in best_params:
+            try:
+                return float(best_params[k])
+            except Exception:
+                pass
+    return float(default)
+
+def _get_ft_lr_from_best(best_params: dict, default: float) -> float:
+    for k in ("learning_rate_ft", "learning_rate"):
+        if k in best_params:
+            try:
+                return float(best_params[k])
+            except Exception:
+                pass
+    return float(default)
+
 
 def count_files(directory):
     if not os.path.exists(directory):
@@ -433,6 +462,8 @@ def search_ft_lr_by_targets(current_params, initial_lr, targets=[10, 11, 12, 13,
 def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
     
+    prev_best = load_best_params()
+
     # 初期パラメータ (デフォルト値)
     current_params = {
         'model_name': 'EfficientNetV2B0',
@@ -456,12 +487,15 @@ def main():
     # --- Step 1: Learning Rate Calibration (デフォルトB0で) ---
     # LR_TARGET_EPOCH(13)でベストになるLRをキャリブレーション
     logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
+    head_initial_lr = _get_head_lr_from_best(prev_best, default=5e-4)
     calibrated_lr, _ = calibrate_base_lr(
-        current_params, initial_lr=5e-4,
+        current_params, initial_lr=head_initial_lr,
         cal_epochs=20, target_best_epoch=13, score_priority=True
     )
     logger.info(f"Target 10 LR={calibrated_lr:.8f}")
-    current_params['learning_rate'] = calibrated_lr
+    head_lr = calibrated_lr
+    current_params['learning_rate'] = head_lr
+    current_params['learning_rate_head'] = head_lr
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで比較) ---
     best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
     current_params['model_name'] = best_model
@@ -532,7 +566,7 @@ def main():
     
     # --- Step 3.5: Fine-Tuning LR Calibration ---
     # FT本番: Head学習のLRをwarmupとして引き継ぎ、FT用LRをキャリブレーション
-    warmup_lr = current_params['learning_rate']  # Head学習で最適化したLR
+    warmup_lr = head_lr  # Head学習で最適化したLR
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
@@ -541,11 +575,13 @@ def main():
     logger.info(f"Warmup LR set to {warmup_lr:.8f} (from Head training calibration)")
     
     logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
+    ft_initial_lr = _get_ft_lr_from_best(prev_best, default=current_params['learning_rate'])
     ft_lr, _ = calibrate_base_lr(
-        current_params, initial_lr=current_params['learning_rate'],
+        current_params, initial_lr=ft_initial_lr,
         cal_epochs=20, target_best_epoch=13, score_priority=True
     )
     current_params['learning_rate'] = ft_lr
+    current_params['learning_rate_ft'] = ft_lr
     
     # --- Step 4: Unfreeze Layers Optimization ---
     best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
@@ -559,6 +595,7 @@ def main():
             cal_epochs=20, target_best_epoch=13, score_priority=True
         )
         current_params['learning_rate'] = ft_lr2
+        current_params['learning_rate_ft'] = ft_lr2
     else:
         logger.info(f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<")
     
@@ -584,6 +621,7 @@ def main():
         targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
     )
     current_params['learning_rate'] = final_lr
+    current_params['learning_rate_ft'] = final_lr
     
     # --- Final: Best-of-N Runs (上振れ狙い) ---
     N_FINAL_RUNS = 3
@@ -632,6 +670,9 @@ def main():
     best_params = current_params.copy()
     best_params['seed'] = best_seed
     best_params['epochs'] = FINAL_EPOCHS
+    # 互換: learning_rate はFT側として残す。head/ft は明示キーで保存する。
+    best_params['learning_rate_head'] = float(best_params.get('learning_rate_head', head_lr))
+    best_params['learning_rate_ft'] = float(best_params.get('learning_rate_ft', best_params.get('learning_rate', final_lr)))
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
         json.dump(best_params, f, indent=4)
     logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")

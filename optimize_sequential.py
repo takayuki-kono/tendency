@@ -95,6 +95,16 @@ def load_best_train_params():
         logger.info("Best train params not found. Using defaults.")
     return {}
 
+def _get_head_lr_from_best(best_params: dict, default: float) -> float:
+    # optimize_sequential は fine_tune=False の評価が中心なので head 側LRを優先する
+    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
+        if k in best_params:
+            try:
+                return float(best_params[k])
+            except Exception:
+                pass
+    return float(default)
+
 def save_cache(cache):
     # ファイル数も保存
     cache['__file_count__'] = count_files("train") + count_files("validation")
@@ -461,7 +471,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             adjusted_lr = CALIBRATED_BASE_LR
             logger.info(f"LR (Calibrated): {adjusted_lr:.8f}")
         else:
-            adjusted_lr = best_params.get('learning_rate', 0.0001)
+            adjusted_lr = _get_head_lr_from_best(best_params, default=0.0001)
             logger.info(f"LR (Fallback): {adjusted_lr:.8f}")
         
         cmd_train.extend(["--learning_rate", str(adjusted_lr)])
@@ -829,7 +839,7 @@ def main():
     
     # LRキャリブレーション実行
     best_params = load_best_train_params()
-    initial_lr = best_params.get('learning_rate', 0.0005)
+    initial_lr = _get_head_lr_from_best(best_params, default=0.0005)
     CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
         'EfficientNetV2B0',
         initial_lr,

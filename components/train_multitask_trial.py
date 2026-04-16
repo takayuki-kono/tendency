@@ -932,15 +932,15 @@ def main():
 
             final_val_acc = max(avg_scores)
             best_epoch_idx = avg_scores.index(final_val_acc)
-            best_epoch = best_epoch_idx + 1  # 1-indexed
+            best_epoch = best_epoch_idx + 1  # 1-indexed（ベース学習内のepoch）
+            best_epoch_abs = best_epoch  # 延長が走った場合は abs_epoch で更新していく
             last_epoch_score = avg_scores[-1]  # 最終エポックのスコアを記録
-            
+
+            # BEST_EPOCH の print は「延長後に確定」させたいので、ここではloggerのみ
             if args.fine_tune.lower() == 'true':
-                print(f"FT_BEST_EPOCH: {best_epoch}")
-                logger.info(f"FT Best Score: {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
+                logger.info(f"FT Best Score (base): {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
             else:
-                print(f"BEST_EPOCH: {best_epoch}")
-                logger.info(f"Best Target Score: {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
+                logger.info(f"Best Target Score (base): {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
         else:
             logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
             
@@ -965,17 +965,14 @@ def main():
         logger.info(f"Extension LR set to {extension_lr:.8f}")
         
         # 延長は「精度が厳密に下がるまで」継続したいが、無限ループ防止のため安全上限を設ける
-        base_ext_epochs = 20
         max_ext_epochs_hard = 200
-        planned_ext_epochs = base_ext_epochs
         best_ext_score = final_val_acc
         
         ext_epoch = 0  # 1-indexedで扱う（ログ表示用）
         while ext_epoch < max_ext_epochs_hard:
             ext_epoch += 1
             abs_epoch = training_epochs + ext_epoch
-            abs_total_planned = training_epochs + planned_ext_epochs
-            logger.info(f"Extension Epoch {abs_epoch}/{abs_total_planned} (ext={ext_epoch}/{planned_ext_epochs})...")
+            logger.info(f"Extension Epoch {abs_epoch} (ext={ext_epoch}/{max_ext_epochs_hard})...")
             
             # 1 Epoch training (epochs=1 means run 1 epoch from scratch in this call)
             hist_ext = model.fit(
@@ -1019,24 +1016,26 @@ def main():
             if current_ext_score > best_ext_score:
                 best_ext_score = current_ext_score
                 final_val_acc = best_ext_score
+                best_epoch_abs = abs_epoch
                 model.save_weights(temp_weights_path)  # Update best weights
             elif current_ext_score < best_ext_score:
                 logger.info("Accuracy dropped. Stopping extension.")
                 break
             # current_ext_score == best_ext_score (plateau) のときは続行し、本当に下がるまで延長する
-
-            # planned_ext_epochs（デフォルト20）に到達しても last==best（=下がってない）なら延長枠を追加
-            if ext_epoch >= planned_ext_epochs and planned_ext_epochs < max_ext_epochs_hard:
-                # ここに来る時点で current_ext_score >= best_ext_score（plateau or improved）なので継続する
-                planned_ext_epochs = min(planned_ext_epochs + base_ext_epochs, max_ext_epochs_hard)
-                logger.info(
-                    f"[Extension] Reached planned end but not dropped; extending plan to {planned_ext_epochs} epochs (hard_cap={max_ext_epochs_hard})."
-                )
         
         # Restore best weights from extension phase
         if os.path.exists(temp_weights_path):
             model.load_weights(temp_weights_path)
             logger.info(f"Restored best extension weights (Final Score: {final_val_acc:.4f})")
+
+    # BEST_EPOCH の最終確定（延長を含めた実epochを出力）
+    if 'best_epoch_abs' in locals():
+        if args.fine_tune.lower() == 'true':
+            print(f"FT_BEST_EPOCH: {best_epoch_abs}")
+            logger.info(f"FT Best Score (final): {final_val_acc:.4f} (at abs_epoch {best_epoch_abs})")
+        else:
+            print(f"BEST_EPOCH: {best_epoch_abs}")
+            logger.info(f"Best Target Score (final): {final_val_acc:.4f} (at abs_epoch {best_epoch_abs})")
 
     # クリーンアップ
     if os.path.exists(temp_weights_path):
