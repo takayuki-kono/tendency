@@ -105,6 +105,12 @@ def _get_head_lr_from_best(best_params: dict, default: float) -> float:
                 pass
     return float(default)
 
+def save_best_train_params(params: dict) -> None:
+    """最適化された学習パラメータを書き戻す（存在しない場合は新規作成）。"""
+    os.makedirs(os.path.dirname(BEST_TRAIN_PARAMS_FILE), exist_ok=True)
+    with open(BEST_TRAIN_PARAMS_FILE, "w", encoding="utf-8") as f:
+        json.dump(params, f, indent=4)
+
 def save_cache(cache):
     # ファイル数も保存
     cache['__file_count__'] = count_files("train") + count_files("validation")
@@ -847,6 +853,13 @@ def main():
         target_best_epoch=13,
     )
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}, Score: {cal_score:.4f}")
+    # base_lr が確定した時点で、次回の初期値として head 側LRを更新しておく
+    try:
+        best_params["learning_rate_head"] = float(CALIBRATED_BASE_LR)
+        save_best_train_params(best_params)
+        logger.info(f"Updated best_train_params learning_rate_head -> {CALIBRATED_BASE_LR:.8f}")
+    except Exception as e:
+        logger.warning(f"Failed to persist learning_rate_head to {BEST_TRAIN_PARAMS_FILE}: {e}")
     
     # --- Step 0: Model Architecture Selection & Baseline ---
     # キャリブレーション最終結果をB0のベースラインとして流用
