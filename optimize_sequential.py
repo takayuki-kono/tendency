@@ -66,20 +66,36 @@ def count_files(directory):
         count += len(files)
     return count
 
+def _reset_cache_file(current_file_count: int) -> dict:
+    """キャッシュJSONを初期化してディスクへ即時書き込む。"""
+    fresh = {'__file_count__': current_file_count}
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(fresh, f, indent=4)
+    except Exception as e:
+        logger.warning(f"Failed to reset cache file on disk: {e}")
+    return fresh
+
 def load_cache():
     current_file_count = count_files("train") + count_files("validation")
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 cache = json.load(f)
-            # ファイル数が変わっていたらキャッシュクリア
-            if cache.get('__file_count__') != current_file_count:
-                logger.info(f"Data changed ({cache.get('__file_count__')} -> {current_file_count}). Clearing cache.")
-                return {'__file_count__': current_file_count}
-            return cache
-        except:
-            return {'__file_count__': current_file_count}
-    return {'__file_count__': current_file_count}
+        except Exception:
+            # 壊れたキャッシュは破棄して新規化（ディスクも即時更新）
+            return _reset_cache_file(current_file_count)
+
+        prev_count = cache.get('__file_count__')
+        # ファイル数が変わっていたらキャッシュクリア（ディスクも即時クリア）
+        if prev_count != current_file_count:
+            logger.info(
+                f"Data changed ({prev_count} -> {current_file_count}). Clearing cache file on disk."
+            )
+            return _reset_cache_file(current_file_count)
+        return cache
+    return _reset_cache_file(current_file_count)
 
 def load_best_train_params():
     """最適化された学習パラメータを読み込む"""
@@ -128,8 +144,13 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     best_params = load_best_train_params()
     
     cmd_train = [PYTHON_TRAIN, "components/train_multitask_trial.py", "--model_name", model_name]
+    # learning_rate_nohead/head/ft は optimize 側のメタ情報で train_multitask_trial には存在しない引数
+    _skip_keys = {
+        'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
+        'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft',
+    }
     for k, v in best_params.items():
-        if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch']:
+        if k not in _skip_keys:
             cmd_train.extend([f"--{k}", str(v)])
     cmd_train.extend(["--learning_rate", str(lr)])
     cmd_train.extend(["--epochs", str(cal_epochs)])
@@ -398,9 +419,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         
         # Load best params and append to command
         # epochs, fine_tune, model_name, learning_rate は明示的に設定するので除外
+        # learning_rate_nohead/head/ft は optimize 側のメタ情報で train_multitask_trial には存在しない引数
         best_params = load_best_train_params()
+        _skip_keys = {
+            'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
+            'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft',
+        }
         for k, v in best_params.items():
-            if k not in ['model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch']:
+            if k not in _skip_keys:
                 cmd_train.extend([f"--{k}", str(v)])
         
         # 学習率の設定 (2026-02-14 改良):
