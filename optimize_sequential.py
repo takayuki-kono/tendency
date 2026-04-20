@@ -630,7 +630,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.error(f"Error in trial: {e}")
         return (0.0, 0, 0)
 
-def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, points=[0, 25, 50, 75]):
+def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, points=[0, 5, 25, 50, 75]):
     """
     1つのパラメータを最適化する。
     

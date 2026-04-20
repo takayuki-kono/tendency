@@ -41,7 +41,7 @@
 - **仕組み**: 実際にCNN (`EfficientNetV2`) を数Epoch学習させて評価する。
 - **特徴**: SVMよりも最終的なタスクに近いが、1試行に時間がかかる（数分/回）。
 - **探索設定**:
-    - **探索点**: `[0, 2, 5, 25, 50]` (初期探索) -> 1%刻みの二分探索 (Refinement)。
+    - **探索点**: `[0, 5, 25, 50, 75]` (初期探索) -> 1%刻みの二分探索 (Refinement)。
 - **Phase 1 結果サマリー**: 全パラメータの独立探索完了後に「精度上昇効率一覧」をログ出力。各パラメータの Best Score 候補と Best Efficiency 候補をテーブル形式で表示し、全体の Overall Best Score / Best Efficiency も出力する。
 - **出力アーティファクト**:
     - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。
@@ -194,6 +194,10 @@
     - **互換用**: 既存キーの `learning_rate` は主にFT側のLRとして残す（古いファイル読み込み時の互換のため）
     - **更新元**:
         - `optimize_sequential.py` は、LRキャリブレーションで `CALIBRATED_BASE_LR`（base_lr）が確定したタイミングで `learning_rate_nohead`（互換: `learning_rate_head`）を上書き更新する（次回のoptimize開始時の初期値に反映させるため）。
+- **`train_multitask_trial.py` へ転送しないメタ情報キー**:
+    - `learning_rate_nohead` / `learning_rate_head` / `learning_rate_ft` は `train_sequential.py` / `optimize_sequential.py` 側のメタ情報であり、`components/train_multitask_trial.py` の argparse には存在しない。
+    - そのため `train_sequential.py` の `run_trial` / `run_calibration_trial`、および `optimize_sequential.py` の `run_trial` / `run_calibration_trial` でサブプロセス起動コマンドを組み立てる際、これらのキーは `_skip_keys` で除外する。
+    - 実際に `train_multitask_trial.py` に渡すLRは、いずれの呼び出し側でも明示的に `--learning_rate <value>` として付与する。
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`

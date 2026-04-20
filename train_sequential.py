@@ -137,7 +137,11 @@ def run_trial(params):
                 logger.info(f"  [LR Adjust #{adj_iter}] LR={current_lr:.8f}...")
             
             cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
+            # learning_rate_nohead/head/ft は train_sequential 側のメタ情報で train_multitask_trial には存在しない引数
+            _skip_keys = {'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft'}
             for key, value in trial_params.items():
+                if key in _skip_keys:
+                    continue
                 cmd.extend([f"--{key}", str(value)])
             cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
             # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
@@ -275,8 +279,10 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     params['epochs'] = cal_epochs
 
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
+    # learning_rate_nohead/head/ft は train_sequential 側のメタ情報で train_multitask_trial には存在しない引数
+    _skip_keys = {'auto_lr_target_epoch', 'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft'}
     for key, value in params.items():
-        if key == 'auto_lr_target_epoch':
+        if key in _skip_keys:
             continue
         cmd.extend([f"--{key}", str(value)])
     cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
