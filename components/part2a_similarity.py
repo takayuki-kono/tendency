@@ -17,8 +17,8 @@ NORM_SIZE = 224
 
 # --- Globals ---
 METRIC = 'cosine'
-DEDUPLICATION_TOLERANCE = 0.25 # Tight tolerance for duplicates
-MIN_SAMPLES = 2
+DEFAULT_DEDUPLICATION_TOLERANCE = 0.25 # Tight tolerance for duplicates (cosine distance)
+DEFAULT_MIN_SAMPLES = 2
 LOG_DIR = "outputs/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -50,12 +50,12 @@ def parse_face_size_from_basename(basename):
     return int(m.group(1)) if m else None
 
 # --- Function ---
-def find_similar_images(input_dir, physical_delete):
+def find_similar_images(input_dir, physical_delete, eps=DEFAULT_DEDUPLICATION_TOLERANCE, min_samples=DEFAULT_MIN_SAMPLES):
     """input_dir 内の画像から類似画像を検出し、重複を deleted へ移動する。
     解像度差をなくすため、最小 face_size に揃えた複製で embedding を取得して類似判別する。
     類似ペアでは解像度の低い元画像を削除し、複製はすべて削除する。
     """
-    logger.info("Starting similarity search with InsightFace embeddings (face_size-normalized)...")
+    logger.info(f"Starting similarity search with InsightFace embeddings (face_size-normalized). eps={eps}, min_samples={min_samples}")
     
     try:
         app = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
@@ -156,14 +156,14 @@ def find_similar_images(input_dir, physical_delete):
         except Exception as e:
             logger.error(f"Error processing {embed_path}: {e}")
 
-    if len(encodings) < MIN_SAMPLES:
+    if len(encodings) < min_samples:
         logger.info("Not enough faces for clustering.")
         _cleanup_temp(temp_dir, temp_paths_to_delete)
         return
 
     # --- Clustering ---
-    logger.info(f"Clustering with DBSCAN, eps={DEDUPLICATION_TOLERANCE}")
-    clustering = DBSCAN(metric=METRIC, eps=DEDUPLICATION_TOLERANCE, min_samples=MIN_SAMPLES).fit(np.array(encodings))
+    logger.info(f"Clustering with DBSCAN, eps={eps}, min_samples={min_samples}")
+    clustering = DBSCAN(metric=METRIC, eps=eps, min_samples=min_samples).fit(np.array(encodings))
     labels = clustering.labels_
 
     clusters = {}
@@ -228,11 +228,15 @@ def main():
     parser = argparse.ArgumentParser(description="Part 2a: Deduplication")
     parser.add_argument("input_dir", type=str, help="Input directory")
     parser.add_argument("--physical_delete", action="store_true", help="Enable physical deletion (default: False)")
+    parser.add_argument("--eps", type=float, default=DEFAULT_DEDUPLICATION_TOLERANCE,
+                        help=f"DBSCAN eps (cosine distance). default={DEFAULT_DEDUPLICATION_TOLERANCE}")
+    parser.add_argument("--min_samples", type=int, default=DEFAULT_MIN_SAMPLES,
+                        help=f"DBSCAN min_samples. default={DEFAULT_MIN_SAMPLES}")
     args = parser.parse_args()
 
-    logger.info(f"Part 2a starting for directory: {args.input_dir}, physical_delete: {args.physical_delete}")
+    logger.info(f"Part 2a starting for directory: {args.input_dir}, physical_delete: {args.physical_delete}, eps={args.eps}, min_samples={args.min_samples}")
     try:
-        find_similar_images(args.input_dir, args.physical_delete)
+        find_similar_images(args.input_dir, args.physical_delete, eps=args.eps, min_samples=args.min_samples)
         logger.info("Part 2a finished.")
     except Exception as e:
         logger.error(f"Fatal error in Part 2a: {e}", exc_info=True)

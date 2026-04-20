@@ -18,6 +18,12 @@
     - InsightFaceのFace Embedding (512次元) を抽出。
     - **DBSCANクラスタリング** (`eps`閾値設定) を行い、距離が非常に近い画像をグループ化。
     - グループ内で1枚だけ残し、他を削除。
+- **CLI フラグ**:
+    - `--eps <float>`: DBSCAN の `eps`（cosine 距離）。デフォルト `0.25`。小さいほど厳しく（ほぼ完全重複のみ）、大きいほど緩く（似ているだけでも同一扱い）。
+    - `--min_samples <int>`: DBSCAN の `min_samples`。デフォルト `2`。
+    - `--physical_delete`: 付与すると物理削除。未指定だと `deleted_duplicates/` への移動（論理削除）。
+- **バッチ適用**: `run_similarity_masterdata.py` で `master_data/<category>/<person>/person_clusters/person_*` をまとめて処理可能（既定 `--eps 0.25`、物理削除は `--physical_delete` を明示）。
+- **eps の調整**: 対象ディレクトリで適切な eps を探したい場合は `test_similarity_sweep.py` を使うと複数 eps 値で分岐フォルダを作って論理削除結果を並べてくれるので、エクスプローラで目視比較できる。
 
 ### B. 外れ値除去 (`components/part2b_filter.py`)
 - **目的**: 検索ノイズ（同姓同名の別人、間違って検出された群衆の顔など）を除去します。
