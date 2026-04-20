@@ -498,7 +498,7 @@ def main():
         current_params, initial_lr=head_initial_lr,
         cal_epochs=20, target_best_epoch=13, score_priority=True
     )
-    logger.info(f"Target 10 LR={calibrated_lr:.8f}")
+    logger.info(f"Calibrated Head LR={calibrated_lr:.8f}")
     head_lr = calibrated_lr
     current_params['learning_rate'] = head_lr
     current_params['learning_rate_head'] = head_lr
