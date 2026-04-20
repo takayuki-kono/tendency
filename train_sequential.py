@@ -23,6 +23,10 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 CACHE_FILE = os.path.join(CACHE_DIR, "train_opt_cache.json")
 BEST_PARAMS_FILE = "outputs/best_train_params.json"
+# Phase 0（head-only）のベスト重みを保存するパス。FT 側の head carryover で初期値として使う。
+BEST_HEAD_WEIGHTS_DIR = "outputs/best_head_weights"
+BEST_HEAD_WEIGHTS_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head.weights.h5")
+os.makedirs(BEST_HEAD_WEIGHTS_DIR, exist_ok=True)
 
 if not os.path.exists(PYTHON_EXEC): PYTHON_EXEC = "python"
 
@@ -266,6 +270,63 @@ def optimize_param(target_name, candidates, current_params):
     logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
     return best_val, best_score
 
+def train_and_save_best_head_weights(current_params, weights_path):
+    """
+    現在の params（head-only 想定）で head 学習を1回走らせ、
+    ベスト重みを weights_path に保存する（キャッシュ無視・必ず実行）。
+    Returns:
+        float: 学習結果の val 精度（失敗時 0.0）
+    """
+    params = current_params.copy()
+    # head-only 保証
+    params['fine_tune'] = 'False'
+    # head-only の本学習は Step1 と同じ 20 epochs に揃える
+    params.setdefault('epochs', 20)
+    # 念のため既存重み load は無効化（head-only の再学習時に自分自身を上書きしないため）
+    params['init_weights_path'] = ''
+    params['save_best_head_weights_path'] = weights_path
+
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Saving Best Head Weights (epochs={params['epochs']})")
+    logger.info(f"  learning_rate = {params.get('learning_rate'):.8f}")
+    logger.info(f"  weights_path  = {weights_path}")
+    logger.info(f"{'='*50}")
+
+    cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
+    _skip_keys = {'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft'}
+    for key, value in params.items():
+        if key in _skip_keys:
+            continue
+        cmd.extend([f"--{key}", str(value)])
+    cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
+
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace'
+    )
+    output_lines = []
+    for line in process.stdout:
+        line = line.rstrip()
+        output_lines.append(line)
+        if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'BEST_EPOCH', 'MinClassAcc', 'Avg=', 'BestHeadWeightsSaver']):
+            logger.info(f"  [HeadSave] {line}")
+    process.wait()
+
+    if process.returncode != 0:
+        logger.error(f"train_and_save_best_head_weights failed (returncode={process.returncode})")
+        return 0.0
+
+    full_output = "\n".join(output_lines)
+    match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
+    score = float(match_score.group(1)) if match_score else 0.0
+
+    if os.path.exists(weights_path):
+        logger.info(f"Best head weights saved: {weights_path} (score={score:.4f})")
+    else:
+        logger.warning(f"Best head weights file was NOT created: {weights_path}")
+    return score
+
+
 def run_calibration_trial(current_params, lr, cal_epochs=5):
     """
     LRキャリブレーション用: 指定パラメータで学習を実行し、BEST_EPOCHを返す。
@@ -505,7 +566,28 @@ def main():
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで比較) ---
     best_model, _ = optimize_param('model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params)
     current_params['model_name'] = best_model
-    
+
+    # --- Step 1.2: Head LR Re-calibration (model_name 確定後) ---
+    # Step1 は B0 で Cal したため、S が選ばれた場合は S に合わせて LR を取り直す
+    # （そのままだと S に対して LR 過大になり BestEpoch が target=13 から大きく外れることが確認されたため）
+    if best_model != 'EfficientNetV2B0':
+        logger.info(
+            f"\n>>> Step 1.2: Head LR Re-calibration "
+            f"(model_name={best_model}, Step1 時と異なるため再調整) <<<"
+        )
+        head_lr2, _ = calibrate_base_lr(
+            current_params, initial_lr=head_lr,
+            cal_epochs=20, target_best_epoch=13, score_priority=True
+        )
+        head_lr = head_lr2
+        current_params['learning_rate'] = head_lr
+        current_params['learning_rate_head'] = head_lr
+        current_params['learning_rate_nohead'] = head_lr
+    else:
+        logger.info(
+            f"\n>>> Step 1.2: Skipped (model_name={best_model} = Step1 キャリブレーション時と同値) <<<"
+        )
+
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
     # 0.0=Adam, >0=AdamW
     best_wd, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params)
@@ -569,16 +651,41 @@ def main():
     logger.info("OPTIMIZATION COMPLETE. STARTING FINE-TUNING...")
     logger.info(f"Best Params before FT: {current_params}")
     logger.info("="*50)
-    
+
+    # --- Step 3.9: Best Head Weights 再学習＆保存（FT の head carryover 用） ---
+    # これまで Step 3 の best params は保存されても、その重み自体は破棄されていたため、
+    # FT の warmup で head を再初期化 → 精度低下という問題があった。
+    # 解決策: ここで best params の構成で head-only 学習を再実行し、ベスト重みを保存する。
+    logger.info("\n>>> Step 3.9: Re-train head with best params and save best weights <<<")
+    head_save_params = current_params.copy()
+    head_save_params['fine_tune'] = 'False'
+    head_save_params['epochs'] = 20
+    # Step1/1.2 で確定した head LR を使う（learning_rate_head がキャリブ済み値）
+    head_save_params['learning_rate'] = head_lr
+    train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
+
     # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # FT本番: Head学習のLRをwarmupとして引き継ぎ、FT用LRをキャリブレーション
-    warmup_lr = head_lr  # Head学習で最適化したLR
+    # FT本番: Head の重みは Step 3.9 で保存した best_head_weights をロードして引き継ぐ（head carryover）。
+    # これにより warmup フェーズは不要になるため warmup_lr=0 に設定。
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
-    current_params['warmup_lr'] = warmup_lr
-    current_params['warmup_epochs'] = 5
-    logger.info(f"Warmup LR set to {warmup_lr:.8f} (from Head training calibration)")
+    if os.path.exists(BEST_HEAD_WEIGHTS_PATH):
+        current_params['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
+        current_params['warmup_lr'] = 0.0  # head carryover 済みなので warmup スキップ
+        current_params['warmup_epochs'] = 0
+        logger.info(
+            f"Head carryover enabled: init_weights_path={BEST_HEAD_WEIGHTS_PATH} "
+            f"(warmup skipped)"
+        )
+    else:
+        # フォールバック: best_head_weights 保存に失敗した場合は従来どおり warmup を走らせる
+        current_params['init_weights_path'] = ''
+        current_params['warmup_lr'] = head_lr
+        current_params['warmup_epochs'] = 5
+        logger.warning(
+            f"Head carryover disabled (file missing). Falling back to warmup_lr={head_lr:.8f}"
+        )
     
     logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
     ft_initial_lr = _get_ft_lr_from_best(prev_best, default=current_params['learning_rate'])

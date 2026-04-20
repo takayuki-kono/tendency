@@ -148,6 +148,9 @@
 前処理済みデータを用いて、最終的なマルチタスクモデルを学習します。
 
 ### 学習フェーズ (`train_multitask_trial.py` 内部)
+0.  **Head Carryover (Phase 0 ベスト重みロード)**
+    - `--init_weights_path <path>` が指定され、該当ファイルが存在する場合、`create_model` 直後に `model.load_weights(path, by_name=True, skip_mismatch=True)` で重みをロードする。
+    - 用途: `train_sequential.py` の Step 3.9 で保存した **Phase 0（head-only）ベスト重み**を、FT 開始時の初期重みとして引き継ぐ（head carryover）。これにより FT の冒頭で head が再初期化されず、従来の warmup フェーズが不要になる。
 1.  **Phase 1: Warmup (転移学習)**
     - **対象**: `EfficientNetV2` のバックボーンを凍結 (Freeze)。Head層（全結合層）のみ学習。
     - **設定**: 目標 LR = `warmup_lr`（キャリブレーション済み）, Epochs = `warmup_epochs`（デフォルト5）。
@@ -155,6 +158,7 @@
     - **目的**: ランダム初期化されたHead層を、バックボーンの特徴量に馴染ませる。
     - **条件**: `warmup_lr > 0` かつ `fine_tune=True` の場合のみFT前に実行。
     - **ベスト重みの復元**: Warmup 中に val min_class_accuracy が最良だったエポックの重みを保存し、Warmup 終了後に復元してから FT に進む（epoch 2 が best など道中が良い場合に対応）。
+    - **現在の運用**: Step 3.9 の head carryover が成功している場合は `warmup_lr=0` を渡して本フェーズをスキップする（`train_sequential.py` 側で設定）。保存ファイルが無いときのフォールバックとしてのみ Warmup が走る。
 2.  **Phase 2: Fine-tuning (微調整)**
     - **対象**: バックボーンの上位層を解凍 (Unfreeze)。`--unfreeze_layers` で層数指定可能 (デフォルト40)。
     - **設定**: LR = `1e-5` (低学習率), Epochs = 50。
@@ -198,6 +202,24 @@
     - `learning_rate_nohead` / `learning_rate_head` / `learning_rate_ft` は `train_sequential.py` / `optimize_sequential.py` 側のメタ情報であり、`components/train_multitask_trial.py` の argparse には存在しない。
     - そのため `train_sequential.py` の `run_trial` / `run_calibration_trial`、および `optimize_sequential.py` の `run_trial` / `run_calibration_trial` でサブプロセス起動コマンドを組み立てる際、これらのキーは `_skip_keys` で除外する。
     - 実際に `train_multitask_trial.py` に渡すLRは、いずれの呼び出し側でも明示的に `--learning_rate <value>` として付与する。
+
+### `train_sequential.py` の主要ステップ
+- **Step 1: Base LR Calibration** — デフォルト `EfficientNetV2B0` で `target_best_epoch=13` を狙う head LR をキャリブレーション。
+- **Step 1.1: Model Architecture** — `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定。
+- **Step 1.2: Head LR Re-calibration（新設）** — `model_name != 'EfficientNetV2B0'` のときだけ、確定した model で head LR を再キャリブレーション（Step1 は B0 基準のため S 採用時に LR 過大となり BestEpoch が target=13 から外れる問題を解消）。同一モデルの場合はスキップ。
+- **Step 1.5 / 2 / 3**: `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化を順次最適化（head-only のまま）。
+- **Step 3.9: Best Head Weights 再学習＆保存（新設）** — Step 3 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込むための経路（head carryover）。
+- **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
+- **Step 4 / 4.5 / 4.6 / 4.7**: `unfreeze_layers` 最適化 → FT LR 再Cal → FT条件下での正則化再最適化 → 複数target で FT LR を最終決定。
+- **Final**: Best-of-N runs（異なる seed で複数回 FT 実行し、ベスト seed のモデルを採用）。
+
+### Head carryover に使う weights ファイル
+- **パス**: `outputs/best_head_weights/best_head.weights.h5`
+- **書き手**: `components/train_multitask_trial.py` の `BestHeadWeightsSaver` コールバック（head-only 学習中、全タスク平均 `val_min_class_accuracy` のベスト更新時に保存）＋延長学習中にベスト更新があった場合も保存。
+- **読み手**: `components/train_multitask_trial.py` 本体。`--init_weights_path` 指定時に `model.load_weights(path, by_name=True, skip_mismatch=True)` で読み込む。
+- **追加 CLI 引数**（`components/train_multitask_trial.py`）:
+    - `--init_weights_path <path>`: 指定された .weights.h5 をロード（by_name, skip_mismatch）。存在しなければ WARNING で継続。
+    - `--save_best_head_weights_path <path>`: head-only 学習中のみ、ベスト重みをこのパスに保存。FT 時（`--fine_tune True`）には無視。
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`

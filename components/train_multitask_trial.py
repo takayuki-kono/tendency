@@ -554,6 +554,11 @@ def main():
     parser.add_argument('--warmup_lr', type=float, default=0.0) # Warmup LR (0=warmupなし, >0=FT前にHead学習)
     parser.add_argument('--warmup_epochs', type=int, default=5) # Warmupのエポック数
     parser.add_argument('--no_extension', action='store_true', help='延長学習を行わない（LR逐一調整で冗長なためオフ可）')
+    # Head carryover: Phase 0（head-only）で学習済みベスト重みを FT 初期値にロードするための経路
+    # - init_weights_path: 既存の .weights.h5 をロード（by_name, skip_mismatch）
+    # - save_best_head_weights_path: head-only 学習中のベスト重みをこのパスに保存
+    parser.add_argument('--init_weights_path', type=str, default='')
+    parser.add_argument('--save_best_head_weights_path', type=str, default='')
 
     args = parser.parse_args()
     
@@ -649,6 +654,17 @@ def main():
         task_labels
     )
 
+    # --- Head carryover: 既存のベスト重みをロード ---
+    # by_name=True, skip_mismatch=True によりクラス数差・構造部分差があってもロード可能
+    if args.init_weights_path and os.path.exists(args.init_weights_path):
+        try:
+            model.load_weights(args.init_weights_path, by_name=True, skip_mismatch=True)
+            logger.info(f"[Init Weights] Loaded from {args.init_weights_path} (by_name=True, skip_mismatch=True)")
+        except Exception as e:
+            logger.warning(f"[Init Weights] Failed to load {args.init_weights_path}: {e}")
+    elif args.init_weights_path:
+        logger.warning(f"[Init Weights] Path specified but not found: {args.init_weights_path}")
+
     # コールバック生成関数 (Balanced Accuracyを監視 + Conditional Cosine Decay)
     def create_callbacks(total_epochs, initial_lr, target_epoch=0, enable_early_stopping=True, use_linear_warmup=False):
         """use_linear_warmup=True のときは LR を 0→initial_lr に線形増加（Warmup 用）。"""
@@ -706,6 +722,51 @@ def main():
                         if self.best_weights is not None:
                             self.model.set_weights(self.best_weights)
 
+        # ベスト head 重み保存用コールバック（head-only phase で save_best_head_weights_path 指定時のみ有効化）
+        class BestHeadWeightsSaver(tf.keras.callbacks.Callback):
+            """
+            全タスク平均 val_min_class_accuracy を監視し、ベスト更新時に
+            指定パスへ weights のみ保存する。FT 時の head carryover 用。
+            """
+            def __init__(self, task_labels, save_path, verbose=1):
+                super().__init__()
+                self.task_labels = task_labels
+                self.save_path = save_path
+                self.verbose = verbose
+                self.best_score = -1.0
+                self.best_epoch = -1
+
+            def on_epoch_end(self, epoch, logs=None):
+                if logs is None:
+                    return
+                task_mins = []
+                if len(self.task_labels) == 1:
+                    val = logs.get('val_min_class_accuracy')
+                    if val is not None:
+                        task_mins.append(float(val))
+                else:
+                    for i in range(len(self.task_labels)):
+                        key = f"val_task_{chr(ord('a')+i)}_output_min_class_accuracy"
+                        val = logs.get(key)
+                        if val is not None:
+                            task_mins.append(float(val))
+                if not task_mins:
+                    return
+                score = sum(task_mins) / len(task_mins)
+                if score > self.best_score:
+                    self.best_score = score
+                    self.best_epoch = epoch + 1
+                    try:
+                        os.makedirs(os.path.dirname(self.save_path) or '.', exist_ok=True)
+                        self.model.save_weights(self.save_path)
+                        if self.verbose > 0:
+                            logger.info(
+                                f"[BestHeadWeightsSaver] New best MinClassAcc={score:.4f} "
+                                f"at epoch {self.best_epoch} -> {self.save_path}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[BestHeadWeightsSaver] Save failed: {e}")
+
         # エポックごとの精度サマリー出力
         class EpochSummaryCallback(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
@@ -752,7 +813,18 @@ def main():
                 patience = 5
             # 精度ベースEarlyStopping（全タスク平均MinClassAccuracy監視）
             callbacks_list.insert(0, AccuracyEarlyStopping(task_labels=task_labels, patience=patience, verbose=1))
-        
+
+        # head-only phase で save_best_head_weights_path が指定されていればベスト重み保存を追加
+        # use_linear_warmup=True は FT 前段の warmup 専用なので対象外（head-only 本学習のみ）
+        if (not use_linear_warmup
+                and args.fine_tune.lower() != 'true'
+                and args.save_best_head_weights_path):
+            callbacks_list.append(BestHeadWeightsSaver(
+                task_labels=task_labels,
+                save_path=args.save_best_head_weights_path,
+                verbose=1,
+            ))
+
         return callbacks_list
 
     # --- 構成と学習方針の決定 ---
@@ -1019,6 +1091,18 @@ def main():
                 final_val_acc = best_ext_score
                 best_epoch_abs = abs_epoch
                 model.save_weights(temp_weights_path)  # Update best weights
+                # head-only phase で save_best_head_weights_path が指定されていれば延長側の更新も保存
+                if (args.fine_tune.lower() != 'true'
+                        and args.save_best_head_weights_path):
+                    try:
+                        os.makedirs(os.path.dirname(args.save_best_head_weights_path) or '.', exist_ok=True)
+                        model.save_weights(args.save_best_head_weights_path)
+                        logger.info(
+                            f"[BestHeadWeightsSaver] Extension new best MinClassAcc={best_ext_score:.4f} "
+                            f"at abs_epoch {abs_epoch} -> {args.save_best_head_weights_path}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[BestHeadWeightsSaver] Extension save failed: {e}")
             elif current_ext_score < best_ext_score:
                 logger.info("Accuracy dropped. Stopping extension.")
                 break
