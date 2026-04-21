@@ -31,6 +31,11 @@ MIN_EFFICIENCY_THRESHOLD = 0.00001  # 最小効率閾値（これ以下は除外
 # 前処理後の validation で「いずれかのタスク×クラス」の画像数がこの値未満なら、
 # その候補は学習せず score=0.0 固定で採点失敗扱い（キャッシュも固定）。
 MIN_VAL_PER_CLASS = 20
+# 旧形式 3-tuple キャッシュ（val_min_cnt 未記録）に対するヒューリスティック。
+# saved_images = total - filtered がこの値未満なら val<20 の可能性が高いとみなして
+# キャッシュヒット時に score=0.0 に上書きして無効化する。
+# 係数 10 は "train/val/test 3 split × クラス数 × MIN_VAL_PER_CLASS" のおおよその下限を想定。
+LEGACY_CACHE_MIN_SAVED = MIN_VAL_PER_CLASS * 10
 
 # LRキャリブレーション結果（main()で設定される）
 CALIBRATED_BASE_LR = None
@@ -403,19 +408,46 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         
     if hit_key:
         cached = cache[hit_key]
-        # キャッシュには(raw_score, total_images, filtered_count)を保存
+        # キャッシュ値のフォーマット:
+        #   4-tuple: (raw_score, total, filtered, val_min_cnt)  ← 新形式（val ガード付き）
+        #   3-tuple: (raw_score, total, filtered)               ← 旧形式（val_min_cnt 未記録）
+        #   2-tuple: (raw_score, filtering_rate)                ← 最古形式
         if isinstance(cached, (list, tuple)) and len(cached) >= 2:
-            if len(cached) == 3:
+            cached_val_min = None
+            if len(cached) >= 4:
+                raw_score, total_images, filtered_count, cached_val_min = cached[0], cached[1], cached[2], cached[3]
+            elif len(cached) == 3:
                 raw_score, total_images, filtered_count = cached
             else:
-                # 旧形式(raw_score, filtering_rate)の互換性
                 raw_score, filtering_rate = cached
                 total_images = file_count
                 filtered_count = int(total_images * filtering_rate)
+
+            # --- Validation クラス最小枚数ガード（キャッシュ経路）---
+            if cached_val_min is not None:
+                # 新形式: 記録済み val_min_cnt で厳密判定
+                if cached_val_min < MIN_VAL_PER_CLASS:
+                    logger.warning(
+                        f"Cache Hit but INVALIDATED (val undersize): "
+                        f"val_min={cached_val_min} < {MIN_VAL_PER_CLASS}. "
+                        f"Returning score=0.0 (Total={total_images}, Filtered={filtered_count})"
+                    )
+                    return (0.0, total_images, filtered_count)
+            else:
+                # 旧形式 (3-tuple): val_min_cnt 未記録のため saved_images ヒューリスティックで推定
+                saved_images_cached = total_images - filtered_count
+                if total_images > 0 and saved_images_cached < LEGACY_CACHE_MIN_SAVED:
+                    logger.warning(
+                        f"Cache Hit but INVALIDATED (legacy 3-tuple, saved={saved_images_cached} "
+                        f"< {LEGACY_CACHE_MIN_SAVED}): likely val<{MIN_VAL_PER_CLASS}. "
+                        f"Returning score=0.0 (Total={total_images}, Filtered={filtered_count})"
+                    )
+                    return (0.0, total_images, filtered_count)
+
             logger.info(f"Cache Hit! RawScore={raw_score:.4f}, Total={total_images}, Filtered={filtered_count}")
             return (raw_score, total_images, filtered_count)
         else:
-            # 古い形式のキャッシュ（互換性のため）
+            # 2-tuple 未満の最古互換: val_min_cnt も saved も不明のためそのまま返す
             logger.info(f"Cache Hit (legacy format)! Score: {cached}")
             return (cached, file_count, 0)
 
@@ -481,7 +513,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             )
             result = (0.0, total_images, filtered_count)
             cache = load_cache()
-            cache[cache_key] = result
+            # 4-tuple で保存 (val_min_cnt を記録)
+            cache[cache_key] = (0.0, total_images, filtered_count, int(val_min_cnt))
             save_cache(cache)
             return result
         elif val_min_cnt is not None:
@@ -692,9 +725,13 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
 
             logger.info(f"Result: RawScore={raw_score:.4f} (Average), Total={total_images}, Filtered={filtered_count}")
             
-            # キャッシュに保存
+            # キャッシュに保存 (4-tuple: val_min_cnt を併せて記録してガード再判定可能にする)
             cache = load_cache()
-            cache[cache_key] = (raw_score, total_images, filtered_count)
+            if val_min_cnt is not None:
+                cache[cache_key] = (raw_score, total_images, filtered_count, int(val_min_cnt))
+            else:
+                # val_dir が無い等で未算出: 3-tuple で保存しヒット時はヒューリスティックに委ねる
+                cache[cache_key] = (raw_score, total_images, filtered_count)
             save_cache(cache)
             return (raw_score, total_images, filtered_count)
         else:

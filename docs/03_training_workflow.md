@@ -60,8 +60,12 @@
     - 該当キャッシュを削除して再評価し、勝者を決定。
 - **Validation クラス最小サンプル数ガード**:
     - `run_trial` は preprocess 直後に `preprocessed_multitask/validation/` を走査し、各タスク×各クラスの画像枚数の最小値を取得する（実装: `_min_val_class_count`）。
-    - 最小値が `MIN_VAL_PER_CLASS`（既定 20）未満の候補は、学習せず `(0.0, total_images, filtered_count)` をキャッシュに保存して即リターン（採点失敗扱い）。
-    - 目的: フィルタを強くしすぎて validation が激減すると、小標本ノイズで偶然の高精度（min class acc）が出て採用される問題を排除する。
+    - 最小値が `MIN_VAL_PER_CLASS`（既定 20）未満の候補は、学習せず `(0.0, total_images, filtered_count, val_min_cnt)` の 4-tuple をキャッシュに保存して即リターン（採点失敗扱い）。
+    - キャッシュ値の互換仕様: 4-tuple（新形式: `val_min_cnt` 記録あり）と 3-tuple（旧形式: `val_min_cnt` 未記録）を両対応。
+    - **キャッシュヒット経路のガード**:
+        - 4-tuple: 記録された `val_min_cnt` を直接参照し、`< MIN_VAL_PER_CLASS` なら `score=0.0` に上書きして返す（`INVALIDATED (val undersize)` を WARNING 出力）。
+        - 3-tuple: `val_min_cnt` 不明のため `saved_images = total - filtered` のヒューリスティックで推定。`saved < LEGACY_CACHE_MIN_SAVED`（既定 `MIN_VAL_PER_CLASS × 10 = 200`）なら同様に `score=0.0` に上書き（`INVALIDATED (legacy 3-tuple, saved=... )` を WARNING 出力）。
+    - 目的: フィルタを強くしすぎて validation が激減すると、小標本ノイズで偶然の高精度（min class acc）が出て採用される問題を排除する。キャッシュヒットでも最新ガードが適用されるため、旧ラン由来のノイズエントリが `Selected` に昇格する事故を防ぐ。
 
 
 ### 学習率の動的スケーリング (Dynamic LR Scaling)
