@@ -81,3 +81,10 @@
 
 ### 出力
 フィルタを通過した画像のみが `preprocessed_multitask/` フォルダに出力されます。これが学習 (`train_sequential.py`) の直接の入力となります。
+
+### Validation クラス最小サンプル数ガード
+`optimize_sequential.py` は preprocess 直後に、`preprocessed_multitask/validation/` 配下を走査して「各タスク×各クラスの画像枚数」を集計し、最小値が `MIN_VAL_PER_CLASS`（既定 20）未満の候補は学習をスキップして `score=0.0` 固定で棄却する。
+
+- 目的: フィルタを強くしすぎると validation が激減し、small-sample ノイズで偶然の高精度（20枚に対する min class acc など）が出て採用される問題を排除する。
+- タスク構造の判定: `validation/<label>/...` のフォルダ名がすべて同じ文字長 n>1 なら multitask（各文字位置を別タスクのクラスとみなす）。長さが 1 もしくは不揃いなら single-task（フォルダ名=クラス名）。
+- キャッシュ挙動: 棄却された候補もキャッシュに `(0.0, total, filtered)` を書き込み、同条件の再評価を防ぐ。

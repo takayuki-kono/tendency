@@ -58,6 +58,10 @@
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
     - 該当キャッシュを削除して再評価し、勝者を決定。
+- **Validation クラス最小サンプル数ガード**:
+    - `run_trial` は preprocess 直後に `preprocessed_multitask/validation/` を走査し、各タスク×各クラスの画像枚数の最小値を取得する（実装: `_min_val_class_count`）。
+    - 最小値が `MIN_VAL_PER_CLASS`（既定 20）未満の候補は、学習せず `(0.0, total_images, filtered_count)` をキャッシュに保存して即リターン（採点失敗扱い）。
+    - 目的: フィルタを強くしすぎて validation が激減すると、小標本ノイズで偶然の高精度（min class acc）が出て採用される問題を排除する。
 
 
 ### 学習率の動的スケーリング (Dynamic LR Scaling)

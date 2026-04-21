@@ -27,6 +27,11 @@ BEST_TRAIN_PARAMS_FILE = "outputs/best_train_params.json"
 # 効率が低いパラメータは自動的にスケールダウンまたは除外される
 MIN_EFFICIENCY_THRESHOLD = 0.00001  # 最小効率閾値（これ以下は除外候補）
 
+# Validation クラス最小サンプル数ガード（small-sample ノイズ対策）
+# 前処理後の validation で「いずれかのタスク×クラス」の画像数がこの値未満なら、
+# その候補は学習せず score=0.0 固定で採点失敗扱い（キャッシュも固定）。
+MIN_VAL_PER_CLASS = 20
+
 # LRキャリブレーション結果（main()で設定される）
 CALIBRATED_BASE_LR = None
 LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
@@ -65,6 +70,57 @@ def count_files(directory):
     for root, _, files in os.walk(directory):
         count += len(files)
     return count
+
+
+def _min_val_class_count(val_dir):
+    """validation ディレクトリ配下の「各タスク×各クラス」の画像合計枚数の最小値を返す。
+
+    フォルダ名の文字長が全て同じで 1 文字超なら multitask とみなし、各文字位置を
+    別タスクとしてクラス集計する。1 文字または長さが揃わない場合は single-task
+    とみなしフォルダ名をそのまま 1 クラスとして集計する。
+
+    Returns:
+        tuple: (min_count, min_desc, per_task_counts)
+            - min_count: 最小枚数（int）。val_dir 不在 or 空なら None
+            - min_desc: 最小を記録したタスク/クラスの説明文字列
+            - per_task_counts: [dict(class_char -> count), ...] のリスト
+    """
+    if not os.path.isdir(val_dir):
+        return None, None, None
+
+    img_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+    subdirs = [d for d in os.listdir(val_dir)
+               if os.path.isdir(os.path.join(val_dir, d))]
+    if not subdirs:
+        return 0, "(no class folders)", []
+
+    combined_counts = {}
+    for d in subdirs:
+        p = os.path.join(val_dir, d)
+        cnt = 0
+        for root, _, files in os.walk(p):
+            for f in files:
+                if f.lower().endswith(img_exts):
+                    cnt += 1
+        combined_counts[d] = cnt
+
+    lens = set(len(d) for d in subdirs)
+    if len(lens) == 1 and next(iter(lens)) > 1:
+        n_tasks = next(iter(lens))
+        per_task_counts = [dict() for _ in range(n_tasks)]
+        for label, cnt in combined_counts.items():
+            for i, ch in enumerate(label):
+                per_task_counts[i][ch] = per_task_counts[i].get(ch, 0) + cnt
+    else:
+        per_task_counts = [dict(combined_counts)]
+
+    min_cnt, min_desc = None, None
+    for i, cls_cnts in enumerate(per_task_counts):
+        for c, cnt in cls_cnts.items():
+            if min_cnt is None or cnt < min_cnt:
+                min_cnt = cnt
+                min_desc = f"task{i}={c} ({cnt})"
+    return min_cnt, min_desc, per_task_counts
 
 def _reset_cache_file(current_file_count: int) -> dict:
     """キャッシュJSONを初期化してディスクへ即時書き込む。"""
@@ -412,6 +468,26 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         filtered_count = total_images - saved_images
         if total_images > 0:
             logger.info(f"Filtering Stats: Total={total_images}, Saved={saved_images}, Filtered={filtered_count} ({filtered_count/total_images*100:.1f}%)")
+
+        # --- Validation クラス最小サンプル数ガード ---
+        # preprocess 後の validation で「いずれかのタスク×クラス」が MIN_VAL_PER_CLASS 未満なら、
+        # 学習せず score=0.0 固定で採点失敗扱い（キャッシュも固定して再評価を防止）。
+        val_dir = os.path.join("preprocessed_multitask", "validation")
+        val_min_cnt, val_min_desc, val_per_task = _min_val_class_count(val_dir)
+        if val_min_cnt is not None and val_min_cnt < MIN_VAL_PER_CLASS:
+            logger.warning(
+                f"SKIP (val undersize): min class size={val_min_cnt} < {MIN_VAL_PER_CLASS} "
+                f"[{val_min_desc}]. per_task={val_per_task}"
+            )
+            result = (0.0, total_images, filtered_count)
+            cache = load_cache()
+            cache[cache_key] = result
+            save_cache(cache)
+            return result
+        elif val_min_cnt is not None:
+            logger.info(
+                f"Val class size OK: min={val_min_cnt} [{val_min_desc}] (threshold={MIN_VAL_PER_CLASS})"
+            )
 
         # Train with specific Model and Optimized Params
         train_script = "components/train_multitask_trial.py"
