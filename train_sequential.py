@@ -60,8 +60,10 @@ def load_best_params():
     return {}
 
 def _get_head_lr_from_best(best_params: dict, default: float) -> float:
-    # 新キー優先。互換として warmup_lr（FT用warmupに使われていた）も見る。
-    for k in ("learning_rate_nohead", "learning_rate_head", "warmup_lr", "learning_rate"):
+    # head 側LR（= fine_tune=False 時、または head-only フェーズ用）を引き継ぐ。
+    # body (learning_rate_nohead) や FT (learning_rate_ft) は別条件で乖離するため参照しない。
+    # 互換として warmup_lr（旧 FT 用 warmup）/ learning_rate（最古形式）も fallback に残す。
+    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
         if k in best_params:
             try:
                 return float(best_params[k])
@@ -511,7 +513,7 @@ def search_ft_lr_by_targets(current_params, initial_lr, targets=[10, 11, 12, 13,
         logger.info(f"\n--- Searching for Target Epoch: {t} ---")
         lr, score = calibrate_base_lr(
             current_params, initial_lr=initial_lr,
-            cal_epochs=cal_epochs, target_best_epoch=t, score_priority=True
+            cal_epochs=cal_epochs, target_best_epoch=t
         )
         if score > best_candidate_val:
             best_candidate_val = score
@@ -557,7 +559,7 @@ def main():
     head_initial_lr = _get_head_lr_from_best(prev_best, default=5e-4)
     calibrated_lr, _ = calibrate_base_lr(
         current_params, initial_lr=head_initial_lr,
-        cal_epochs=20, target_best_epoch=13, score_priority=True
+        cal_epochs=20, target_best_epoch=13
     )
     logger.info(f"Calibrated Head LR={calibrated_lr:.8f}")
     head_lr = calibrated_lr
@@ -577,12 +579,14 @@ def main():
         )
         head_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=head_lr,
-            cal_epochs=20, target_best_epoch=13, score_priority=True
+            cal_epochs=20, target_best_epoch=13
         )
         head_lr = head_lr2
         current_params['learning_rate'] = head_lr
         current_params['learning_rate_head'] = head_lr
-        current_params['learning_rate_nohead'] = head_lr
+        # NOTE: head LR と body LR は別条件で乖離する想定のため、learning_rate_nohead は
+        # ここでは更新しない（head calibration の結果を body 側へミラーすると、後続の
+        # body/FT LR の引き継ぎが狂う）。
     else:
         logger.info(
             f"\n>>> Step 1.2: Skipped (model_name={best_model} = Step1 キャリブレーション時と同値) <<<"
@@ -691,7 +695,7 @@ def main():
     ft_initial_lr = _get_ft_lr_from_best(prev_best, default=current_params['learning_rate'])
     ft_lr, _ = calibrate_base_lr(
         current_params, initial_lr=ft_initial_lr,
-        cal_epochs=20, target_best_epoch=13, score_priority=True
+        cal_epochs=20, target_best_epoch=13
     )
     current_params['learning_rate'] = ft_lr
     current_params['learning_rate_ft'] = ft_lr
@@ -705,7 +709,7 @@ def main():
         logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
         ft_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=20, target_best_epoch=13, score_priority=True
+            cal_epochs=20, target_best_epoch=13
         )
         current_params['learning_rate'] = ft_lr2
         current_params['learning_rate_ft'] = ft_lr2

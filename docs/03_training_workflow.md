@@ -77,11 +77,18 @@
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
   - 単一の exponent で `adjusted_lr = base_lr * (relative_ratio ** exponent)`。パラメータ別に individual_exponents が設定されていればその重み付き平均、なければデフォルト exponent を使用。
 - **Base LR決定ロジック**:
-  - **目的**: **Validation Score 最大化** を最優先指標とする。
+  - **目的**: **target_best_epoch=13 への収束** を最優先指標とする。同率なら score で比較。
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
    - **手順**:
      1. Epoch 13 に収束するLRを特定し、ベースLRとして採用。
   - **キャリブレーションの打ち切り**（`lr_calibration_should_stop`、run_trial の終了条件と同一）: (1) **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）→ 終了 (2) **11≤best_epoch≤15 かつ last_accu < best**（ピーク後下降）→ 終了 (3) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
+  - **候補採点ルール**（2026-04-22 修正）: 最終選択は `(distance, -score, ...)` タプルで比較する。すなわち `target_best_epoch` からの距離（`abs(best_epoch - target)`）が最小の iteration を優先採用し、距離同率のときのみ score（`MinClassAcc` など）の大きい方を採用する。
+     - 旧仕様（`(-score, distance, ...)` = score 最優先）だと、noisy val 環境で target から離れた iteration が score 偶発で採用されるため、target=13 に寄せるループ自体が無意味化していた問題を修正。
+     - `train_sequential.py` では `calibrate_base_lr(score_priority=False)` を全呼び出しで使用（デフォルト）。`score_priority=True` の旧挙動は互換のため残存するが実使用しない。
+  - **反転検知 dampening**（2026-04-22 追加, `optimize_sequential.py` のみ）: LR 調整比率 `scale = best_epoch / target_epoch` の方向が前回 iteration と逆転（down→up または up→down）したとき、`scale` を 1.0 方向に減衰させる。`scale < 1` なら `*= 2`（下げ幅を緩める）、`scale > 1` なら `/= 2`（上げ幅を緩める）。その後、既存の `[0.3, 3.0]` clamp を適用。
+     - 目的: target を跨ぐ振動を収束させる。下方 clamp=0.3 に連続で当たって LR が指数減衰する挙動を抑制する。
+     - `train_sequential.py` は既に `lr_low/lr_high` の二分探索（L421-466）を持っているため、この dampening は追加しない。
+  - **LR スロット分離**（2026-04-22 明確化）: `best_train_params.json` の `learning_rate_head` / `learning_rate_nohead` / `learning_rate_ft` はそれぞれ head-only / body(backbone) / FT 用の別の条件で乖離する LR を保持する設計。head calibration（optimize_sequential の run_trial, および train_sequential Step 1/1.2）の結果は `learning_rate_head` のみを更新し、`learning_rate_nohead` には書き込まない（head LR を body 側にミラーすると body/FT 引き継ぎが狂うため）。読み取り側 `_get_head_lr_from_best` も `(learning_rate_head, warmup_lr, learning_rate)` の順で head 優先に並べ、`learning_rate_nohead` は head の fallback 候補に入れない。
 - **キャリブレーション設定**:
   - **学習率減衰特性 (Exponent) の探索**:
     - 探索範囲: `0.15` ～ `1.0`

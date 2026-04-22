@@ -173,8 +173,10 @@ def load_best_train_params():
     return {}
 
 def _get_head_lr_from_best(best_params: dict, default: float) -> float:
-    # optimize_sequential は fine_tune=False の評価が中心なので head 側LRを優先する
-    for k in ("learning_rate_nohead", "learning_rate_head", "warmup_lr", "learning_rate"):
+    # optimize_sequential は fine_tune=False（head-only）の評価が中心。
+    # head のLRと本体(backbone/nohead)のLRは乖離する想定のため、head 側のみ参照する。
+    # learning_rate_nohead は body 側の LR で head calibration では使わない。
+    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
         if k in best_params:
             try:
                 return float(best_params[k])
@@ -287,13 +289,15 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     
     best_candidate = None  # (distance, -score, lr, best_epoch, score)
     epoch_history = []  # 中央値ベースの収束判定用
+    last_direction = None  # 'up' / 'down' / None 反転検知 dampening 用
     max_iterations = LR_MAX_ADJUSTMENTS + 1  # trainのLR調整と同じ最大試行数
     for iteration in range(max_iterations):
         best_epoch, score, last_epoch_accu = run_calibration_trial(model_name, current_lr, cal_epochs)
         epoch_history.append(best_epoch)
         distance = abs(best_epoch - target_in_cal)
-        # 道中で一番良かったスコアを採用するため、スコア最優先で候補を比較
-        candidate = (-score, distance, current_lr, best_epoch, score)
+        # target からの距離を最優先、同率なら score 高い方を採用。
+        # （score 最優先にすると target_best_epoch=13 を目指すループが無意味になるため距離優先）
+        candidate = (distance, -score, current_lr, best_epoch, score)
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
         
@@ -301,7 +305,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         sorted_epochs = sorted(epoch_history)
         median_epoch = sorted_epochs[len(sorted_epochs) // 2]
         
-        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}, Distance={distance:.0f}")
         logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}")
 
         should_stop, stop_msg = lr_calibration_should_stop(best_epoch, last_epoch_accu, score)
@@ -314,6 +318,31 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
 
         # LRスケーリング: 学習率スケジュールの累積和比率で調整
         scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_in_cal), total_epochs=cal_epochs)
+
+        # 今回の方向（target を上回った=LR低すぎ=up、下回った=LR高すぎ=down）
+        if scale > 1.0:
+            curr_direction = 'up'
+        elif scale < 1.0:
+            curr_direction = 'down'
+        else:
+            curr_direction = None
+
+        # 反転検知 dampening: 前回と逆方向になったら ratio を 1.0 方向へ寄せる
+        # （同じ方向に向いている限りは減衰しない）
+        if (last_direction is not None and curr_direction is not None
+                and curr_direction != last_direction):
+            scale_before_damp = scale
+            if scale < 1.0:
+                scale *= 2.0  # 下げ幅を緩める
+            elif scale > 1.0:
+                scale /= 2.0  # 上げ幅を緩める
+            logger.info(
+                f"  Reversal detected ({last_direction}->{curr_direction}): "
+                f"scale {scale_before_damp:.4f} -> {scale:.4f}"
+            )
+
+        last_direction = curr_direction
+
         scale = max(0.3, min(scale, 3.0))  # 極端な変更を防ぐ
         new_lr = current_lr * scale
         
@@ -992,13 +1021,12 @@ def main():
         target_best_epoch=13,
     )
     logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}, Score: {cal_score:.4f}")
-    # base_lr が確定した時点で、次回の初期値として head 側LRを更新しておく
+    # base_lr が確定した時点で、次回の初期値として head 側LRのみを更新する。
+    # body (learning_rate_nohead) / FT (learning_rate_ft) は別条件で乖離するため、ここでは触らない。
     try:
-        # headなし側は learning_rate_nohead を正とし、互換で learning_rate_head も併記する
-        best_params["learning_rate_nohead"] = float(CALIBRATED_BASE_LR)
-        best_params["learning_rate_head"] = float(best_params.get("learning_rate_head", best_params["learning_rate_nohead"]))
+        best_params["learning_rate_head"] = float(CALIBRATED_BASE_LR)
         save_best_train_params(best_params)
-        logger.info(f"Updated best_train_params learning_rate_nohead -> {CALIBRATED_BASE_LR:.8f}")
+        logger.info(f"Updated best_train_params learning_rate_head -> {CALIBRATED_BASE_LR:.8f}")
     except Exception as e:
         logger.warning(f"Failed to persist learning_rate_head to {BEST_TRAIN_PARAMS_FILE}: {e}")
     
