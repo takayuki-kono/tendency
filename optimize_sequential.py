@@ -3,6 +3,7 @@ import sys
 import re
 import os
 import logging
+import math
 import time
 import json
 import hashlib
@@ -259,54 +260,67 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
 
 def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=None):
     """
-    cal_epochs の学習を繰り返し、中間 epoch でベストになるLRを探す。
-    
-    原理:
-    - 10 epoch中の中間（5）でベスト → 適切な収束速度
-    - best_epoch < target → LR高すぎ → 下げる
-    - best_epoch > target → LR低すぎ → 上げる
-    - best_epoch / target_in_cal の比率でLRをスケーリング
-    
-    preprocessed_multitask が既に準備されている前提で呼ぶこと。
-    
+    cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを二分探索で探す。
+
+    探索方式（train_sequential.py と統一）:
+    - best_epoch < target_min → LR高すぎ → lr_high を current_lr で更新
+    - best_epoch > target_max → LR低すぎ → lr_low を current_lr で更新
+    - 両境界が揃ったら log 空間の中点（幾何平均 sqrt(lr_low * lr_high)）で次 LR 決定
+      （LR は乗算スケールで効くため、算術平均より幾何平均の方が収束が速い）
+    - 片側のみの場合は raw ratio (best_epoch/target) でスケーリング（クランプなし）
+
+    target_best_epoch:
+    - None             : cal_epochs//2 を target とする
+    - int              : 単一 target（target_min=target_max）
+    - tuple (min,max)  : 許容帯。帯内に落ちたらベスト候補として採用
+
     Returns:
         tuple: (calibrated_lr, final_score)
     """
-    # cal_epochs中での目標ベストepoch
-    # 既定は "前半の中間" を採用（10 epoch -> 5）
     if target_best_epoch is None:
-        target_in_cal = float(max(1, cal_epochs // 2))
+        target_min = target_max = float(max(1, cal_epochs // 2))
+    elif isinstance(target_best_epoch, tuple):
+        target_min = float(target_best_epoch[0])
+        target_max = float(target_best_epoch[1])
     else:
-        target_in_cal = float(target_best_epoch)
-    
+        target_min = target_max = float(target_best_epoch)
+
     current_lr = initial_lr
-    
+    target_mid = (target_min + target_max) / 2.0
+
     logger.info(f"\n{'='*50}")
-    logger.info(f"LR Calibration Start")
-    logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch={target_in_cal:.0f}")
+    logger.info(f"LR Calibration Start (bisection, log-space)")
+    if target_min == target_max:
+        logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch={target_min:.0f}")
+    else:
+        logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch=[{target_min:.0f}, {target_max:.0f}]")
     logger.info(f"  initial_lr = {initial_lr:.8f}")
     logger.info(f"{'='*50}")
-    
+
     best_candidate = None  # (distance, -score, lr, best_epoch, score)
-    epoch_history = []  # 中央値ベースの収束判定用
-    last_direction = None  # 'up' / 'down' / None 反転検知 dampening 用
-    max_iterations = LR_MAX_ADJUSTMENTS + 1  # trainのLR調整と同じ最大試行数
+    lr_low = None   # best_epoch >= target_min になった最大LR（LR低すぎ or 帯内）
+    lr_high = None  # best_epoch <  target_min になった最小LR（LR高すぎ）
+    max_iterations = LR_MAX_ADJUSTMENTS + 1
+
     for iteration in range(max_iterations):
         best_epoch, score, last_epoch_accu = run_calibration_trial(model_name, current_lr, cal_epochs)
-        epoch_history.append(best_epoch)
-        distance = abs(best_epoch - target_in_cal)
-        # target からの距離を最優先、同率なら score 高い方を採用。
-        # （score 最優先にすると target_best_epoch=13 を目指すループが無意味になるため距離優先）
+
+        if best_epoch < target_min:
+            distance = target_min - best_epoch
+        elif best_epoch > target_max:
+            distance = best_epoch - target_max
+        else:
+            distance = 0.0
+
+        # 距離最優先、同率なら score 高い方を採用
         candidate = (distance, -score, current_lr, best_epoch, score)
         if best_candidate is None or candidate < best_candidate:
             best_candidate = candidate
-        
-        # 中央値を計算
-        sorted_epochs = sorted(epoch_history)
-        median_epoch = sorted_epochs[len(sorted_epochs) // 2]
-        
-        logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}, Distance={distance:.0f}")
-        logger.info(f"  Epoch history: {epoch_history}, median={median_epoch}")
+
+        logger.info(
+            f"Calibration #{iteration+1}: LR={current_lr:.8f}, "
+            f"BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}, Distance={distance:.0f}"
+        )
 
         should_stop, stop_msg = lr_calibration_should_stop(best_epoch, last_epoch_accu, score)
         if should_stop and stop_msg:
@@ -316,42 +330,35 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping calibration.")
             break
 
-        # LRスケーリング: 学習率スケジュールの累積和比率で調整
-        scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_in_cal), total_epochs=cal_epochs)
-
-        # 今回の方向（target を上回った=LR低すぎ=up、下回った=LR高すぎ=down）
-        if scale > 1.0:
-            curr_direction = 'up'
-        elif scale < 1.0:
-            curr_direction = 'down'
+        # 境界更新
+        if best_epoch < target_min:
+            if lr_high is None or current_lr < lr_high:
+                lr_high = current_lr
         else:
-            curr_direction = None
+            # best_epoch >= target_min（帯内含む） → LR 低すぎ寄り
+            if lr_low is None or current_lr > lr_low:
+                lr_low = current_lr
 
-        # 反転検知 dampening: 前回と逆方向になったら ratio を 1.0 方向へ寄せる
-        # （同じ方向に向いている限りは減衰しない）
-        if (last_direction is not None and curr_direction is not None
-                and curr_direction != last_direction):
-            scale_before_damp = scale
-            if scale < 1.0:
-                scale *= 2.0  # 下げ幅を緩める
-            elif scale > 1.0:
-                scale /= 2.0  # 上げ幅を緩める
-            logger.info(
-                f"  Reversal detected ({last_direction}->{curr_direction}): "
-                f"scale {scale_before_damp:.4f} -> {scale:.4f}"
-            )
+        # 次のLR決定
+        if lr_low is not None and lr_high is not None:
+            # 両境界あり → 幾何平均（log空間の中点）
+            new_lr = math.sqrt(lr_low * lr_high)
+            logger.info(f"  Bisection (geom): low={lr_low:.8f}, high={lr_high:.8f}, mid={new_lr:.8f}")
+        else:
+            # 片側のみ → raw ratio scaling（クランプなし）
+            # クランプを外した理由: 二分探索に入ると振動せず単調収束するため、
+            # 片側探索でも大胆に動いた方が早く反対側境界を踏める。
+            scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
+            new_lr = current_lr * scale
+            logger.info(f"  Ratio scaling (no clamp): scale={scale:.4f}")
 
-        last_direction = curr_direction
-
-        scale = max(0.3, min(scale, 3.0))  # 極端な変更を防ぐ
-        new_lr = current_lr * scale
-        
-        logger.info(f"  Adjusting: best_epoch={best_epoch} vs target={target_in_cal:.0f}, cumsum_ratio={scale:.4f}")
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
-        # 変化が小さすぎる場合は停滞とみなし終了
-        # if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.01:
-        #     logger.info("Calibration update became too small; stopping early.")
-        #     break
+
+        # 収束判定: LR変化が十分小さい
+        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.02:
+            logger.info(f"  LR change too small. Stopping.")
+            break
+
         current_lr = new_lr
 
     if best_candidate is not None:

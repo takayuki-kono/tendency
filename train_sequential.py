@@ -463,16 +463,20 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         
         # 次のLR決定
         if lr_low is not None and lr_high is not None:
-            # 両境界あり → 二分探索（中間値）
-            new_lr = (lr_low + lr_high) / 2.0
-            logger.info(f"  Binary search: low={lr_low:.8f}, high={lr_high:.8f}, mid={new_lr:.8f}")
+            # 両境界あり → 幾何平均（log空間の中点）
+            # LR は乗算スケールで効くため、算術平均 (low+high)/2 より
+            # 幾何平均 sqrt(low*high) の方が対称で収束が速い。
+            new_lr = math.sqrt(lr_low * lr_high)
+            logger.info(f"  Bisection (geom): low={lr_low:.8f}, high={lr_high:.8f}, mid={new_lr:.8f}")
         else:
-            # 片側のみ → 累積学習率比でスケーリング
+            # 片側のみ → raw ratio scaling（クランプなし）
+            # 旧: scale = max(0.3, min(scale, 3.0))
+            # 撤去理由: 二分探索に入ると振動せず単調収束するため、片側探索でも大胆に
+            # 動いた方が早く反対側境界を踏める。optimize_sequential.py と挙動統一。
             target_mid = (target_min + target_max) / 2.0
             scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
-            scale = max(0.3, min(scale, 3.0))  # 極端な変更を防ぐ
             new_lr = current_lr * scale
-            logger.info(f"  Cumsum ratio scaling: scale={scale:.4f}")
+            logger.info(f"  Ratio scaling (no clamp): scale={scale:.4f}")
         
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         
