@@ -626,10 +626,9 @@ def main():
         # 基準: steps_per_epoch=20（画像約640枚/batch32）で base_lr がそのまま適用
         REFERENCE_STEPS_PER_EPOCH = 20.0
         lr_scale = np.sqrt(REFERENCE_STEPS_PER_EPOCH / steps_per_epoch)
-        
-        # 極端なスケーリングを防止 (0.3倍〜3.0倍の範囲に制限)
-        lr_scale = max(0.3, min(lr_scale, 3.0))
-        
+
+        # クランプ撤廃 (2026-04-25): LR 調整 ratio 側と同様、振動ガードは LR 再調整ループ／
+        # 反転検知 dampening 側に任せ、auto_lr の sqrt スケーリングは上下限を設けない。
         effective_lr = args.learning_rate * lr_scale
         
         logger.info(f"[Auto LR] target_best_epoch={args.auto_lr_target_epoch}")

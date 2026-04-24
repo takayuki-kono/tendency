@@ -53,7 +53,7 @@
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（最大3回）。
     - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) 同範囲 **かつ** last_epoch_accu < trial_score（ピーク後下降）→ 再調整せず終了 (3) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
     - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01、plateau）
-    - **調整計算（時間軸）**: `new_lr = current_lr * best_epoch / target_epoch`（scale は 0.3～3.0 にクリップ）
+    - **調整計算（時間軸）**: `new_lr = current_lr * best_epoch / target_epoch`（**クランプなし**。2026-04-20 に `max(0.3, min(scale, 3.0))` クランプを両スクリプトから撤去。振動ガードは calibrate 側の log 空間二分探索／反転検知 dampening に一任）
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
@@ -76,6 +76,11 @@
   - Exp Range: `0.15` ~ `1.0` (Binary Search)
   - `adjusted_lr = base_lr * (relative_ratio ** exponent)`
   - 単一の exponent で `adjusted_lr = base_lr * (relative_ratio ** exponent)`。パラメータ別に individual_exponents が設定されていればその重み付き平均、なければデフォルト exponent を使用。
+
+### Auto LR (steps_per_epoch ベース sqrt スケーリング)
+`components/train_multitask_trial.py` 内部の補助スケーリング。`--auto_lr_target_epoch > 0` が渡された実行で発動し、学習画像枚数から算出した `steps_per_epoch` に対して sqrt ベースで LR を補正する。
+- **計算式**: `lr_scale = sqrt(REFERENCE_STEPS_PER_EPOCH / steps_per_epoch)`（`REFERENCE_STEPS_PER_EPOCH = 20.0`、画像約 640 枚 / batch 32 で `scale=1.0`）。
+- **クランプ**: 2026-04-25 に `max(0.3, min(lr_scale, 3.0))` を**撤廃**。LR 調整 ratio 側と同様、振動ガードは LR 再調整ループ／calibrate の反転検知 dampening に一任する設計に統一。
 - **Base LR決定ロジック**:
   - **目的**: **target_best_epoch=13 への収束** を最優先指標とする。同率なら score で比較。
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
