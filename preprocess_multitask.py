@@ -518,10 +518,20 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     skip_reasons = defaultdict(int)
 
     # --- Undersampling Logic ---
-    # Calculate target count per label (using Mean)
-    counts = [len(items) for items in grouped.values()]
-    target_count = int(np.mean(counts)) if counts else 0
-    logger.info(f"Undersampling target count (mean): {target_count}")
+    # target_count = 2 番目に多いグループの採用枚数（2026-04-25 変更）。
+    # 旧: int(mean(counts)) → 最多 1 人に引きずられて中位以下まで削られる副作用があったため、
+    # 「最多の 1 人だけ 2 位に合わせて切る」方針に変更。グループが 1 つなら切らない。
+    counts_sorted = sorted((len(items) for items in grouped.values()), reverse=True)
+    if len(counts_sorted) >= 2:
+        target_count = counts_sorted[1]
+    elif len(counts_sorted) == 1:
+        target_count = counts_sorted[0]
+    else:
+        target_count = 0
+    logger.info(
+        f"Undersampling target count (2nd-largest): {target_count} "
+        f"(top counts={counts_sorted[:5]}{'...' if len(counts_sorted) > 5 else ''})"
+    )
     
     for label, items in grouped.items():
         # Personal Thresholds for Eyebrow-Eye Dist

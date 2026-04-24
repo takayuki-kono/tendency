@@ -143,7 +143,8 @@
    - **グローバル閾値**: 全 valid 画像の指標分布から算出。`pitch_percentile=10` なら「上位10%を落とす」ので `th_pitch = percentile(pitch, 90)`。同様に symmetry, y_diff, mouth_open, sharpness(低/高), face_size(低/高), aspect_ratio(両側), retouching, mask, glasses を計算。
    - **個人閾値**: グループ（ディレクトリパス）ごとに **眉-目距離 (eb_eye_dist)** だけ、そのグループ内の分布で `eyebrow_eye_percentile_low` / `eyebrow_eye_percentile_high` の閾値を計算。
 4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `eb_eye_low_personal`, `undersampling` などでログに集計される。
-5. **アンダーサンプリング**: グループごとの採用枚数の**平均** `target_count = mean(counts)` を算出。あるグループの採用枚数が `target_count` を超えていれば、そのグループ内でランダムシャッフルしたうえで先頭 `target_count` 枚だけ残し、残りはスキップ（`skip_reasons['undersampling']`）。train/validation/test いずれも同じロジック（`skip_undersampling` は通常 False）。
+5. **アンダーサンプリング** (2026-04-25 更新): グループごとの採用枚数のうち **2 番目に多いグループの採用枚数** を `target_count` とする（`counts` を降順ソートして `counts[1]` を採用。グループが 1 つしかない場合は `counts[0]` = 切らない）。あるグループの採用枚数が `target_count` を超えていれば、そのグループ内でランダムシャッフルしたうえで先頭 `target_count` 枚だけ残し、残りはスキップ（`skip_reasons['undersampling']`）。train/validation/test いずれも同じロジック（`skip_undersampling` は通常 False）。
+    - **旧仕様との差分**: 以前は `target_count = int(mean(counts))` で平均まで切っていたため、最多 1 人に引きずられて中位以下のグループまで削られる副作用があった。新仕様では**最多の 1 人だけ**が 2 位に合わせて切り詰められ、他のグループは原則そのまま残る。
 6. **コピー**: 採用された画像を `out_dir/train/`, `out_dir/validation/`, `out_dir/test/` にコピー。出力ファイル名は `rel = os.path.relpath(src, src_root)` の `parts` の先頭をディレクトリ、`parts[1:]` を `_` で連結した名前（例: `a/森口瑤子/foo.jpg` → `out_dir/train/a/森口瑤子_foo.jpg`）。`--grayscale` 指定時はグレースケール変換してから保存。
 
 **指標の定義（実装準拠）**:
