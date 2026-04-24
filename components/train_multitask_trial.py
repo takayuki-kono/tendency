@@ -721,6 +721,20 @@ def main():
                         if self.best_weights is not None:
                             self.model.set_weights(self.best_weights)
 
+            def on_train_end(self, logs=None):
+                # 自然終了（early stop 未発火）時も必ず best epoch の重みを復元する。
+                # これにより学習後の model.predict(val_ds) に基づく per-class 出力が
+                # last epoch ではなく best epoch の重みで計算され、FINAL_VAL_ACCURACY と
+                # per-class 内訳の基準がずれない。early stop 発火ケースでは既に
+                # on_epoch_end で復元済みだが、set_weights は冪等なので二重適用しても問題なし。
+                if self.best_weights is not None:
+                    self.model.set_weights(self.best_weights)
+                    if self.verbose > 0:
+                        logger.info(
+                            f"AccuracyEarlyStopping: 学習終了。Epoch {self.best_epoch+1}のベスト重み "
+                            f"(score={self.best_score:.4f}) を最終モデルへ復元"
+                        )
+
         # ベスト head 重み保存用コールバック（head-only phase で save_best_head_weights_path 指定時のみ有効化）
         class BestHeadWeightsSaver(tf.keras.callbacks.Callback):
             """
