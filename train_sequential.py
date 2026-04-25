@@ -476,7 +476,9 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
             target_mid = (target_min + target_max) / 2.0
             scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
             new_lr = current_lr * scale
-            logger.info(f"  Ratio scaling (no clamp): scale={scale:.4f}")
+            logger.info(
+                f"  Ratio scaling (clamp 0.5-2.0): scale={scale:.4f}"
+            )
         
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         

@@ -350,7 +350,9 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             # 片側探索でも大胆に動いた方が早く反対側境界を踏める。
             scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
             new_lr = current_lr * scale
-            logger.info(f"  Ratio scaling (no clamp): scale={scale:.4f}")
+            logger.info(
+                f"  Ratio scaling (clamp 0.5-2.0): scale={scale:.4f}"
+            )
 
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
 

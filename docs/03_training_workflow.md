@@ -50,10 +50,10 @@
 - **モデル選択ステップ**:
     - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
-    - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（最大3回）。
+    - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
     - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) 同範囲 **かつ** last_epoch_accu < trial_score（ピーク後下降）→ 再調整せず終了 (3) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
     - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01、plateau）
-    - **調整計算（時間軸）**: `new_lr = current_lr * best_epoch / target_epoch`（**クランプなし**。2026-04-20 に `max(0.3, min(scale, 3.0))` クランプを両スクリプトから撤去。振動ガードは calibrate 側の log 空間二分探索／反転検知 dampening に一任）
+    - **調整計算（時間軸）**: `raw = best_epoch / target_epoch` を **0.5～2.0** にクランプし `new_lr = current_lr * ratio`（2026-04-26。極端な 1 回の乗算を抑える。auto_lr の sqrt スケールや calibrate 二分探索は別経路）
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
@@ -94,8 +94,8 @@
      - `best_epoch < target_min` → `lr_high = current_lr`（上限更新）。
      - `best_epoch >= target_min`（帯内含む） → `lr_low = current_lr`（下限更新）。
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
-     - 片側のみのとき: `scale = best_epoch / target_mid` を raw ratio として `new_lr = current_lr * scale`（**クランプなし**）。二分探索に入れば振動せず単調収束するため、片側探索時は大胆に動いて早く反対側境界を踏む方が効率が良い。
-     - `LR_MAX_ADJUSTMENTS=3` → 最大 4 trial。通常 2 trial で両境界が揃い、3 trial 目以降は log 空間で半減ずつ狭まるため、4 trial あれば `[lr_low, lr_high]` の比は初期幅の 1/4 以下に収束する。
+     - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（**raw `best_epoch/target_mid` を 0.5～2.0 にクランプ**）として `new_lr = current_lr * scale`。
+     - `LR_MAX_ADJUSTMENTS=6` → 最大 7 trial（0..6）。片側 + クランプのもとで探索幅を抑えつつ、反対側境界を踏むまでの試行余裕を増やす。
      - 収束判定: `|new_lr - current_lr| / current_lr < 0.02` なら以降の trial を打ち切り、最良候補を採用。
   - **LR スロット分離**（2026-04-22 明確化）: `best_train_params.json` の `learning_rate_head` / `learning_rate_nohead` / `learning_rate_ft` はそれぞれ head-only / body(backbone) / FT 用の別の条件で乖離する LR を保持する設計。head calibration（optimize_sequential の run_trial, および train_sequential Step 1/1.2）の結果は `learning_rate_head` のみを更新し、`learning_rate_nohead` には書き込まない（head LR を body 側にミラーすると body/FT 引き継ぎが狂うため）。読み取り側 `_get_head_lr_from_best` も `(learning_rate_head, warmup_lr, learning_rate)` の順で head 優先に並べ、`learning_rate_nohead` は head の fallback 候補に入れない。
 - **キャリブレーション設定**:
