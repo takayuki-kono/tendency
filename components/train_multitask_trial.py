@@ -1036,8 +1036,10 @@ def main():
     
     temp_weights_path = 'temp_training_weights.weights.h5'
     
-    if not getattr(args, 'no_extension', False) and (final_val_acc < 0.5 or is_best_at_last):
-        reason = f"Score {final_val_acc:.4f} < 0.5" if final_val_acc < 0.5 else f"Best Epoch reached at last epoch ({training_epochs})"
+    # score < 0.5 など「低いだけ」では延長しない（is_best_at_last 時のみ）。ピークが中盤なのに
+    # 低スコア延長 → 1 epoch ですぐ下がるだけの無駄、LR キャリブの BestEpoch 指標の歪みの原因になる。
+    if not getattr(args, 'no_extension', False) and is_best_at_last:
+        reason = f"is_best_at_last: best at final epoch (or last score equals best) — epoch {best_epoch}/{training_epochs}"
         logger.info(f"--- Extension Training ({reason}) ---")
         
         # Save current best weights before extension

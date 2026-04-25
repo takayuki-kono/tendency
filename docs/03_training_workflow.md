@@ -206,11 +206,11 @@
     - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
     - **最低LR**: `initial_lr × 0.05` (ゼロにはしない)。
 - **条件付きEpoch拡張 (Conditional Extension)**:
-    - ベストエポックが最終エポック、または最終エポックのスコアがベストスコアと同等の場合、または `Balanced Accuracy < 0.5` の場合、追加学習モードに入る。
+    - **発動条件（2026-04-25）**: ベストエポックが最終エポック、**または**最終エポックのスコアがベストスコアと**同一**（`is_best_at_last`）の場合のみ、追加学習モードに入る。旧仕様の「score が閾値未満（例: 0.5 未満）」単独での発動は**廃止**（低スコアでも中盤で既にピークが取れていれば延長は無駄になるため）。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
     - **終了条件**: 精度が**厳密に下がったときのみ**停止（plateau＝同じのときは継続）。
     - **延長上限**: 1epochずつ継続し、下がらない限り続行（安全上限あり）。
-    - `train_sequential.py` / `optimize_sequential.py` から呼ぶ場合も、未収束（例: bestが最終epoch、または score<0.5）なら延長学習が走る（`--no_extension` で抑止しない）。
+    - 発動を防ぐには `train_multitask_trial.py` に `--no_extension` を付与する（CLI 単体実行・スクリプト起動形態によっては常時付与も可）。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
