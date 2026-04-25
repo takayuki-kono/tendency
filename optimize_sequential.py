@@ -1057,7 +1057,17 @@ def main():
             
     logger.info(f"Best Model Selected: {best_model}")
     logger.info(f"Baseline: Score={best_model_score:.4f}, Filtered={baseline_filtered}")
-    
+    # train_sequential が起動時に参照する best_train_params.json へバックボーンを保存
+    try:
+        _btp = load_best_train_params()
+        _btp["model_name"] = best_model
+        save_best_train_params(_btp)
+        logger.info(
+            f"Updated {BEST_TRAIN_PARAMS_FILE} model_name -> {best_model} (for train_sequential)"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to persist model_name to {BEST_TRAIN_PARAMS_FILE}: {e}")
+
     baseline_score = best_model_score
     
     # --- Parameter Optimization (recording efficiency) ---

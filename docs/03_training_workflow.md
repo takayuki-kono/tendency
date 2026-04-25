@@ -230,9 +230,10 @@
     - 実際に `train_multitask_trial.py` に渡すLRは、いずれの呼び出し側でも明示的に `--learning_rate <value>` として付与する。
 
 ### `train_sequential.py` の主要ステップ
-- **Step 1: Base LR Calibration** — デフォルト `EfficientNetV2B0` で `target_best_epoch=13` を狙う head LR をキャリブレーション。
-- **Step 1.1: Model Architecture** — `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定。
-- **Step 1.2: Head LR Re-calibration（新設）** — `model_name != 'EfficientNetV2B0'` のときだけ、確定した model で head LR を再キャリブレーション（Step1 は B0 基準のため S 採用時に LR 過大となり BestEpoch が target=13 から外れる問題を解消）。同一モデルの場合はスキップ。
+- **`model_name` の扱い（2026-04-25）**: `outputs/best_train_params.json`（`optimize_sequential.py` と同じファイル）に有効な `model_name` がある場合、**その値を採用**し Step 1 の head LR キャリブはそのバックボーンで行う。Step 1.1（B0 vs S 比較）と Step 1.2（B0 で Cal したあと S が選ばれた場合の再キャリブ）を**スキップ**する（Step 1 ですでに確定モデルでキャリブ済みのため）。`model_name` が無い・空のときは従来どおり: 初期 `EfficientNetV2B0` → Step 1 → Step 1.1 → 条件付き Step 1.2。**`optimize_sequential.py` は** Step 0（B0/S ベースライン比較）の直後に、選ばれた `best_model` を同 JSON の `model_name` に書き戻す（LR キャリブ時点の `learning_rate_head` 更新に加え、バックボーン名も永続化）。
+- **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR をキャリブレーション（上記の通り、保存済み `model_name` があればそのモデル、なければ B0 で開始したうえで 1.1 で確定する想定）。
+- **Step 1.1: Model Architecture** — 保存済み `model_name` 未使用時のみ: `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定。
+- **Step 1.2: Head LR Re-calibration** — 保存済み `model_name` 未使用時かつ `model_name != 'EfficientNetV2B0'` のときだけ、確定した model で head LR を再キャリブレーション（Step1 は B0 基準のため S 採用時に LR 過大となり BestEpoch が target=13 から外れる問題を解消）。上記の保存済み経路、または B0 継続の場合はスキップ。
 - **Step 1.5 / 2 / 3**: `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化を順次最適化（head-only のまま）。
 - **Step 3.9: Best Head Weights 再学習＆保存（新設）** — Step 3 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込むための経路（head carryover）。
 - **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
