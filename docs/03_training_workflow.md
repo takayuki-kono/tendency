@@ -204,7 +204,9 @@
 - **学習率スケジュール**: Polynomial Decay (常に有効)
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
     - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
-    - **最低LR**: `initial_lr × 0.05` (ゼロにはしない)。
+    - **最低LR（スケジュール上）**: `initial_lr × 0.05` (ゼロにはしない)。
+    - **絶対域（2026-04-26）**: オプティマイザに入る各エポックの LR は `components/lr_adjustment.py` の **`LR_TRAIN_ABSOLUTE_MIN=1e-7`** ～ **`LR_TRAIN_ABSOLUTE_MAX=0.1`** に `clip_learning_rate_for_training` で収める。極小は `.8f` ログで 0 に見えて実質停止するのを防ぎ、極大は設定外れの保険。学習率確定直後（head/FT いずれも）・`ConditionalLearningRateScheduler` / `LinearWarmupScheduler` 各エポック・延長学習の `extension_lr` に適用。
+    - **import 注意（2026-04-26 修正）**: `train_multitask_trial.py` は `components/` 配下でサブプロセス起動されるため、同ディレクトリの `lr_adjustment` は **`from lr_adjustment import ...`** とする。`from components.lr_adjustment ...` だと実行時 `sys.path` によっては **解決失敗**し、キャリブの `FINAL_VAL_ACCURACY` 抽出不能（score=0.0）になる。
 - **条件付きEpoch拡張 (Conditional Extension)**:
     - **発動条件（2026-04-25）**: ベストエポックが最終エポック、**または**最終エポックのスコアがベストスコアと**同一**（`is_best_at_last`）の場合のみ、追加学習モードに入る。旧仕様の「score が閾値未満（例: 0.5 未満）」単独での発動は**廃止**（低スコアでも中盤で既にピークが取れていれば延長は無駄になるため）。
     - **学習率**: `min_lr` (initial_lr × 0.05) 固定。

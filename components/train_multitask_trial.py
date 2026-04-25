@@ -14,6 +14,15 @@ from tensorflow.keras.applications.densenet import preprocess_input as densenet_
 import logging
 import sys
 
+# サブプロセスで `python components/train_multitask_trial.py` と実行されると sys.path[0] は
+# 本ファイルと同じ `.../components` になり、`from components.lr_adjustment` は解決不能で ImportError
+# になる。プロジェクト根からの実行時のみ `components` パッケージが辿れるため、同階層 import に統一。
+from lr_adjustment import (
+    LR_TRAIN_ABSOLUTE_MAX,
+    LR_TRAIN_ABSOLUTE_MIN,
+    clip_learning_rate_for_training,
+)
+
 # デフォルトシード（--seed引数で上書き可能）
 DEFAULT_SEED = 42
 
@@ -449,6 +458,7 @@ class LinearWarmupScheduler(tf.keras.callbacks.Callback):
             return
         # 1-based progress: 1/total -> 1.0
         lr = self.target_lr * (epoch + 1) / self.total_epochs
+        lr = clip_learning_rate_for_training(lr)
         tf.keras.backend.set_value(self.model.optimizer.lr, lr)
         if self.verbose > 0:
             print(f'\nEpoch {epoch + 1}: Warmup LR = {lr:.8f} (linear ramp to {self.target_lr:.8f})')
@@ -490,6 +500,7 @@ class ConditionalLearningRateScheduler(tf.keras.callbacks.Callback):
              linear_decay = 1.0 - progress
              decay = linear_decay ** self.decay_exponent
              lr = min_lr + (self.initial_lr - min_lr) * decay
+        lr = clip_learning_rate_for_training(lr)
         
         # Set LR
         tf.keras.backend.set_value(self.model.optimizer.lr, lr)
@@ -641,6 +652,22 @@ def main():
         current_lr = args.learning_rate
     else:
         current_lr = effective_lr
+    _lr_raw = current_lr
+    current_lr = clip_learning_rate_for_training(_lr_raw)
+    try:
+        _r = float(_lr_raw)
+        _lr_out_of_band = (
+            _r != _r
+            or _r < LR_TRAIN_ABSOLUTE_MIN
+            or _r > LR_TRAIN_ABSOLUTE_MAX
+        )
+    except (TypeError, ValueError):
+        _lr_out_of_band = True
+    if _lr_out_of_band:
+        logger.warning(
+            f"[LR clip] 学習率を有効域 [{LR_TRAIN_ABSOLUTE_MIN:g}, {LR_TRAIN_ABSOLUTE_MAX:g}] に収めた: "
+            f"{_lr_raw!r} -> {current_lr:.8e}"
+        )
 
     model = create_model(
         args.model_name, 
@@ -1045,8 +1072,8 @@ def main():
         # Save current best weights before extension
         model.save_weights(temp_weights_path)
         
-        # LR固定 (Initial * 0.05)
-        extension_lr = args.learning_rate * 0.05
+        # LR固定 (Initial * 0.05)、絶対域に収める
+        extension_lr = clip_learning_rate_for_training(args.learning_rate * 0.05)
         if hasattr(model.optimizer, 'lr'):
             tf.keras.backend.set_value(model.optimizer.lr, extension_lr)
         logger.info(f"Extension LR set to {extension_lr:.8f}")

@@ -366,9 +366,14 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
         if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'FT_BEST_EPOCH', 'MinClassAcc', 'Avg=']):
             logger.info(f"  [Cal] {line}")
     
-    process.wait()
+    rc = process.wait()
     full_output = "\n".join(output_lines)
-    
+    if rc != 0:
+        logger.error(
+            f"[Calibration] train_multitask_trial 異常終了 (returncode={rc}). "
+            f"先頭2KB:\n{full_output[:2000]}"
+        )
+
     # BEST_EPOCH抽出 (FT時はFT_BEST_EPOCHを優先)
     is_ft = str(params.get('fine_tune', 'False')).lower() == 'true'
     if is_ft:

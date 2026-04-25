@@ -236,9 +236,14 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
         if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'MinClassAcc', 'Avg=']):
             logger.info(f"  [Cal] {line}")
     
-    process.wait()
+    rc = process.wait()
     full_output = "\n".join(output_lines)
-    
+    if rc != 0:
+        logger.error(
+            f"[Calibration] train_multitask_trial 異常終了 (returncode={rc}). "
+            f"先頭2KB:\n{full_output[:2000]}"
+        )
+
     # BEST_EPOCH抽出
     match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
     best_epoch = int(match_epoch.group(1)) if match_epoch else cal_epochs

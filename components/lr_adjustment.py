@@ -9,6 +9,34 @@ LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ
 LR_ADJUST_RATIO_MIN = 0.5
 LR_ADJUST_RATIO_MAX = 2.0
 
+# 学習（optimizer / LR スケジューラ）に乗せる絶対域。極小 LR は .8f ログで 0 表示になり実質停止、
+# 極大は設定ミス時の数値破綻を防ぐ。再調整「比」クランプとは独立。
+# 目安: Adam + 224 系 CNN の head/FT でよく使う 1e-4〜1e-2 の帯より広く、探索を殺さない範囲に上限。
+LR_TRAIN_ABSOLUTE_MIN = 1e-7
+LR_TRAIN_ABSOLUTE_MAX = 0.1
+
+
+def clip_learning_rate_for_training(lr):
+    """
+    train_multitask_trial から optimizer / scheduler / 延長学習に渡す直前に適用する。
+    戻り値は常に [LR_TRAIN_ABSOLUTE_MIN, LR_TRAIN_ABSOLUTE_MAX]。
+    """
+    try:
+        x = float(lr)
+    except (TypeError, ValueError):
+        return LR_TRAIN_ABSOLUTE_MIN
+    if x != x:  # NaN
+        return LR_TRAIN_ABSOLUTE_MIN
+    if x > 1e100:  # +inf
+        return LR_TRAIN_ABSOLUTE_MAX
+    if x < -1e100:  # -inf
+        return LR_TRAIN_ABSOLUTE_MIN
+    if x < LR_TRAIN_ABSOLUTE_MIN:
+        return LR_TRAIN_ABSOLUTE_MIN
+    if x > LR_TRAIN_ABSOLUTE_MAX:
+        return LR_TRAIN_ABSOLUTE_MAX
+    return x
+
 
 def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20, min_lr_ratio=0.05):
     """
