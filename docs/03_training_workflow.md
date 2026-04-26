@@ -235,17 +235,17 @@
 ### `train_sequential.py` の主要ステップ
 - **`model_name` の扱い（2026-04-25）**: `outputs/best_train_params.json`（`optimize_sequential.py` と同じファイル）に有効な `model_name` がある場合、**その値を採用**し Step 1 の head LR キャリブはそのバックボーンで行う。Step 1.1（B0 vs S 比較）と Step 1.2（B0 で Cal したあと S が選ばれた場合の再キャリブ）を**スキップ**する（Step 1 ですでに確定モデルでキャリブ済みのため）。`model_name` が無い・空のときは従来どおり: 初期 `EfficientNetV2B0` → Step 1 → Step 1.1 → 条件付き Step 1.2。**`optimize_sequential.py` は** Step 0（B0/S ベースライン比較）の直後に、選ばれた `best_model` を同 JSON の `model_name` に書き戻す（LR キャリブ時点の `learning_rate_head` 更新に加え、バックボーン名も永続化）。
 - **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR をキャリブレーション（上記の通り、保存済み `model_name` があればそのモデル、なければ B0 で開始したうえで 1.1 で確定する想定）。
-- **Step 1.1: Model Architecture** — 保存済み `model_name` 未使用時のみ: `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定。
+- **Step 1.1: Model Architecture** — 保存済み `model_name` 未使用時のみ: `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定（`optimize_param` に **`head_only_tie_log` を渡す**）。
 - **Step 1.2: Head LR Re-calibration** — 保存済み `model_name` 未使用時かつ `model_name != 'EfficientNetV2B0'` のときだけ、確定した model で head LR を再キャリブレーション（Step1 は B0 基準のため S 採用時に LR 過大となり BestEpoch が target=13 から外れる問題を解消）。上記の保存済み経路、または B0 継続の場合はスキップ。
-- **Step 1.5 / 2 / 3**: `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only のまま）。`optimize_param` は候補ごとに最高スコアを比較し、**同点が複数**あるときは候補リスト先頭を仮採用して後続の軸の探索に進む。
+- **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。
 - **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
 - **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
 - **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
 - **Step 4 / 4.5** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
-- **Best-of-N（先）** — 複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。Step 4.7 より**前**。
-- **Step 4.7** — 上記 `seed` 固定（`current_params['seed']`）のまま、複数 target (10..15) で `search_ft_lr_by_targets` し **最終 FT LR** を確定。続けて **4.7 で得た LR** でもう一度同じ `best_seed` だけ `run_trial` し、保存物と `learning_rate_ft` を整合。最終採用スコアはこの 1 本；Best-of-N 中間スコアはログ上で区別可能。
-- **最終** — `best_sequential_model.keras` コピー後、`model_seed{42..44}.keras` を掃除。
+- **Best-of-N（先）** — 複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。直後、**4.7 の探索で `model_seed{seed}.keras` が上書きされる前に** `best_sequential_model.keras` へ **Best-of-N 時点の**重みをコピー（**重み＝4.5 時点 LR、JSON の `learning_rate_ft`＝4.7 採用 LR**と必ずしも一致しない点に注意）。
+- **Step 4.7** — `seed` 固定のまま `search_ft_lr_by_targets`（targets 10..15、各 `calibrate_base_lr` 内の best 候補同士）で **最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定。追加の**最終 `run_trial` 1 本は行わない**（旧「4.7 後の 1 本」廃止）。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。
+- **掃除** — `model_seed{42..44}.keras` を削除。
 
 ### Head carryover に使う weights ファイル
 - **パス**: `outputs/best_head_weights/best_head.weights.h5`

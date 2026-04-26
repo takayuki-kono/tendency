@@ -627,7 +627,7 @@ def main():
             f"（optimize 等の保存値）。Step 1.1 / 1.2 をスキップする <<<"
         )
 
-    # head-only 逐次探索で同点が出た (param, 同点候補) を蓄積し、Step 3 直後に再採点
+    # head-only: optimize_param / shift で同点が出た (param, 同点候補) を蓄積（Step1.1・1.5・2/3 すべて渡す）→3.8
     head_only_tie_log: list = []
 
     # --- Step 1: Learning Rate Calibration（保存 model_name があればそのアーキテクチャで、なければ B0 から） ---
@@ -840,31 +840,24 @@ def main():
 
     logger.info(f"Best-of-N: seed={best_seed}, Score={best_bon_score:.4f} (LR=pre-4.7)")
 
-    # --- Step 4.7: 勝ち seed 固定 + targets 10..15 で最終 FT LR（Best-of-N の後） ---
+    # 4.7 が同じ model_seed{seed} を上書きする前に、Best-of-N 時点の重みを最終名で退避
+    import shutil
+    _bon_src = os.path.join(MODEL_DIR, f"model_seed{best_seed}.keras")
+    _bon_dst = os.path.join(MODEL_DIR, "best_sequential_model.keras")
+    if os.path.exists(_bon_src):
+        shutil.copy2(_bon_src, _bon_dst)
+        logger.info(f"Best-of-N model -> {_bon_dst} (4.7 前に保存; 4.7 は採用 LR/スコアの探索のみ)")
+
+    # --- Step 4.7: 勝ち seed 固定 + targets 10..15（各 calibrate 内 best）で最良 LR・スコア採択。別途最終 run_trial 1 本は行わない
     current_params['seed'] = best_seed
-    logger.info("\n>>> Step 4.7: Final FT LR Calibration (after best-of-N seed) <<<")
-    final_lr, _ = search_ft_lr_by_targets(
+    logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
+    final_lr, final_ft_score = search_ft_lr_by_targets(
         current_params, initial_lr=current_params['learning_rate'],
         targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
     )
     current_params['learning_rate'] = final_lr
     current_params['learning_rate_ft'] = final_lr
 
-    # 4.7 の LR を best_seed で 1 本再学習（保存モデルと learning_rate を整合）
-    logger.info(
-        f"\n>>> Final FT run: seed={best_seed}, LR={final_lr:.8f} (Step 4.7 反映) <<<"
-    )
-    last_ft = current_params.copy()
-    last_ft['epochs'] = FINAL_EPOCHS
-    last_ft['seed'] = best_seed
-    final_ft_score = run_trial(last_ft)
-
-    import shutil
-    best_model_src = os.path.join(MODEL_DIR, f'model_seed{best_seed}.keras')
-    best_model_dst = os.path.join(MODEL_DIR, 'best_sequential_model.keras')
-    if os.path.exists(best_model_src):
-        shutil.copy2(best_model_src, best_model_dst)
-        logger.info(f"Best model (seed={best_seed}, post-4.7 LR) -> {best_model_dst}")
     for run_idx in range(N_FINAL_RUNS):
         s = 42 + run_idx
         path = os.path.join(MODEL_DIR, f'model_seed{s}.keras')
@@ -878,7 +871,7 @@ def main():
     logger.info("ALL PROCESSES COMPLETE")
     logger.info(
         f"best-of-N (pre-4.7 LR): seed={best_seed}, Score={best_bon_score:.4f} | "
-        f"final (4.7 LR) Score={final_ft_score:.4f}"
+        f"Step4.7 best (targets): Score={final_ft_score:.4f}, LR={final_lr:.8g}"
     )
     logger.info(f"{'='*50}")
 
