@@ -816,56 +816,70 @@ def main():
     else:
         logger.info(f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<")
 
-    # --- Step 4.7: Final FT LR Search (targets 10..15) ---
-    logger.info("\n>>> Step 4.7: Final FT LR Calibration (after unfreeze) <<<")
+    # --- Final: Best-of-N Runs (seed 先: Step 4.7 より前) ---
+    N_FINAL_RUNS = 3
+    FINAL_EPOCHS = 20
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Final: Best-of-{N_FINAL_RUNS} runs (epochs={FINAL_EPOCHS}, LR=Step4.5 まで) — seed 選定")
+    logger.info(f"{'='*50}")
+
+    best_bon_score = -1.0
+    best_seed = 42
+
+    bon_params = current_params.copy()
+    bon_params['epochs'] = FINAL_EPOCHS
+
+    for run_idx in range(N_FINAL_RUNS):
+        seed = 42 + run_idx
+        bon_params['seed'] = seed
+        score = run_trial(bon_params)
+        logger.info(f"  Best-of-N #{run_idx+1} (seed={seed}): Score={score:.4f}")
+        if score > best_bon_score:
+            best_bon_score = score
+            best_seed = seed
+
+    logger.info(f"Best-of-N: seed={best_seed}, Score={best_bon_score:.4f} (LR=pre-4.7)")
+
+    # --- Step 4.7: 勝ち seed 固定 + targets 10..15 で最終 FT LR（Best-of-N の後） ---
+    current_params['seed'] = best_seed
+    logger.info("\n>>> Step 4.7: Final FT LR Calibration (after best-of-N seed) <<<")
     final_lr, _ = search_ft_lr_by_targets(
         current_params, initial_lr=current_params['learning_rate'],
         targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
     )
     current_params['learning_rate'] = final_lr
     current_params['learning_rate_ft'] = final_lr
-    
-    # --- Final: Best-of-N Runs (上振れ狙い) ---
-    N_FINAL_RUNS = 3
-    FINAL_EPOCHS = 20
-    logger.info(f"\n{'='*50}")
-    logger.info(f"Final: Best-of-{N_FINAL_RUNS} runs (epochs={FINAL_EPOCHS}, different seeds)")
-    logger.info(f"{'='*50}")
-    
-    best_final_score = -1.0
-    best_seed = 42
-    
-    final_params = current_params.copy()
-    final_params['epochs'] = FINAL_EPOCHS
-    
-    for run_idx in range(N_FINAL_RUNS):
-        seed = 42 + run_idx
-        final_params['seed'] = seed
-        score = run_trial(final_params)
-        logger.info(f"  Final Run #{run_idx+1} (seed={seed}): Score={score:.4f}")
-        if score > best_final_score:
-            best_final_score = score
-            best_seed = seed
-    
-    final_ft_score = best_final_score
-    
-    # ベストseedのモデルを最終ファイルにコピー
+
+    # 4.7 の LR を best_seed で 1 本再学習（保存モデルと learning_rate を整合）
+    logger.info(
+        f"\n>>> Final FT run: seed={best_seed}, LR={final_lr:.8f} (Step 4.7 反映) <<<"
+    )
+    last_ft = current_params.copy()
+    last_ft['epochs'] = FINAL_EPOCHS
+    last_ft['seed'] = best_seed
+    final_ft_score = run_trial(last_ft)
+
     import shutil
     best_model_src = os.path.join(MODEL_DIR, f'model_seed{best_seed}.keras')
     best_model_dst = os.path.join(MODEL_DIR, 'best_sequential_model.keras')
     if os.path.exists(best_model_src):
         shutil.copy2(best_model_src, best_model_dst)
-        logger.info(f"Best model (seed={best_seed}) -> {best_model_dst}")
-    # 他seedのモデルファイルを削除
+        logger.info(f"Best model (seed={best_seed}, post-4.7 LR) -> {best_model_dst}")
     for run_idx in range(N_FINAL_RUNS):
-        seed = 42 + run_idx
-        path = os.path.join(MODEL_DIR, f'model_seed{seed}.keras')
+        s = 42 + run_idx
+        path = os.path.join(MODEL_DIR, f'model_seed{s}.keras')
         if os.path.exists(path):
-            os.remove(path)
-    
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     logger.info(f"\n{'='*50}")
     logger.info("ALL PROCESSES COMPLETE")
-    logger.info(f"Best of {N_FINAL_RUNS} runs: seed={best_seed}, Score={final_ft_score:.4f}")
+    logger.info(
+        f"best-of-N (pre-4.7 LR): seed={best_seed}, Score={best_bon_score:.4f} | "
+        f"final (4.7 LR) Score={final_ft_score:.4f}"
+    )
     logger.info(f"{'='*50}")
 
     # Save Best Params (ベストseedを含める)

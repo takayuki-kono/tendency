@@ -242,8 +242,10 @@
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
 - **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
 - **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
-- **Step 4 / 4.5 / 4.7** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal → 複数 target (10..15) で `search_ft_lr_by_targets` による FT LR 最終決定。（旧 **Step 4.6** の FT 下 `dropout` / `head_dropout` / `weight_decay` 再最適化は**廃止**し、凍結フェーズで決めた正則化＋3.8 の同点解消に一本化。）
-- **Final**: Best-of-N runs（異なる seed で複数回 FT 実行し、ベスト seed のモデルを採用）。
+- **Step 4 / 4.5** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
+- **Best-of-N（先）** — 複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。Step 4.7 より**前**。
+- **Step 4.7** — 上記 `seed` 固定（`current_params['seed']`）のまま、複数 target (10..15) で `search_ft_lr_by_targets` し **最終 FT LR** を確定。続けて **4.7 で得た LR** でもう一度同じ `best_seed` だけ `run_trial` し、保存物と `learning_rate_ft` を整合。最終採用スコアはこの 1 本；Best-of-N 中間スコアはログ上で区別可能。
+- **最終** — `best_sequential_model.keras` コピー後、`model_seed{42..44}.keras` を掃除。
 
 ### Head carryover に使う weights ファイル
 - **パス**: `outputs/best_head_weights/best_head.weights.h5`
