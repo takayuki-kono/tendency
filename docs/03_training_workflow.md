@@ -237,10 +237,12 @@
 - **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR をキャリブレーション（上記の通り、保存済み `model_name` があればそのモデル、なければ B0 で開始したうえで 1.1 で確定する想定）。
 - **Step 1.1: Model Architecture** — 保存済み `model_name` 未使用時のみ: `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定。
 - **Step 1.2: Head LR Re-calibration** — 保存済み `model_name` 未使用時かつ `model_name != 'EfficientNetV2B0'` のときだけ、確定した model で head LR を再キャリブレーション（Step1 は B0 基準のため S 採用時に LR 過大となり BestEpoch が target=13 から外れる問題を解消）。上記の保存済み経路、または B0 継続の場合はスキップ。
-- **Step 1.5 / 2 / 3**: `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化を順次最適化（head-only のまま）。
-- **Step 3.9: Best Head Weights 再学習＆保存（新設）** — Step 3 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込むための経路（head carryover）。
+- **Step 1.5 / 2 / 3**: `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only のまま）。`optimize_param` は候補ごとに最高スコアを比較し、**同点が複数**あるときは候補リスト先頭を仮採用して後続の軸の探索に進む。
+- **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
+- **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
+- **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
 - **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
-- **Step 4 / 4.5 / 4.6 / 4.7**: `unfreeze_layers` 最適化 → FT LR 再Cal → FT条件下での正則化再最適化 → 複数target で FT LR を最終決定。
+- **Step 4 / 4.5 / 4.7** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal → 複数 target (10..15) で `search_ft_lr_by_targets` による FT LR 最終決定。（旧 **Step 4.6** の FT 下 `dropout` / `head_dropout` / `weight_decay` 再最適化は**廃止**し、凍結フェーズで決めた正則化＋3.8 の同点解消に一本化。）
 - **Final**: Best-of-N runs（異なる seed で複数回 FT 実行し、ベスト seed のモデルを採用）。
 
 ### Head carryover に使う weights ファイル

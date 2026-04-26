@@ -246,31 +246,82 @@ def run_trial(params):
         logger.error(f"Error in trial: {e}")
         return 0.0
 
-def optimize_param(target_name, candidates, current_params):
+
+def _is_same_score(a: float, b: float, eps: float = 0.01) -> bool:
+    """検証スコア同士: 差が eps 未満なら同点扱い（揺れを1本化）。"""
+    return abs(float(a) - float(b)) < eps
+
+
+def resolve_tie_breaks(current_params: dict, tie_log: list) -> dict:
     """
-    1つのパラメータを候補の中から最適化する
+    逐次最適化で同最高スコアが複数あったパラメータを、
+    他パラが確定した current_params を引き継ぎ、同候補同士だけ再 run_trial して決着する。
+
+    tie_log: (target_name, [同点候補…]) または ('_shift_coupled', [w/h 共通候補…])。記録順に処理。
+    """
+    if not tie_log:
+        return current_params
+    p = current_params
+    for item in tie_log:
+        if not item or len(item) < 2:
+            continue
+        if item[0] == "_shift_coupled":
+            _, tied = item
+            if len(tied) <= 1:
+                continue
+            label = "shift (width / height 同値)"
+        else:
+            target_name, tied = item[0], item[1]
+            if len(tied) <= 1:
+                continue
+            label = target_name
+        logger.info(f"\n>>> Tie-break: {label} (candidates: {tied}) <<<")
+        sub = {}
+        for v in tied:
+            trial = p.copy()
+            if item[0] == "_shift_coupled":
+                trial["width_shift_range"] = v
+                trial["height_shift_range"] = v
+            else:
+                trial[item[0]] = v
+            sub[v] = run_trial(trial)
+        m = max(sub.values()) if sub else -1.0
+        at_max = [v for v in tied if _is_same_score(sub.get(v, -1.0), m)]
+        best_v = at_max[0] if at_max else tied[0]
+        if item[0] == "_shift_coupled":
+            p["width_shift_range"] = best_v
+            p["height_shift_range"] = best_v
+        else:
+            p[item[0]] = best_v
+        logger.info(f"Tie-break winner: {label} = {best_v!r} (Score: {sub[best_v]:.4f})")
+    return p
+
+
+def optimize_param(target_name, candidates, current_params, tie_log=None):
+    """
+    1 つのパラメータを候補の中から最適化。同最高スコアが複数なら仮に候補先頭を採用し、
+    tie_log へ登録。Step 3 完了後の resolve_tie_breaks で全パラ確定後に再採点。
     """
     logger.info(f"\n>>> Optimizing {target_name} (Candidates: {candidates}) <<<")
     
-    best_val = current_params.get(target_name)
-    best_score = -1.0
-    
     scores = {}
-    
     for val in candidates:
-        # パラメータ設定
         params = current_params.copy()
         params[target_name] = val
-        
         score = run_trial(params)
         scores[val] = score
-    
-    # 最良の値を見つける
-    best_val = max(scores, key=scores.get)
-    best_score = scores[best_val]
-    
-    logger.info(f"Finished optimizing {target_name}. Best: {best_val} (Score: {best_score})")
-    return best_val, best_score
+
+    m = max(scores.values()) if scores else -1.0
+    tied = [c for c in candidates if _is_same_score(scores[c], m)]
+    best_val = tied[0]
+    if tie_log is not None and len(tied) > 1:
+        tie_log.append((target_name, list(tied)))
+
+    msg = f"Finished optimizing {target_name}. Provisional best: {best_val} (Score: {m:.4f})"
+    if len(tied) > 1:
+        msg += f" [TIED: {tied} → re-eval in resolve_tie_breaks]"
+    logger.info(msg)
+    return best_val, m
 
 def train_and_save_best_head_weights(current_params, weights_path):
     """
@@ -575,7 +626,10 @@ def main():
             f">>> バックボーン: {BEST_PARAMS_FILE} の model_name={current_params['model_name']} を使用 "
             f"（optimize 等の保存値）。Step 1.1 / 1.2 をスキップする <<<"
         )
-    
+
+    # head-only 逐次探索で同点が出た (param, 同点候補) を蓄積し、Step 3 直後に再採点
+    head_only_tie_log: list = []
+
     # --- Step 1: Learning Rate Calibration（保存 model_name があればそのアーキテクチャで、なければ B0 から） ---
     # LR_TARGET_EPOCH(13)でベストになるLRをキャリブレーション
     logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
@@ -597,7 +651,7 @@ def main():
         )
     else:
         best_model, _ = optimize_param(
-            'model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params
+            'model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params, head_only_tie_log
         )
         current_params['model_name'] = best_model
 
@@ -630,63 +684,73 @@ def main():
 
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
     # 0.0=Adam, >0=AdamW
-    best_wd, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params)
+    best_wd, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params, head_only_tie_log)
     current_params['weight_decay'] = best_wd
     
     # --- Step 2: Model Structure ---
     # Layers
-    best_layers, _ = optimize_param('num_dense_layers', [1, 2], current_params)
+    best_layers, _ = optimize_param('num_dense_layers', [1, 2], current_params, head_only_tie_log)
     current_params['num_dense_layers'] = best_layers
     
     # Units
-    best_units, _ = optimize_param('dense_units', [128, 256], current_params)
+    best_units, _ = optimize_param('dense_units', [128, 256], current_params, head_only_tie_log)
     current_params['dense_units'] = best_units
     
     # Dropout
-    best_dropout, _ = optimize_param('dropout', [0.3, 0.5], current_params)
+    best_dropout, _ = optimize_param('dropout', [0.3, 0.5], current_params, head_only_tie_log)
     current_params['dropout'] = best_dropout
 
     # --- Step 3: Data Augmentation & Regularization ---
     # Label Smoothing (0.0=Off, 0.1=On)
-    best_smoothing, _ = optimize_param('label_smoothing', [0.0, 0.1], current_params)
+    best_smoothing, _ = optimize_param('label_smoothing', [0.0, 0.1], current_params, head_only_tie_log)
     current_params['label_smoothing'] = best_smoothing
 
     # Mixup (0.0=Off, 0.2=On)
     # Mixupは強力な正則化なので、最初に決めるのが良い場合もあるが、他のAugmentationとの兼ね合いもある
-    best_mixup, _ = optimize_param('mixup_alpha', [0.0, 0.2], current_params)
+    best_mixup, _ = optimize_param('mixup_alpha', [0.0, 0.2], current_params, head_only_tie_log)
     current_params['mixup_alpha'] = best_mixup
 
     # Rotation (0.0 - 0.2)
-    best_rot, _ = optimize_param('rotation_range', [0.0, 0.1, 0.2], current_params)
+    best_rot, _ = optimize_param('rotation_range', [0.0, 0.1, 0.2], current_params, head_only_tie_log)
     current_params['rotation_range'] = best_rot
     
     # Shift (Width/Height set together)
     logger.info(f"\n>>> Optimizing Shift Ranges (Width & Height) <<<")
     shift_candidates = [0.0, 0.1]
-    best_shift_score = -1.0
-    best_shift = 0.0
-    
+    shift_scores = {}
     for val in shift_candidates:
         params = current_params.copy()
         params['width_shift_range'] = val
         params['height_shift_range'] = val
-        score = run_trial(params)
-        if score > best_shift_score:
-            best_shift_score = score
-            best_shift = val
-            
-    logger.info(f"Finished optimizing Shift. Best: {best_shift} (Score: {best_shift_score})")
+        shift_scores[val] = run_trial(params)
+    m_sh = max(shift_scores.values()) if shift_scores else -1.0
+    shift_tied = [c for c in shift_candidates if _is_same_score(shift_scores[c], m_sh)]
+    if len(shift_tied) > 1:
+        head_only_tie_log.append(("_shift_coupled", list(shift_tied)))
+    best_shift = shift_tied[0]
+    best_shift_score = m_sh
+    if len(shift_tied) > 1:
+        logger.info(
+            f"Shift: TIED {shift_tied} (provisional first) → re-eval in resolve_tie_breaks"
+        )
+    logger.info(f"Finished optimizing Shift. Provisional best: {best_shift} (Score: {best_shift_score})")
     current_params['width_shift_range'] = best_shift
     current_params['height_shift_range'] = best_shift
 
     # Zoom
-    best_zoom, _ = optimize_param('zoom_range', [0.0, 0.1], current_params)
+    best_zoom, _ = optimize_param('zoom_range', [0.0, 0.1], current_params, head_only_tie_log)
     current_params['zoom_range'] = best_zoom
-    
+
     # Flip
-    best_flip, final_score = optimize_param('horizontal_flip', ['True', 'False'], current_params)
+    best_flip, final_score = optimize_param('horizontal_flip', ['True', 'False'], current_params, head_only_tie_log)
     current_params['horizontal_flip'] = best_flip
-    
+
+    if head_only_tie_log:
+        logger.info(
+            "\n>>> Step 3.8: Re-score tied candidates (all other head-only params fixed) <<<"
+        )
+        resolve_tie_breaks(current_params, head_only_tie_log)
+
     logger.info("\n" + "="*50)
     logger.info("OPTIMIZATION COMPLETE. STARTING FINE-TUNING...")
     logger.info(f"Best Params before FT: {current_params}")
@@ -751,24 +815,9 @@ def main():
         current_params['learning_rate_ft'] = ft_lr2
     else:
         logger.info(f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<")
-    
-    # --- Step 4.6: FT条件での正則化パラメータ再最適化 ---
-    logger.info("\n>>> Step 4.6: Re-optimizing regularization under FT conditions <<<")
-    
-    # Dropout
-    best_dropout_ft, _ = optimize_param('dropout', [0.3, 0.5], current_params)
-    current_params['dropout'] = best_dropout_ft
-    
-    # Head Dropout (frozen phaseでは未最適化だったパラメータ)
-    best_head_dropout, _ = optimize_param('head_dropout', [0.2, 0.3, 0.5], current_params)
-    current_params['head_dropout'] = best_head_dropout
-    
-    # Weight Decay
-    best_wd_ft, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params)
-    current_params['weight_decay'] = best_wd_ft
-    
-    # --- Step 4.7: Final FT LR Calibration (正則化変更後) ---
-    logger.info("\n>>> Step 4.7: Final FT LR Calibration (after regularization re-opt) <<<")
+
+    # --- Step 4.7: Final FT LR Search (targets 10..15) ---
+    logger.info("\n>>> Step 4.7: Final FT LR Calibration (after unfreeze) <<<")
     final_lr, _ = search_ft_lr_by_targets(
         current_params, initial_lr=current_params['learning_rate'],
         targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
