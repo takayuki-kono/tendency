@@ -200,6 +200,7 @@
 - **損失関数**: `SparseCategoricalCrossentropy` (Mixup/LabelSmoothing使用時は `CategoricalCrossentropy`)
 - **評価指標**: `MinClassAccuracy` (最弱クラスの精度、全タスク平均)
 - **EarlyStopping**: 全タスク平均MinClassAccuracyが改善しなくなったらpatience回猶予後に停止 (損失関数ではなく精度ベース)
+    - **patience 算出（2026-04-26）**: `create_callbacks` 内で `auto_lr_target_epoch`（= `target_epoch`）が正のとき **`max(3, target_epoch // 2) * 2`**、未使用（0）のとき **10**（従来の半分目安×2、および従来 5 の2倍）。`AccuracyEarlyStopping` クラス既定も 10。
     - **ベスト重み復元**（2026-04-25 修正）: `AccuracyEarlyStopping` コールバックは patience 超過時だけでなく、**学習終了時 (`on_train_end`) にも必ず best epoch の重みを復元**する。これにより 20 epoch 走り切って自然終了したケースでも、学習後の `model.predict(val_ds)` に基づく `[Detailed Class Accuracy]` 出力（`Class 'a': ...` 等）が best epoch の重みで計算され、`FINAL_VAL_ACCURACY` と per-class 内訳の基準がずれない。修正前は last epoch の重みで per-class が出力され、`Class 'z': 0.5918` 等と last 値になる不整合があった（例: `BestEpoch=16/20, Score=0.6020` なのに per-class min=0.5918）。
 - **学習率スケジュール**: Polynomial Decay (常に有効)
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。

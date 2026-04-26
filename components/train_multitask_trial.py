@@ -701,7 +701,7 @@ def main():
             全タスクの平均val_min_class_accuracyが低下したらpatience回猶予後に停止。
             損失関数ではなく精度を基準にする。
             """
-            def __init__(self, task_labels, patience=5, verbose=1):
+            def __init__(self, task_labels, patience=10, verbose=1):
                 super().__init__()
                 self.task_labels = task_labels
                 self.patience = patience
@@ -846,11 +846,11 @@ def main():
         ]
 
         if enable_early_stopping:
-            # patience: target_epochの半分を目安にする（ただし最低3）
+            # patience: target_epochの半分を目安にする（ただし最低3）— 2倍
             if target_epoch > 0:
-                patience = max(3, target_epoch // 2)
+                patience = max(3, target_epoch // 2) * 2
             else:
-                patience = 5
+                patience = 10
             # 精度ベースEarlyStopping（全タスク平均MinClassAccuracy監視）
             callbacks_list.insert(0, AccuracyEarlyStopping(task_labels=task_labels, patience=patience, verbose=1))
 
