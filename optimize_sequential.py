@@ -9,6 +9,8 @@ import json
 import hashlib
 import winsound
 
+from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
+
 # --- 設定 ---
 # Python実行環境のパス
 PYTHON_PREPROCESS = r"d:\tendency\.venv_windows_gpu\Scripts\python.exe"
@@ -67,6 +69,49 @@ from components.lr_adjustment import (
     LR_MAX_ADJUSTMENTS, LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
+
+
+def _log_subprocess_line(line: str, tag: str = "[Train]") -> None:
+    """子プロセスの 1 行を親ログへ。学習行に加え、重み取得の Downloading / 例外・エラー行も通す。"""
+    if any(
+        kw in line
+        for kw in (
+            "Epoch ",
+            "FINAL_VAL_ACCURACY",
+            "TASK_",
+            "MinClassAcc",
+            "Avg=",
+            "BEST_EPOCH",
+            "FT_BEST_EPOCH",
+        )
+    ):
+        logger.info(f"  {tag} {line}")
+        return
+    if any(
+        k in line
+        for k in (
+            "Traceback",
+            "Error:",
+            "Exception:",
+            "ResourceExhausted",
+            "OutOfMemoryError",
+            "Downloading data from",
+            "Killed",
+            "Aborted",
+            "ModuleNotFoundError",
+            "ImportError:",
+            "OOM when",
+        )
+    ):
+        logger.info(f"  {tag} {line}")
+
+
+def _log_subprocess_fail(tag: str, returncode: int, lines: list) -> None:
+    blob = "\n".join(lines)
+    tail = blob[-8000:] if len(blob) > 8000 else blob
+    logger.error(
+        f"{tag} 異常終了 (returncode={returncode})。子プロセス出力末尾(最大8000字):\n{tail}"
+    )
 
 
 def count_files(directory):
@@ -233,16 +278,12 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     for line in process.stdout:
         line = line.rstrip()
         output_lines.append(line)
-        if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'MinClassAcc', 'Avg=']):
-            logger.info(f"  [Cal] {line}")
+        _log_subprocess_line(line, tag="[Cal]")
     
     rc = process.wait()
     full_output = "\n".join(output_lines)
     if rc != 0:
-        logger.error(
-            f"[Calibration] train_multitask_trial 異常終了 (returncode={rc}). "
-            f"先頭2KB:\n{full_output[:2000]}"
-        )
+        _log_subprocess_fail("[Calibration] train_multitask_trial", rc, output_lines)
 
     # BEST_EPOCH抽出
     match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
@@ -356,7 +397,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
             new_lr = current_lr * scale
             logger.info(
-                f"  Ratio scaling (clamp 0.5-2.0): scale={scale:.4f}"
+                f"  Ratio scale: {scale:.4f}"
             )
 
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
@@ -701,13 +742,12 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             for line in process.stdout:
                 line = line.rstrip()
                 train_output.append(line)
-                if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH']):
-                    logger.info(f"  [Train] {line}")
+                _log_subprocess_line(line)
 
             process.wait()
 
             if process.returncode != 0:
-                logger.error(f"Training failed (returncode={process.returncode})")
+                _log_subprocess_fail("train_multitask_trial", process.returncode, train_output)
                 return (0.0, 0, 0)
 
             full_output = "\n".join(train_output)
@@ -1029,7 +1069,7 @@ def main():
     best_params = load_best_train_params()
     initial_lr = _get_head_lr_from_best(best_params, default=0.0005)
     CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
-        'EfficientNetV2B0',
+        LRCALIB_BASE_BACKBONE,
         initial_lr,
         cal_epochs=20,
         target_best_epoch=13,
@@ -1047,13 +1087,13 @@ def main():
     # --- Step 0: Model Architecture Selection & Baseline ---
     # キャリブレーション最終結果をB0のベースラインとして流用
     logger.info("\n>>> Step 0: Model Architecture Selection & Baseline <<<")
-    best_model = 'EfficientNetV2B0'
+    best_model = LRCALIB_BASE_BACKBONE
     best_model_score = cal_score
     baseline_filtered = 0  # キャリブレーションはフィルタなし
-    logger.info(f"B0 Baseline from calibration: Score={cal_score:.4f}")
+    logger.info(f"{LRCALIB_BASE_BACKBONE} Baseline from calibration: Score={cal_score:.4f}")
     
-    # 他のモデル候補をテスト
-    other_models = ['EfficientNetV2S']
+    # 他のモデル候補をテスト（Step 1.1 / train_sequential の MODEL_NAME_CANDIDATES と同じ集合）
+    other_models = [m for m in MODEL_NAME_CANDIDATES if m != LRCALIB_BASE_BACKBONE]
     for m in other_models:
         logger.info(f"Testing Model: {m}")
         raw_score, total_images, filtered_count = run_trial(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, model_name=m)

@@ -48,6 +48,51 @@ from components.lr_adjustment import (
     LR_MAX_ADJUSTMENTS, LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
+from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
+
+
+def _log_subprocess_line(line: str, tag: str = "[Train]") -> None:
+    """子プロセスの 1 行を親ログへ。学習行に加え、重み取得の Downloading / 例外・エラー行も通す。"""
+    if any(
+        kw in line
+        for kw in (
+            "Epoch ",
+            "FINAL_VAL_ACCURACY",
+            "TASK_",
+            "MinClassAcc",
+            "Avg=",
+            "BEST_EPOCH",
+            "FT_BEST_EPOCH",
+        )
+    ):
+        logger.info(f"  {tag} {line}")
+        return
+    if any(
+        k in line
+        for k in (
+            "Traceback",
+            "Error:",
+            "Exception:",
+            "ResourceExhausted",
+            "OutOfMemoryError",
+            "Downloading data from",
+            "Killed",
+            "Aborted",
+            "ModuleNotFoundError",
+            "ImportError:",
+            "OOM when",
+        )
+    ):
+        logger.info(f"  {tag} {line}")
+
+
+def _log_subprocess_fail(tag: str, returncode: int, lines: list) -> None:
+    blob = "\n".join(lines)
+    tail = blob[-8000:] if len(blob) > 8000 else blob
+    logger.error(
+        f"{tag} 異常終了 (returncode={returncode})。子プロセス出力末尾(最大8000字):\n{tail}"
+    )
+
 
 def load_best_params():
     """前回の最終採用パラメータ（存在すれば）を読む。"""
@@ -162,13 +207,12 @@ def run_trial(params):
             for line in process.stdout:
                 line = line.rstrip()
                 output_lines.append(line)
-                if any(kw in line for kw in ['Epoch ', 'FINAL_VAL_ACCURACY', 'TASK_', 'MinClassAcc', 'Avg=', 'BEST_EPOCH', 'FT_BEST_EPOCH']):
-                    logger.info(f"  [Train] {line}")
+                _log_subprocess_line(line)
             
             process.wait()
             
             if process.returncode != 0:
-                logger.error(f"Training failed (returncode={process.returncode})")
+                _log_subprocess_fail("train_multitask_trial", process.returncode, output_lines)
                 return 0.0
 
             full_output = "\n".join(output_lines)
@@ -414,16 +458,12 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     for line in process.stdout:
         line = line.rstrip()
         output_lines.append(line)
-        if any(kw in line for kw in ['Epoch ', 'BEST_EPOCH', 'FT_BEST_EPOCH', 'MinClassAcc', 'Avg=']):
-            logger.info(f"  [Cal] {line}")
+        _log_subprocess_line(line, tag="[Cal]")
     
     rc = process.wait()
     full_output = "\n".join(output_lines)
     if rc != 0:
-        logger.error(
-            f"[Calibration] train_multitask_trial 異常終了 (returncode={rc}). "
-            f"先頭2KB:\n{full_output[:2000]}"
-        )
+        _log_subprocess_fail("[Calibration] train_multitask_trial", rc, output_lines)
 
     # BEST_EPOCH抽出 (FT時はFT_BEST_EPOCHを優先)
     is_ft = str(params.get('fine_tune', 'False')).lower() == 'true'
@@ -533,7 +573,7 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
             scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
             new_lr = current_lr * scale
             logger.info(
-                f"  Ratio scaling (clamp 0.5-2.0): scale={scale:.4f}"
+                f"  Ratio scale: {scale:.4f}"
             )
         
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
@@ -598,7 +638,7 @@ def main():
 
     # 初期パラメータ (デフォルト値)
     current_params = {
-        'model_name': 'EfficientNetV2B0',
+        'model_name': LRCALIB_BASE_BACKBONE,
         'num_dense_layers': 1,
         'dense_units': 128,
         'dropout': 0.3,
@@ -634,16 +674,16 @@ def main():
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで B0/S 比較) ---
     # 毎回 optimize_param（best_train_params の model_name ではスキップしない）
     best_model, _ = optimize_param(
-        'model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params, head_only_tie_log
+        'model_name', MODEL_NAME_CANDIDATES, current_params, head_only_tie_log
     )
     current_params['model_name'] = best_model
 
     # --- Step 1.2: Head LR Re-calibration (B0 で Step1 したあと S が選ばれた場合のみ) ---
     # Step1 は B0 基準のため、1.1 で S が選ばれた場合は S に合わせて LR を取り直す。
-    if best_model != 'EfficientNetV2B0':
+    if best_model != LRCALIB_BASE_BACKBONE:
         logger.info(
             f"\n>>> Step 1.2: Head LR Re-calibration "
-            f"(model_name={best_model}, Step1 時は B0 のため再調整) <<<"
+            f"(model_name={best_model}, Step1 時は {LRCALIB_BASE_BACKBONE} のため再調整) <<<"
         )
         head_lr2, _ = calibrate_base_lr(
             current_params, initial_lr=head_lr,
@@ -657,7 +697,7 @@ def main():
         # body/FT LR の引き継ぎが狂う）。
     else:
         logger.info(
-            f"\n>>> Step 1.2: Skipped (model_name={best_model} = Step1 時と B0 一致) <<<"
+            f"\n>>> Step 1.2: Skipped (model_name={best_model} = Step1 時と {LRCALIB_BASE_BACKBONE} 一致) <<<"
         )
 
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
