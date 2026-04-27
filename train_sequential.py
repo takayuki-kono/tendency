@@ -594,17 +594,11 @@ def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
     
     prev_best = load_best_params() or {}
-    # optimize_sequential 等と共有の best_train_params.json に model_name があれば採用し、
-    # B0 前提の Step1→1.1→(S なら)1.2 の重複を避ける。
-    _saved_mn = prev_best.get("model_name")
-    use_model_from_file = (
-        isinstance(_saved_mn, str)
-        and _saved_mn.strip() != ""
-    )
+    # Step 1 の LR キャリブは常に B0 前提。Step 1.1 で B0/S を毎回確定（フィルタ確定後のデータ向け）。
 
     # 初期パラメータ (デフォルト値)
     current_params = {
-        'model_name': ( _saved_mn.strip() if use_model_from_file else 'EfficientNetV2B0' ),
+        'model_name': 'EfficientNetV2B0',
         'num_dense_layers': 1,
         'dense_units': 128,
         'dropout': 0.3,
@@ -621,16 +615,11 @@ def main():
         'weight_decay': 0.0,
         'fine_tune': 'False'
     }
-    if use_model_from_file:
-        logger.info(
-            f">>> バックボーン: {BEST_PARAMS_FILE} の model_name={current_params['model_name']} を使用 "
-            f"（optimize 等の保存値）。Step 1.1 / 1.2 をスキップする <<<"
-        )
 
     # head-only: optimize_param / shift で同点が出た (param, 同点候補) を蓄積（Step1.1・1.5・2/3 すべて渡す）→3.8
     head_only_tie_log: list = []
 
-    # --- Step 1: Learning Rate Calibration（保存 model_name があればそのアーキテクチャで、なければ B0 から） ---
+    # --- Step 1: Learning Rate Calibration（B0 固定。1.1 前の暫定 head LR） ---
     # LR_TARGET_EPOCH(13)でベストになるLRをキャリブレーション
     logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
     head_initial_lr = _get_head_lr_from_best(prev_best, default=5e-4)
@@ -643,26 +632,15 @@ def main():
     current_params['learning_rate'] = head_lr
     current_params['learning_rate_head'] = head_lr
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで B0/S 比較) ---
-    # best_train_params に model_name がある場合は optimize 等の確定値を採用済みのためスキップ
-    if use_model_from_file:
-        best_model = current_params['model_name']
-        logger.info(
-            f"\n>>> Step 1.1: Skipped (model_name 確定済み: {best_model} from {BEST_PARAMS_FILE}) <<<"
-        )
-    else:
-        best_model, _ = optimize_param(
-            'model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params, head_only_tie_log
-        )
-        current_params['model_name'] = best_model
+    # 毎回 optimize_param（best_train_params の model_name ではスキップしない）
+    best_model, _ = optimize_param(
+        'model_name', ['EfficientNetV2B0', 'EfficientNetV2S'], current_params, head_only_tie_log
+    )
+    current_params['model_name'] = best_model
 
     # --- Step 1.2: Head LR Re-calibration (B0 で Step1 したあと S が選ばれた場合のみ) ---
     # Step1 は B0 基準のため、1.1 で S が選ばれた場合は S に合わせて LR を取り直す。
-    # ファイル由来の model で Step1 済み、または 1.1 後も B0 の場合は再キャリブ不要。
-    if use_model_from_file:
-        logger.info(
-            f"\n>>> Step 1.2: Skipped (Step 1 ですでに {best_model} で head LR キャリブレーション済み) <<<"
-        )
-    elif best_model != 'EfficientNetV2B0':
+    if best_model != 'EfficientNetV2B0':
         logger.info(
             f"\n>>> Step 1.2: Head LR Re-calibration "
             f"(model_name={best_model}, Step1 時は B0 のため再調整) <<<"
