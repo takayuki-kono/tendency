@@ -9,7 +9,7 @@ import json
 import hashlib
 import winsound
 
-from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
+from components.model_architecture import MODEL_NAME_CANDIDATES
 
 # --- 設定 ---
 # Python実行環境のパス
@@ -1047,9 +1047,9 @@ def main():
     # 効率情報を記録する辞書
     param_efficiency = {}
     
-    # --- LR Calibration: 毎回キャリブレーション実行（キャッシュなし） ---
-    logger.info("\n>>> LR Calibration: Finding optimal base learning rate <<<")
-    
+    # --- Step 0: 各候補モデルごとに head LR キャリブ（target epoch 帯＋再調整は他軸と同じ calibrate_base_lr）→ 最高スコア採択 ---
+    # 旧仕様: LRCALIB_BASE_BACKBONE だけキャリブし、他モデルは同一 LR を run_trial していた。バックボーン差で最適LRが違うため、候補ごとに calibrate する。
+
     # まずフィルタなしで前処理
     cmd_pre_cal = [
         PYTHON_PREPROCESS, "preprocess_multitask.py",
@@ -1062,58 +1062,45 @@ def main():
         "--retouching_percentile", "0", "--mask_percentile", "0",
         "--glasses_percentile", "0"
     ]
-    logger.info("Preprocessing for LR calibration (no filters)...")
+    logger.info("Preprocessing for model-LR calibration & optimization (no filters)...")
     subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
-    
-    # LRキャリブレーション実行
+
     best_params = load_best_train_params()
     initial_lr = _get_head_lr_from_best(best_params, default=0.0005)
-    CALIBRATED_BASE_LR, cal_score = calibrate_base_lr(
-        LRCALIB_BASE_BACKBONE,
-        initial_lr,
-        cal_epochs=20,
-        target_best_epoch=13,
+
+    logger.info(
+        f"\n>>> Step 0: Per-model LR calibration ({len(MODEL_NAME_CANDIDATES)} candidates, "
+        f"target_best_epoch=13) <<<"
     )
-    logger.info(f"Using Calibrated Base LR: {CALIBRATED_BASE_LR:.8f}, Score: {cal_score:.4f}")
-    # base_lr が確定した時点で、次回の初期値として head 側LRのみを更新する。
-    # body (learning_rate_nohead) / FT (learning_rate_ft) は別条件で乖離するため、ここでは触らない。
+    model_calib_rows = []
+    for m in MODEL_NAME_CANDIDATES:
+        logger.info(f"--- calibrate_base_lr: model_name={m} ---")
+        lr_m, sc_m = calibrate_base_lr(
+            m,
+            initial_lr,
+            cal_epochs=20,
+            target_best_epoch=13,
+        )
+        model_calib_rows.append((m, lr_m, sc_m))
+        logger.info(f"  result: {m}  calibrated_lr={lr_m:.8f}  cal_score={sc_m:.4f}")
+
+    best_model, CALIBRATED_BASE_LR, best_model_score = max(model_calib_rows, key=lambda r: r[2])
+    baseline_filtered = 0
+    logger.info(
+        f"Step 0 selected: best_model={best_model}, "
+        f"CALIBRATED_BASE_LR={CALIBRATED_BASE_LR:.8f}, score={best_model_score:.4f}"
+    )
+    # head LR は勝ちモデルのキャリブ結果。body/FT は触らない。
     try:
         best_params["learning_rate_head"] = float(CALIBRATED_BASE_LR)
+        best_params["model_name"] = best_model
         save_best_train_params(best_params)
-        logger.info(f"Updated best_train_params learning_rate_head -> {CALIBRATED_BASE_LR:.8f}")
-    except Exception as e:
-        logger.warning(f"Failed to persist learning_rate_head to {BEST_TRAIN_PARAMS_FILE}: {e}")
-    
-    # --- Step 0: Model Architecture Selection & Baseline ---
-    # キャリブレーション最終結果をB0のベースラインとして流用
-    logger.info("\n>>> Step 0: Model Architecture Selection & Baseline <<<")
-    best_model = LRCALIB_BASE_BACKBONE
-    best_model_score = cal_score
-    baseline_filtered = 0  # キャリブレーションはフィルタなし
-    logger.info(f"{LRCALIB_BASE_BACKBONE} Baseline from calibration: Score={cal_score:.4f}")
-    
-    # 他のモデル候補をテスト（Step 1.1 / train_sequential の MODEL_NAME_CANDIDATES と同じ集合）
-    other_models = [m for m in MODEL_NAME_CANDIDATES if m != LRCALIB_BASE_BACKBONE]
-    for m in other_models:
-        logger.info(f"Testing Model: {m}")
-        raw_score, total_images, filtered_count = run_trial(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, model_name=m)
-        if raw_score > best_model_score:
-            best_model_score = raw_score
-            best_model = m
-            baseline_filtered = filtered_count
-            
-    logger.info(f"Best Model Selected: {best_model}")
-    logger.info(f"Baseline: Score={best_model_score:.4f}, Filtered={baseline_filtered}")
-    # train_sequential が起動時に参照する best_train_params.json へバックボーンを保存
-    try:
-        _btp = load_best_train_params()
-        _btp["model_name"] = best_model
-        save_best_train_params(_btp)
         logger.info(
-            f"Updated {BEST_TRAIN_PARAMS_FILE} model_name -> {best_model} (for train_sequential)"
+            f"Updated {BEST_TRAIN_PARAMS_FILE} learning_rate_head + model_name -> "
+            f"LR={CALIBRATED_BASE_LR:.8f}, {best_model}"
         )
     except Exception as e:
-        logger.warning(f"Failed to persist model_name to {BEST_TRAIN_PARAMS_FILE}: {e}")
+        logger.warning(f"Failed to persist best_train_params after Step 0: {e}")
 
     baseline_score = best_model_score
     

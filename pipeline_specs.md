@@ -97,8 +97,9 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
         - 10 epoch の学習を繰り返し、Best epochが epoch 5 に来るようLRを調整し、それをベースのLRとして採用する。
         - キャリブレーション時はEarly Stoppingを無効化し、必ず全Epoch学習して真のBest Epochを特定する。
     - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前にLRキャリブレーションを実施。
-        - Target Epochを **10〜15の範囲で探索（6点）** し、最も検証精度が高かったLRを採用する。（`search_ft_lr_by_targets`）
+        - `calibrate_base_lr`（`train_sequential` の Step 3.5 と同趣旨の target）。
         - `unfreeze_layers=60` を暫定値として使用。
+    - **Step 4.7（Final FT LR）:** `search_ft_lr_by_targets` が **epoch 帯 10〜15** を `target_best_epoch=(10,15)` として **`calibrate_base_lr` を 1 回**実行し、その中で最良の Val / LR を採用（旧: 10..15 を 6 回別キャリブし毎回初期 LR に戻す）。
     - **Step 4.5-4.7 (FT後の再最適化):**
         - unfreeze_layers確定後、必要に応じてFT LRを再探索（Target=10〜15）。
         - FT条件下でdropout, head_dropout, weight_decayを再最適化。
@@ -158,5 +159,5 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 ---
 
 ## Author
-Gemini (Updated 2026-02-15)
+Gemini (Updated 2026-04-27)
 

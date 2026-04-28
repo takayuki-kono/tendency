@@ -6,11 +6,16 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras import mixed_precision
 
-from tensorflow.keras.applications import EfficientNetV2B0, EfficientNetV2S, ResNet50V2, Xception, DenseNet121
+from tensorflow.keras.applications import (
+    EfficientNetV2B0, EfficientNetV2S, ResNet50V2, ResNet101V2, Xception, DenseNet121,
+    ConvNeXtSmall, MobileNetV3Large,
+)
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as efficientnet_preprocess
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
 from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
 from tensorflow.keras.applications.densenet import preprocess_input as densenet_preprocess
+from tensorflow.keras.applications.convnext import preprocess_input as convnext_preprocess
+from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_v3_preprocess
 import logging
 import sys
 
@@ -22,6 +27,7 @@ from lr_adjustment import (
     LR_TRAIN_ABSOLUTE_MIN,
     clip_learning_rate_for_training,
 )
+from zibbini_v2_models import ZIBBINI_V2_BUILDERS, normalize_zibbini_v2_model_name
 
 # デフォルトシード（--seed引数で上書き可能）
 DEFAULT_SEED = 42
@@ -239,13 +245,21 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
 
     return ds
 
+def _zibbini_v2_pre_div255(x):
+    return tf.cast(x, tf.float32) / 255.0
+
 def get_preprocessing_function(model_name):
+    if model_name in ZIBBINI_V2_BUILDERS:
+        return _zibbini_v2_pre_div255
     preprocess_map = {
         'EfficientNetV2B0': efficientnet_preprocess,
         'EfficientNetV2S': efficientnet_preprocess,
         'ResNet50V2': resnet_preprocess,
+        'ResNet101V2': resnet_preprocess,
         'Xception': xception_preprocess,
-        'DenseNet121': densenet_preprocess
+        'DenseNet121': densenet_preprocess,
+        'ConvNeXtSmall': convnext_preprocess,
+        'MobileNetV3Large': mobilenet_v3_preprocess,
     }
     return preprocess_map[model_name]
 
@@ -348,17 +362,23 @@ class MinClassAccuracy(tf.keras.metrics.Metric):
         self.total_count.assign(tf.zeros(self.num_classes))
 
 
-
 def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params, task_labels):
+    model_name = normalize_zibbini_v2_model_name(model_name)
     model_map = {
         'EfficientNetV2B0': EfficientNetV2B0,
         'EfficientNetV2S': EfficientNetV2S,
         'ResNet50V2': ResNet50V2,
+        'ResNet101V2': ResNet101V2,
         'Xception': Xception,
-        'DenseNet121': DenseNet121
+        'DenseNet121': DenseNet121,
+        'ConvNeXtSmall': ConvNeXtSmall,
+        'MobileNetV3Large': MobileNetV3Large,
     }
-    BaseCnnModel = model_map[model_name]
-    preprocess_func = get_preprocessing_function(model_name)
+    if model_name not in model_map and model_name not in ZIBBINI_V2_BUILDERS:
+        raise ValueError(
+            f"Unsupported model_name: {model_name!r}. "
+            f"Expected one of {sorted(model_map) + sorted(ZIBBINI_V2_BUILDERS)}"
+        )
 
     # データ拡張層
     aug_layers = []
@@ -375,13 +395,26 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
 
     inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     x = data_augmentation(inputs)
-    x = layers.Lambda(preprocess_func)(x)
+    if model_name in ZIBBINI_V2_BUILDERS:
+        # `python components/train_multitask_trial.py` でも `python -m` でも import 可能に
+        _comp = os.path.dirname(os.path.abspath(__file__))
+        if _comp not in sys.path:
+            sys.path.insert(0, _comp)
+        from third_party.convnext_tf import convnext_v2 as _zconv2
 
-    base_model = BaseCnnModel(include_top=False, weights='imagenet', input_shape=(IMG_SIZE, IMG_SIZE, 3))
-    base_model.trainable = False # Transfer Learning
-    
-    x = base_model(x, training=False)
-    x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Lambda(_zibbini_v2_pre_div255)(x)
+        bname = ZIBBINI_V2_BUILDERS[model_name]
+        builder = getattr(_zconv2, bname)
+        trunk = builder(input_tensor=x, include_top=False, weights=None)
+        x = layers.GlobalAveragePooling2D()(trunk.output)
+    else:
+        BaseCnnModel = model_map[model_name]
+        preprocess_func = get_preprocessing_function(model_name)
+        x = layers.Lambda(preprocess_func)(x)
+        base_model = BaseCnnModel(include_top=False, weights='imagenet', input_shape=(IMG_SIZE, IMG_SIZE, 3))
+        base_model.trainable = False
+        x = base_model(x, training=False)
+        x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(head_dropout)(x)
 
     # Weight Decay: L2正則化で実装（AdamWが使えない環境向け）

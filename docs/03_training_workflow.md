@@ -47,13 +47,14 @@
     - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。
     - `outputs/optimization_analysis.json`: 最適化プロセスの全候補、Greedy統合の履歴、最終パラメータを含む詳細ログ。
     - `run_optimized_preprocess.bat`: 最適化されたパラメータを適用するための実行バッチファイル。
-- **モデル選択ステップ**:
-    - 最初に `EfficientNetV2B0` と `EfficientNetV2S` を比較し、勝った方を採用するロジックが含まれる。
+- **Step 0（モデル＋head LR）**:
+    - `MODEL_NAME_CANDIDATES`（`model_architecture.py`）の**各** `model_name` に対し、フィルタなし前処理の上で **`calibrate_base_lr`（`target_best_epoch=13` 他、他軸と同ロジック）**を実行し、キャリブ終了時の Val スコアが最大のモデルを採択。
+    - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / `learning_rate_head` を更新。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
     - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) 同範囲 **かつ** last_epoch_accu < trial_score（ピーク後下降）→ 再調整せず終了 (3) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
     - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01、plateau）
-    - **調整計算（時間軸）**: `raw = best_epoch / target_epoch` を **0.5～2.0** にクランプし `new_lr = current_lr * ratio`（2026-04-26。極端な 1 回の乗算を抑える。auto_lr の sqrt スケールや calibrate 二分探索は別経路）
+    - **調整計算（時間軸）**: `ratio = best_epoch / target_epoch`（**比の上下限なし**）で `new_lr = current_lr * ratio`（実 LR は `clip_learning_rate_for_training` の絶対域。auto_lr の sqrt スケールは別）
     - 全試行中の最高スコアの結果を採用する。
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
@@ -94,8 +95,8 @@
      - `best_epoch < target_min` → `lr_high = current_lr`（上限更新）。
      - `best_epoch >= target_min`（帯内含む） → `lr_low = current_lr`（下限更新）。
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
-     - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（**raw `best_epoch/target_mid` を 0.5～2.0 にクランプ**）として `new_lr = current_lr * scale`。
-     - `LR_MAX_ADJUSTMENTS=6` → 最大 7 trial（0..6）。片側 + クランプのもとで探索幅を抑えつつ、反対側境界を踏むまでの試行余裕を増やす。
+     - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。
+     - `LR_MAX_ADJUSTMENTS=6` → 最大 7 trial（0..6）。反対側境界を踏むまでの試行余裕を確保。
      - 収束判定: `|new_lr - current_lr| / current_lr < 0.02` なら以降の trial を打ち切り、最良候補を採用。
   - **LR スロット分離**（2026-04-22 明確化）: `best_train_params.json` の `learning_rate_head` / `learning_rate_nohead` / `learning_rate_ft` はそれぞれ head-only / body(backbone) / FT 用の別の条件で乖離する LR を保持する設計。head calibration（optimize_sequential の run_trial, および train_sequential Step 1/1.2）の結果は `learning_rate_head` のみを更新し、`learning_rate_nohead` には書き込まない（head LR を body 側にミラーすると body/FT 引き継ぎが狂うため）。読み取り側 `_get_head_lr_from_best` も `(learning_rate_head, warmup_lr, learning_rate)` の順で head 優先に並べ、`learning_rate_nohead` は head の fallback 候補に入れない。
 - **キャリブレーション設定**:
@@ -233,10 +234,10 @@
     - 実際に `train_multitask_trial.py` に渡すLRは、いずれの呼び出し側でも明示的に `--learning_rate <value>` として付与する。
 
 ### `train_sequential.py` の主要ステップ
-- **`model_name` の扱い（2026-04-26 更新）**: `outputs/best_train_params.json` に `model_name` があっても `train_sequential` は **Step 1.1（B0/S）をスキップしない**（**現在の前処理データ**で毎回確定）。JSON の `model_name` は他ツール用の永続化のまま残るが、本スクリプトの採択は **1.1 の `optimize_param` 結果**。**`optimize_sequential.py` Step 0** でも B0/S を比較し、選ばれた `best_model` を同 JSON に書き戻す（その後 `train_sequential` で 1.1 を再実行する想定）。
-- **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR を、**`EfficientNetV2B0` 固定**でキャリブ（保存 JSON の `learning_rate_head` 等は `_get_head_lr_from_best` の**初期候補**にのみ用い、バックボーン切替は 1.1 以降）。
-- **Step 1.1: Model Architecture** — 毎回: `EfficientNetV2B0` vs `EfficientNetV2S` を比較し `model_name` を確定（`optimize_param` に **`head_only_tie_log` を渡す**）。
-- **Step 1.2: Head LR Re-calibration** — **1.1** で `model_name != 'EfficientNetV2B0'` のときだけ、確定 S で head LR を再キャリブ（Step1 は B0 基準のため）。B0 継続ならスキップ。
+- **`model_name` の扱い（2026-04-28 更新）**: `outputs/best_train_params.json` に `model_name` があっても `train_sequential` は **Step 1.1（バックボーン比較）をスキップしない**（**現在の前処理データ**で毎回確定）。**`optimize_sequential.py` Step 0** は `MODEL_NAME_CANDIDATES` ごとに **LR キャリブ**してから最高スコアの `best_model` を選び、同 JSON に `model_name` / `learning_rate_head` を書き戻す。`train_sequential` では 1.1 を再確定する想定。
+- **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR を、**`components/model_architecture.py` の `LRCALIB_BASE_BACKBONE`（既定 `EfficientNetV2B0`）固定**でキャリブ（保存 JSON の `learning_rate_head` 等は `_get_head_lr_from_best` の**初期候補**にのみ用い、バックボーン切替は 1.1 以降）。
+- **Step 1.1: Model Architecture** — 毎回: `MODEL_NAME_CANDIDATES`（`model_architecture.py`、例: EfficientNet B0/S、ResNet50/101V2、ConvNeXtSmall、MobileNetV3Large、**`ConvNeXtV2Tiny` / `ConvNeXtV2Small`**）から `model_name` を比較確定。Keras 標準にない **ConvNeXt V2** は `components/third_party/convnext_tf`（[zibbini](https://github.com/zibbini/convnext-v2_tensorflow) 由来、MIT）の **`convnextv2_tiny`** および、同梱に **`convnextv2_small` が無い**ため **`convnextv2_nano` を `ConvNeXtV2Small` 名で探索**（`components/zibbini_v2_models.py` の `ZIBBINI_V2_BUILDERS`、`weights=None` 想定）。**MobileNetV4** 相当は **MobileNetV3Large** を代用。`optimize_param` に **`head_only_tie_log` を渡す**。
+- **Step 1.2: Head LR Re-calibration** — **1.1** で `model_name != LRCALIB_BASE_BACKBONE` のときだけ、確定したバックボーンで head LR を再キャリブ（Step1 は基準バックボーンのみのため）。基準と同じ `model_name` ならスキップ。
 - **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。
 - **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
@@ -244,7 +245,7 @@
 - **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
 - **Step 4 / 4.5** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
 - **Best-of-N（先）** — 複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。直後、**4.7 の探索で `model_seed{seed}.keras` が上書きされる前に** `best_sequential_model.keras` へ **Best-of-N 時点の**重みをコピー（**重み＝4.5 時点 LR、JSON の `learning_rate_ft`＝4.7 採用 LR**と必ずしも一致しない点に注意）。
-- **Step 4.7** — `seed` 固定のまま `search_ft_lr_by_targets`（targets 10..15、各 `calibrate_base_lr` 内の best 候補同士）で **最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定。追加の**最終 `run_trial` 1 本は行わない**（旧「4.7 後の 1 本」廃止）。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。
+- **Step 4.7** — `seed` 固定のまま `search_ft_lr_by_targets` で **target epoch 帯 `[min(targets), max(targets)]`（既定 10〜15）に対し `calibrate_base_lr` を 1 回だけ**実行し、**最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定（旧: 10..15 を各 `target_best_epoch=t` で別キャリブし毎回 `initial_lr` に戻していた）。追加の**最終 `run_trial` 1 本は行わない**。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。
 - **掃除** — `model_seed{42..44}.keras` を削除。
 
 ### Head carryover に使う weights ファイル

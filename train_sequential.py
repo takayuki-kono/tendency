@@ -598,36 +598,43 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
     return current_lr, score
 
 
-def search_ft_lr_by_targets(current_params, initial_lr, targets=[10, 11, 12, 13, 14, 15], cal_epochs=20):
+def search_ft_lr_by_targets(current_params, initial_lr, targets=(10, 11, 12, 13, 14, 15), cal_epochs=20):
     """
-    複数のtarget_best_epochでキャリブレーションを行い、
-    最もval_accuracyが良かったLRを採用する（FT本番用）
+    Step 4.7: FT 用 LR を **一回の** `calibrate_base_lr` で決める。
+
+    `targets` の最小・最大を帯 ``[lo, hi]`` とみなし、`target_best_epoch=(lo, hi)` として
+    ベスト epoch がその帯に入るように二分＋片側比で LR を探索する（**各 target ごとに
+    `initial_lr` に戻して別キャリブを繰り返さない**）。
+
+    旧: 10..15 を 1 本ずつ `calibrate_base_lr(..., target_best_epoch=t)` で実行し、
+    毎回 `initial_lr` からやり直していた。
     """
+    if targets is None:
+        lo, hi = 10, 15
+    else:
+        tlist = list(targets)
+        if not tlist:
+            lo, hi = 10, 15
+        else:
+            lo, hi = int(min(tlist)), int(max(tlist))
     logger.info(f"\n{'='*50}")
-    logger.info(f"FT LR Search Start: Targets={targets}")
+    logger.info(
+        f"FT LR Search (single pass): target_best_epoch band=[{lo}, {hi}], "
+        f"cal_epochs={cal_epochs}, start_lr={initial_lr:.8f}"
+    )
     logger.info(f"{'='*50}")
-    
-    best_candidate_val = -1.0
-    best_candidate_lr = None
-    best_target = None
-    
-    for t in targets:
-        logger.info(f"\n--- Searching for Target Epoch: {t} ---")
-        lr, score = calibrate_base_lr(
-            current_params, initial_lr=initial_lr,
-            cal_epochs=cal_epochs, target_best_epoch=t
-        )
-        if score > best_candidate_val:
-            best_candidate_val = score
-            best_candidate_lr = lr
-            best_target = t
-            
+    lr, score = calibrate_base_lr(
+        current_params,
+        initial_lr=initial_lr,
+        cal_epochs=cal_epochs,
+        target_best_epoch=(lo, hi),
+    )
     logger.info(f"\n{'='*50}")
-    logger.info(f"FT LR Search Complete")
-    logger.info(f"Best Target: {best_target}, Selected LR: {best_candidate_lr:.8f}, Val Acc: {best_candidate_val:.4f}")
+    logger.info(
+        f"FT LR Search Complete: band=[{lo},{hi}], Selected LR={lr:.8f}, Val={score:.4f}"
+    )
     logger.info(f"{'='*50}")
-    
-    return best_candidate_lr, best_candidate_val
+    return lr, score
 
 
 def main():
@@ -866,7 +873,7 @@ def main():
         shutil.copy2(_bon_src, _bon_dst)
         logger.info(f"Best-of-N model -> {_bon_dst} (4.7 前に保存; 4.7 は採用 LR/スコアの探索のみ)")
 
-    # --- Step 4.7: 勝ち seed 固定 + targets 10..15（各 calibrate 内 best）で最良 LR・スコア採択。別途最終 run_trial 1 本は行わない
+    # --- Step 4.7: 勝ち seed 固定 + FT LR を target epoch 帯 [10,15] で **一回** calibrate（LR を initial に戻さず一気通貫）
     current_params['seed'] = best_seed
     logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
     final_lr, final_ft_score = search_ft_lr_by_targets(
@@ -889,7 +896,7 @@ def main():
     logger.info("ALL PROCESSES COMPLETE")
     logger.info(
         f"best-of-N (pre-4.7 LR): seed={best_seed}, Score={best_bon_score:.4f} | "
-        f"Step4.7 best (targets): Score={final_ft_score:.4f}, LR={final_lr:.8g}"
+        f"Step4.7 best (FT LR band [10,15] single calibrate): Score={final_ft_score:.4f}, LR={final_lr:.8g}"
     )
     logger.info(f"{'='*50}")
 
