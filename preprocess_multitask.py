@@ -512,81 +512,124 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     grouped = defaultdict(list)
     for r in valid_items:
         grouped[r['label']].append(r)
-        
+
     final_copy_tasks = []
     skipped_count = 0
     skip_reasons = defaultdict(int)
 
-    # --- Undersampling Logic ---
-    # target_count = 2 番目に多いグループの採用枚数（2026-04-25 変更）。
-    # 旧: int(mean(counts)) → 最多 1 人に引きずられて中位以下まで削られる副作用があったため、
-    # 「最多の 1 人だけ 2 位に合わせて切る」方針に変更。グループが 1 つなら切らない。
+    # --- Undersampling (1) フィルタ前の全グループ件数から 2 番目に多いグループ数を上限（従来）---
     counts_sorted = sorted((len(items) for items in grouped.values()), reverse=True)
     if len(counts_sorted) >= 2:
-        target_count = counts_sorted[1]
+        target_count_pre = counts_sorted[1]
     elif len(counts_sorted) == 1:
-        target_count = counts_sorted[0]
+        target_count_pre = counts_sorted[0]
     else:
-        target_count = 0
+        target_count_pre = 0
     logger.info(
-        f"Undersampling target count (2nd-largest): {target_count} "
+        f"Undersampling (pre-filter stats) target count (2nd-largest group): {target_count_pre} "
         f"(top counts={counts_sorted[:5]}{'...' if len(counts_sorted) > 5 else ''})"
     )
-    
+
+    # フィルタのみ → dict[label, tasks]
+    filtered_by_label = {}
     for label, items in grouped.items():
-        # Personal Thresholds for Eyebrow-Eye Dist
         eb_vals = [r['metrics']['eb_eye_dist'] for r in items]
         th_eb_high = 999.0
         th_eb_low = -1.0
-        
+
         if eb_vals:
             if args.eyebrow_eye_percentile_high > 0:
                 th_eb_high = np.percentile(eb_vals, 100 - args.eyebrow_eye_percentile_high)
             if args.eyebrow_eye_percentile_low > 0:
                 th_eb_low = np.percentile(eb_vals, args.eyebrow_eye_percentile_low)
-        
-        # Filter valid items first
+
         label_valid_tasks = []
         for item in items:
             m = item['metrics']
             reason = None
-            
-            # Global Checks
-            if args.pitch_percentile > 0 and m['pitch'] > th_pitch: reason = 'pitch_global'
-            elif args.symmetry_percentile > 0 and m['symmetry'] > th_sym: reason = 'symmetry_global'
-            elif args.y_diff_percentile > 0 and m['y_diff'] > th_y: reason = 'y_diff_global'
-            elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth: reason = 'mouth_open_global'
-            elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low: reason = 'sharpness_low_global'
-            elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high: reason = 'sharpness_high_global'
-            elif args.face_size_percentile_low > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) < th_face_size_low: reason = 'face_size_low_global'
-            elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high: reason = 'face_size_high_global'
-            elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high): reason = 'aspect_ratio_global'
-            elif args.retouching_percentile > 0 and m.get('skin_smoothness', float('inf')) != float('inf') and m.get('skin_smoothness', float('inf')) < th_retouching: reason = 'retouching_global'
-            elif args.mask_percentile > 0 and m.get('mask_score', 0) > th_mask: reason = 'mask_global'
-            elif args.glasses_percentile > 0 and m.get('glasses_score', 0) > th_glasses: reason = 'glasses_global'
-            
-            # Personal Check
-            elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high): reason = 'eb_eye_high_personal'
-            elif (args.eyebrow_eye_percentile_low > 0 and m['eb_eye_dist'] < th_eb_low): reason = 'eb_eye_low_personal'
-            
+
+            if args.pitch_percentile > 0 and m['pitch'] > th_pitch:
+                reason = 'pitch_global'
+            elif args.symmetry_percentile > 0 and m['symmetry'] > th_sym:
+                reason = 'symmetry_global'
+            elif args.y_diff_percentile > 0 and m['y_diff'] > th_y:
+                reason = 'y_diff_global'
+            elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth:
+                reason = 'mouth_open_global'
+            elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low:
+                reason = 'sharpness_low_global'
+            elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high:
+                reason = 'sharpness_high_global'
+            elif args.face_size_percentile_low > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) < th_face_size_low:
+                reason = 'face_size_low_global'
+            elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high:
+                reason = 'face_size_high_global'
+            elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high):
+                reason = 'aspect_ratio_global'
+            elif args.retouching_percentile > 0 and m.get('skin_smoothness', float('inf')) != float('inf') and m.get('skin_smoothness', float('inf')) < th_retouching:
+                reason = 'retouching_global'
+            elif args.mask_percentile > 0 and m.get('mask_score', 0) > th_mask:
+                reason = 'mask_global'
+            elif args.glasses_percentile > 0 and m.get('glasses_score', 0) > th_glasses:
+                reason = 'glasses_global'
+            elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high):
+                reason = 'eb_eye_high_personal'
+            elif (args.eyebrow_eye_percentile_low > 0 and m['eb_eye_dist'] < th_eb_low):
+                reason = 'eb_eye_low_personal'
+
             if reason:
                 skipped_count += 1
                 skip_reasons[reason] += 1
             else:
                 label_valid_tasks.append(item)
 
-        # Apply Undersampling Limitation (skip for validation)
-        import random
-        random.shuffle(label_valid_tasks) # Randomize for bias reduction
-        
-        count_before_cut = len(label_valid_tasks)
-        if not skip_undersampling and count_before_cut > target_count:
-            # Cut down to target
-            label_valid_tasks = label_valid_tasks[:target_count]
-            skipped_count += (count_before_cut - target_count)
-            skip_reasons['undersampling'] += (count_before_cut - target_count)
+        filtered_by_label[label] = label_valid_tasks
 
-        # Create copy tasks
+    # --- Undersampling (1b) 上記上限（フィルタ前統計）を各グループに適用 ---
+    for label, label_valid_tasks in list(filtered_by_label.items()):
+        random.shuffle(label_valid_tasks)
+        count_before_cut = len(label_valid_tasks)
+        if not skip_undersampling and count_before_cut > target_count_pre:
+            label_valid_tasks = label_valid_tasks[:target_count_pre]
+            skipped_count += count_before_cut - len(label_valid_tasks)
+            skip_reasons['undersampling'] += count_before_cut - len(label_valid_tasks)
+        filtered_by_label[label] = label_valid_tasks
+
+    # --- Undersampling (2) フィルタ後件数でクラス別に「2 番目に多い人」まで（追加）---
+    # クラスキー = ラベル先頭セグメント（例: multitask では合成クラス名/単一タスクでは上位フォルダ）
+    if not skip_undersampling:
+        class_to_person_labels = defaultdict(list)
+        for label in filtered_by_label:
+            class_key = label.split('/', 1)[0] if '/' in label else ''
+            class_to_person_labels[class_key].append(label)
+
+        for class_key, person_labels in class_to_person_labels.items():
+            post_counts = sorted(
+                (len(filtered_by_label[pl]) for pl in person_labels),
+                reverse=True,
+            )
+            if len(post_counts) >= 2:
+                target_post = post_counts[1]
+            elif len(post_counts) == 1:
+                target_post = post_counts[0]
+            else:
+                target_post = 0
+            logger.info(
+                f"Undersampling (post-filter, per-class) class={class_key!r}: "
+                f"2nd-largest person count={target_post}, persons={len(person_labels)}"
+            )
+            for pl in person_labels:
+                tasks = filtered_by_label[pl]
+                random.shuffle(tasks)
+                n0 = len(tasks)
+                if n0 > target_post:
+                    drop = n0 - target_post
+                    tasks = tasks[:target_post]
+                    skipped_count += drop
+                    skip_reasons['undersampling_post_filter'] += drop
+                filtered_by_label[pl] = tasks
+
+    for label, label_valid_tasks in filtered_by_label.items():
         for item in label_valid_tasks:
             src = item['path']
             rel = os.path.relpath(src, src_root)
@@ -596,7 +639,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                 dst = os.path.join(dst_root, parts[0], new_filename)
             else:
                 dst = os.path.join(dst_root, rel)
-            
+
             final_copy_tasks.append((src, dst, args.grayscale))
 
     # Add invalid/read_error counts to skipped
