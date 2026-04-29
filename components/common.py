@@ -3,14 +3,18 @@ from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as ef
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
 from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
 from tensorflow.keras.applications.densenet import preprocess_input as densenet_preprocess
+from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_v3_preprocess
+
 
 def get_preprocessing_function(model_name):
     preprocess_map = {
         'EfficientNetV2B0': efficientnet_preprocess,
         'EfficientNetV2S': efficientnet_preprocess,
         'ResNet50V2': resnet_preprocess,
+        'ResNet101V2': resnet_preprocess,
         'Xception': xception_preprocess,
-        'DenseNet121': densenet_preprocess
+        'DenseNet121': densenet_preprocess,
+        'MobileNetV3Large': mobilenet_v3_preprocess,
     }
     return preprocess_map.get(model_name, efficientnet_preprocess)
 

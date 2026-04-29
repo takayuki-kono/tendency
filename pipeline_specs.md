@@ -140,7 +140,6 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
   - `optimize_sequential.py` は `base_lr` を設定ファイルから読み込み、`exponent` は上記数式で決定する。
     - 学習率スケジューラは前半5epochを固定LRとし、6epoch目からCosine Decayを開始。
     - 各trial: 20 epoch、Fine-tuning Off で評価。
-    - **学習延長 (Conditional Extension):** 評価スコアが極端に低い場合(<0.5)、または学習の最終エポックがベストスコアだった場合、未収束と判断してLRを最小値(初期値の5%)に落とし、精度が下がるまで最大20エポック学習を延長する (2026-02-20 更新)。
 - **Phase 1 - 独立パラメータ評価:**
     - 各パラメータを個別に評価（初期探索点: 0, 25, 50, 75）。
     - スコア上昇が見られた場合、**「精度スコア(score)単体の Top 2」**および**「精度上昇効率(efficiency)の Top 2」**の双方について中間点を設ける二分探索を実施。評価した中間点がどちらかの上位2位（Top2）に入り続ける限り探索を継続（どちらのTop2からも外れれば終了）。

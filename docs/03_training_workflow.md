@@ -49,6 +49,7 @@
     - `run_optimized_preprocess.bat`: 最適化されたパラメータを適用するための実行バッチファイル。
 - **Step 0（モデル＋head LR）**:
     - `MODEL_NAME_CANDIDATES`（`model_architecture.py`）の**各** `model_name` に対し、フィルタなし前処理の上で **`calibrate_base_lr`（`target_best_epoch=13` 他、他軸と同ロジック）**を実行し、キャリブ終了時の Val スコアが最大のモデルを採択。
+    - **`calibrate_base_lr` の試行回数上限**は `LR_CALIBRATION_MAX_ITERATIONS`（既定 **10**、`components/lr_adjustment.py`）。`run_trial` 内の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS`（最大 7 回）で別定数。
     - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / `learning_rate_head` を更新。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
@@ -87,7 +88,7 @@
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
    - **手順**:
      1. Epoch 13 に収束するLRを特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**（`lr_calibration_should_stop`、run_trial の終了条件と同一）: (1) **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）→ 終了 (2) **11≤best_epoch≤15 かつ last_accu < best**（ピーク後下降）→ 終了 (3) **試行回数が LR_MAX_ADJUSTMENTS に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
+  - **キャリブレーションの打ち切り**（`lr_calibration_should_stop`）: (1) **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）→ 終了 (2) **11≤best_epoch≤15 かつ last_accu < best**（ピーク後下降）→ 終了 (3) **`calibrate_base_lr` のループが `LR_CALIBRATION_MAX_ITERATIONS`（既定10）回に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
   - **候補採点ルール**（2026-04-22 修正）: 最終選択は `(distance, -score, ...)` タプルで比較する。すなわち `target_best_epoch` からの距離（`abs(best_epoch - target)`）が最小の iteration を優先採用し、距離同率のときのみ score（`MinClassAcc` など）の大きい方を採用する。
      - 旧仕様（`(-score, distance, ...)` = score 最優先）だと、noisy val 環境で target から離れた iteration が score 偶発で採用されるため、target=13 に寄せるループ自体が無意味化していた問題を修正。
      - `train_sequential.py` では `calibrate_base_lr(score_priority=False)` を全呼び出しで使用（デフォルト）。`score_priority=True` の旧挙動は互換のため残存するが実使用しない。
@@ -96,7 +97,7 @@
      - `best_epoch >= target_min`（帯内含む） → `lr_low = current_lr`（下限更新）。
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
      - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。
-     - `LR_MAX_ADJUSTMENTS=6` → 最大 7 trial（0..6）。反対側境界を踏むまでの試行余裕を確保。
+     - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
      - 収束判定: `|new_lr - current_lr| / current_lr < 0.02` なら以降の trial を打ち切り、最良候補を採用。
   - **LR スロット分離**（2026-04-22 明確化）: `best_train_params.json` の `learning_rate_head` / `learning_rate_nohead` / `learning_rate_ft` はそれぞれ head-only / body(backbone) / FT 用の別の条件で乖離する LR を保持する設計。head calibration（optimize_sequential の run_trial, および train_sequential Step 1/1.2）の結果は `learning_rate_head` のみを更新し、`learning_rate_nohead` には書き込まない（head LR を body 側にミラーすると body/FT 引き継ぎが狂うため）。読み取り側 `_get_head_lr_from_best` も `(learning_rate_head, warmup_lr, learning_rate)` の順で head 優先に並べ、`learning_rate_nohead` は head の fallback 候補に入れない。
 - **キャリブレーション設定**:
@@ -211,14 +212,9 @@
     - **開始条件**: **常に有効** (学習開始時から減衰を適用)。
     - **減衰計算**: 全エポック数に対する進捗 `progress` を基に `1.0 - progress` で線形に減衰させる。
     - **最低LR（スケジュール上）**: `initial_lr × 0.05` (ゼロにはしない)。
-    - **絶対域（2026-04-26）**: オプティマイザに入る各エポックの LR は `components/lr_adjustment.py` の **`LR_TRAIN_ABSOLUTE_MIN=1e-7`** ～ **`LR_TRAIN_ABSOLUTE_MAX=0.1`** に `clip_learning_rate_for_training` で収める。極小は `.8f` ログで 0 に見えて実質停止するのを防ぎ、極大は設定外れの保険。学習率確定直後（head/FT いずれも）・`ConditionalLearningRateScheduler` / `LinearWarmupScheduler` 各エポック・延長学習の `extension_lr` に適用。
+    - **絶対域（2026-04-26）**: オプティマイザに入る各エポックの LR は `components/lr_adjustment.py` の **`LR_TRAIN_ABSOLUTE_MIN=1e-7`** ～ **`LR_TRAIN_ABSOLUTE_MAX=0.1`** に `clip_learning_rate_for_training` で収める。極小は `.8f` ログで 0 に見えて実質停止するのを防ぎ、極大は設定外れの保険。学習率確定直後（head/FT いずれも）・`ConditionalLearningRateScheduler` / `LinearWarmupScheduler` 各エポックに適用。
     - **import 注意（2026-04-26 修正）**: `train_multitask_trial.py` は `components/` 配下でサブプロセス起動されるため、同ディレクトリの `lr_adjustment` は **`from lr_adjustment import ...`** とする。`from components.lr_adjustment ...` だと実行時 `sys.path` によっては **解決失敗**し、キャリブの `FINAL_VAL_ACCURACY` 抽出不能（score=0.0）になる。
-- **条件付きEpoch拡張 (Conditional Extension)**:
-    - **発動条件（2026-04-25）**: ベストエポックが最終エポック、**または**最終エポックのスコアがベストスコアと**同一**（`is_best_at_last`）の場合のみ、追加学習モードに入る。旧仕様の「score が閾値未満（例: 0.5 未満）」単独での発動は**廃止**（低スコアでも中盤で既にピークが取れていれば延長は無駄になるため）。
-    - **学習率**: `min_lr` (initial_lr × 0.05) 固定。
-    - **終了条件**: 精度が**厳密に下がったときのみ**停止（plateau＝同じのときは継続）。
-    - **延長上限**: 1epochずつ継続し、下がらない限り続行（安全上限あり）。
-    - 発動を防ぐには `train_multitask_trial.py` に `--no_extension` を付与する（CLI 単体実行・スクリプト起動形態によっては常時付与も可）。
+- **条件付きEpoch拡張 (Conditional Extension)**（2026-05-03 廃止）: 旧実装では最終 epoch がベストのとき追加の 1 epoch 学習を繰り返していたが、**本リポジトリでは削除済み**（LR 再調整・`calibrate_base_lr` で代替）。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
 - **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
@@ -240,7 +236,7 @@
 ### `train_sequential.py` の主要ステップ
 - **`model_name` の扱い（2026-04-28 更新）**: `outputs/best_train_params.json` に `model_name` があっても `train_sequential` は **Step 1.1（バックボーン比較）をスキップしない**（**現在の前処理データ**で毎回確定）。**`optimize_sequential.py` Step 0** は `MODEL_NAME_CANDIDATES` ごとに **LR キャリブ**してから最高スコアの `best_model` を選び、同 JSON に `model_name` / `learning_rate_head` を書き戻す。`train_sequential` では 1.1 を再確定する想定。
 - **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR を、**`components/model_architecture.py` の `LRCALIB_BASE_BACKBONE`（既定 `EfficientNetV2B0`）固定**でキャリブ（保存 JSON の `learning_rate_head` 等は `_get_head_lr_from_best` の**初期候補**にのみ用い、バックボーン切替は 1.1 以降）。
-- **Step 1.1: Model Architecture** — 毎回: `MODEL_NAME_CANDIDATES`（`model_architecture.py`、例: EfficientNet B0/S、ResNet50/101V2、ConvNeXtSmall、MobileNetV3Large、**`ConvNeXtV2Tiny` / `ConvNeXtV2Small`**）から `model_name` を比較確定。Keras 標準にない **ConvNeXt V2** は `components/third_party/convnext_tf`（[zibbini](https://github.com/zibbini/convnext-v2_tensorflow) 由来、MIT）の **`convnextv2_tiny`** および、同梱に **`convnextv2_small` が無い**ため **`convnextv2_nano` を `ConvNeXtV2Small` 名で探索**（`components/zibbini_v2_models.py` の `ZIBBINI_V2_BUILDERS`、`weights=None` 想定）。**MobileNetV4** 相当は **MobileNetV3Large** を代用。`optimize_param` に **`head_only_tie_log` を渡す**。
+- **Step 1.1: Model Architecture** — 毎回: `MODEL_NAME_CANDIDATES`（`model_architecture.py`、例: EfficientNet B0/S、ResNet50/101V2、MobileNetV3Large）から `model_name` を比較確定。**MobileNetV4** 相当は **MobileNetV3Large** を代用。`optimize_param` に **`head_only_tie_log` を渡す**。
 - **Step 1.2: Head LR Re-calibration** — **1.1** で `model_name != LRCALIB_BASE_BACKBONE` のときだけ、確定したバックボーンで head LR を再キャリブ（Step1 は基準バックボーンのみのため）。基準と同じ `model_name` ならスキップ。
 - **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。
 - **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
@@ -254,7 +250,7 @@
 
 ### Head carryover に使う weights ファイル
 - **パス**: `outputs/best_head_weights/best_head.weights.h5`
-- **書き手**: `components/train_multitask_trial.py` の `BestHeadWeightsSaver` コールバック（head-only 学習中、全タスク平均 `val_min_class_accuracy` のベスト更新時に保存）＋延長学習中にベスト更新があった場合も保存。
+- **書き手**: `components/train_multitask_trial.py` の `BestHeadWeightsSaver` コールバック（head-only 学習中、全タスク平均 `val_min_class_accuracy` のベスト更新時に保存）。
 - **読み手**: `components/train_multitask_trial.py` 本体。`--init_weights_path` 指定時に `model.load_weights(path, by_name=True, skip_mismatch=True)` で読み込む。
 - **追加 CLI 引数**（`components/train_multitask_trial.py`）:
     - `--init_weights_path <path>`: 指定された .weights.h5 をロード（by_name, skip_mismatch）。存在しなければ WARNING で継続。

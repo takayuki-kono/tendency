@@ -8,13 +8,12 @@ from tensorflow.keras import mixed_precision
 
 from tensorflow.keras.applications import (
     EfficientNetV2B0, EfficientNetV2S, ResNet50V2, ResNet101V2, Xception, DenseNet121,
-    ConvNeXtSmall, MobileNetV3Large,
+    MobileNetV3Large,
 )
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as efficientnet_preprocess
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
 from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
 from tensorflow.keras.applications.densenet import preprocess_input as densenet_preprocess
-from tensorflow.keras.applications.convnext import preprocess_input as convnext_preprocess
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_v3_preprocess
 import logging
 import sys
@@ -27,7 +26,6 @@ from lr_adjustment import (
     LR_TRAIN_ABSOLUTE_MIN,
     clip_learning_rate_for_training,
 )
-from zibbini_v2_models import ZIBBINI_V2_BUILDERS, normalize_zibbini_v2_model_name
 
 # デフォルトシード（--seed引数で上書き可能）
 DEFAULT_SEED = 42
@@ -245,12 +243,8 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
 
     return ds
 
-def _zibbini_v2_pre_div255(x):
-    return tf.cast(x, tf.float32) / 255.0
 
 def get_preprocessing_function(model_name):
-    if model_name in ZIBBINI_V2_BUILDERS:
-        return _zibbini_v2_pre_div255
     preprocess_map = {
         'EfficientNetV2B0': efficientnet_preprocess,
         'EfficientNetV2S': efficientnet_preprocess,
@@ -258,7 +252,6 @@ def get_preprocessing_function(model_name):
         'ResNet101V2': resnet_preprocess,
         'Xception': xception_preprocess,
         'DenseNet121': densenet_preprocess,
-        'ConvNeXtSmall': convnext_preprocess,
         'MobileNetV3Large': mobilenet_v3_preprocess,
     }
     return preprocess_map[model_name]
@@ -363,7 +356,6 @@ class MinClassAccuracy(tf.keras.metrics.Metric):
 
 
 def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params, task_labels):
-    model_name = normalize_zibbini_v2_model_name(model_name)
     model_map = {
         'EfficientNetV2B0': EfficientNetV2B0,
         'EfficientNetV2S': EfficientNetV2S,
@@ -371,13 +363,12 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         'ResNet101V2': ResNet101V2,
         'Xception': Xception,
         'DenseNet121': DenseNet121,
-        'ConvNeXtSmall': ConvNeXtSmall,
         'MobileNetV3Large': MobileNetV3Large,
     }
-    if model_name not in model_map and model_name not in ZIBBINI_V2_BUILDERS:
+    if model_name not in model_map:
         raise ValueError(
             f"Unsupported model_name: {model_name!r}. "
-            f"Expected one of {sorted(model_map) + sorted(ZIBBINI_V2_BUILDERS)}"
+            f"Expected one of {sorted(model_map)}"
         )
 
     # データ拡張層
@@ -395,26 +386,13 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
 
     inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     x = data_augmentation(inputs)
-    if model_name in ZIBBINI_V2_BUILDERS:
-        # `python components/train_multitask_trial.py` でも `python -m` でも import 可能に
-        _comp = os.path.dirname(os.path.abspath(__file__))
-        if _comp not in sys.path:
-            sys.path.insert(0, _comp)
-        from third_party.convnext_tf import convnext_v2 as _zconv2
-
-        x = layers.Lambda(_zibbini_v2_pre_div255)(x)
-        bname = ZIBBINI_V2_BUILDERS[model_name]
-        builder = getattr(_zconv2, bname)
-        trunk = builder(input_tensor=x, include_top=False, weights=None)
-        x = layers.GlobalAveragePooling2D()(trunk.output)
-    else:
-        BaseCnnModel = model_map[model_name]
-        preprocess_func = get_preprocessing_function(model_name)
-        x = layers.Lambda(preprocess_func)(x)
-        base_model = BaseCnnModel(include_top=False, weights='imagenet', input_shape=(IMG_SIZE, IMG_SIZE, 3))
-        base_model.trainable = False
-        x = base_model(x, training=False)
-        x = layers.GlobalAveragePooling2D()(x)
+    BaseCnnModel = model_map[model_name]
+    preprocess_func = get_preprocessing_function(model_name)
+    x = layers.Lambda(preprocess_func)(x)
+    base_model = BaseCnnModel(include_top=False, weights='imagenet', input_shape=(IMG_SIZE, IMG_SIZE, 3))
+    base_model.trainable = False
+    x = base_model(x, training=False)
+    x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(head_dropout)(x)
 
     # Weight Decay: L2正則化で実装（AdamWが使えない環境向け）
@@ -597,7 +575,6 @@ def main():
     parser.add_argument('--decay_exponent', type=float, default=1.0) # Decay curve exponent (1.0=Linear, 0.5=Sqrt, 2.0=Poly)
     parser.add_argument('--warmup_lr', type=float, default=0.0) # Warmup LR (0=warmupなし, >0=FT前にHead学習)
     parser.add_argument('--warmup_epochs', type=int, default=5) # Warmupのエポック数
-    parser.add_argument('--no_extension', action='store_true', help='延長学習を行わない（LR逐一調整で冗長なためオフ可）')
     # Head carryover: Phase 0（head-only）で学習済みベスト重みを FT 初期値にロードするための経路
     # - init_weights_path: 既存の .weights.h5 をロード（by_name, skip_mismatch）
     # - save_best_head_weights_path: head-only 学習中のベスト重みをこのパスに保存
@@ -1078,128 +1055,24 @@ def main():
             final_val_acc = max(avg_scores)
             best_epoch_idx = avg_scores.index(final_val_acc)
             best_epoch = best_epoch_idx + 1  # 1-indexed（ベース学習内のepoch）
-            best_epoch_abs = best_epoch  # 延長が走った場合は abs_epoch で更新していく
-            last_epoch_score = avg_scores[-1]  # 最終エポックのスコアを記録
+            best_epoch_abs = best_epoch
+            last_epoch_score = avg_scores[-1]  # 最終エポックのスコア（LRキャリブ等の参照用）
 
-            # BEST_EPOCH の print は「延長後に確定」させたいので、ここではloggerのみ
             if args.fine_tune.lower() == 'true':
                 logger.info(f"FT Best Score (base): {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
             else:
                 logger.info(f"Best Target Score (base): {final_val_acc:.4f} (at epoch {best_epoch}/{num_epochs})")
         else:
             logger.warning(f"No validation accuracy keys found in history. Available keys: {history.history.keys()}")
-            
-    # --- 延長学習の判定 (Conditional Extension) ---
-    # best_epochが最終エポック、または最終エポックのスコアがベストと同等の場合に延長
-    # (avg_scores.index()は最初の出現を返すため、同スコアが複数ある場合の対策)
-    is_best_at_last = (best_epoch == training_epochs) or (abs(last_epoch_score - final_val_acc) < 1e-8)
-    
-    temp_weights_path = 'temp_training_weights.weights.h5'
-    
-    # score < 0.5 など「低いだけ」では延長しない（is_best_at_last 時のみ）。ピークが中盤なのに
-    # 低スコア延長 → 1 epoch ですぐ下がるだけの無駄、LR キャリブの BestEpoch 指標の歪みの原因になる。
-    if not getattr(args, 'no_extension', False) and is_best_at_last:
-        reason = f"is_best_at_last: best at final epoch (or last score equals best) — epoch {best_epoch}/{training_epochs}"
-        logger.info(f"--- Extension Training ({reason}) ---")
-        
-        # Save current best weights before extension
-        model.save_weights(temp_weights_path)
-        
-        # LR固定 (Initial * 0.05)、絶対域に収める
-        extension_lr = clip_learning_rate_for_training(args.learning_rate * 0.05)
-        if hasattr(model.optimizer, 'lr'):
-            tf.keras.backend.set_value(model.optimizer.lr, extension_lr)
-        logger.info(f"Extension LR set to {extension_lr:.8f}")
-        
-        # 延長は「精度が厳密に下がるまで」継続したいが、無限ループ防止のため安全上限を設ける
-        max_ext_epochs_hard = 200
-        best_ext_score = final_val_acc
-        
-        ext_epoch = 0  # 1-indexedで扱う（ログ表示用）
-        while ext_epoch < max_ext_epochs_hard:
-            ext_epoch += 1
-            abs_epoch = training_epochs + ext_epoch
-            logger.info(f"Extension Epoch {abs_epoch} (ext={ext_epoch}/{max_ext_epochs_hard})...")
-            
-            # 1 Epoch training (epochs=1 means run 1 epoch from scratch in this call)
-            hist_ext = model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=1,
-                verbose=0
-            )
-            
-            # Score Calculation
-            val_scores = []
-            if hasattr(hist_ext, 'history'):
-                history_keys = hist_ext.history
-                # Iterate phases to find metric keys
-                if len(task_labels) == 1:
-                    if 'val_min_class_accuracy' in history_keys:
-                        val_scores.append(history_keys['val_min_class_accuracy'][0])
-                    elif 'val_balanced_accuracy' in history_keys:
-                        val_scores.append(history_keys['val_balanced_accuracy'][0])
-                    elif 'val_accuracy' in history_keys:
-                        val_scores.append(history_keys['val_accuracy'][0])
-                else:
-                    for t_idx in range(len(task_labels)):
-                        char_code = chr(ord('a') + t_idx)
-                        key_min = f"val_task_{char_code}_output_min_class_accuracy"
-                        key_bal = f"val_task_{char_code}_output_balanced_accuracy"
-                        key_acc = f"val_task_{char_code}_output_accuracy"
-                        
-                        if key_min in history_keys:
-                            val_scores.append(history_keys[key_min][0])
-                        elif key_bal in history_keys:
-                            val_scores.append(history_keys[key_bal][0])
-                        elif key_acc in history_keys:
-                            val_scores.append(history_keys[key_acc][0])
-            
-            current_ext_score = sum(val_scores) / len(val_scores) if val_scores else 0.0
-            # optimize_sequential 側のログ抽出条件（'Epoch ', 'MinClassAcc'）に確実に拾わせる
-            logger.info(
-                f"Epoch {abs_epoch} | MinClassAcc={current_ext_score:.4f} | Extension best={best_ext_score:.4f}"
-            )
-            
-            if current_ext_score > best_ext_score:
-                best_ext_score = current_ext_score
-                final_val_acc = best_ext_score
-                best_epoch_abs = abs_epoch
-                model.save_weights(temp_weights_path)  # Update best weights
-                # head-only phase で save_best_head_weights_path が指定されていれば延長側の更新も保存
-                if (args.fine_tune.lower() != 'true'
-                        and args.save_best_head_weights_path):
-                    try:
-                        os.makedirs(os.path.dirname(args.save_best_head_weights_path) or '.', exist_ok=True)
-                        model.save_weights(args.save_best_head_weights_path)
-                        logger.info(
-                            f"[BestHeadWeightsSaver] Extension new best MinClassAcc={best_ext_score:.4f} "
-                            f"at abs_epoch {abs_epoch} -> {args.save_best_head_weights_path}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"[BestHeadWeightsSaver] Extension save failed: {e}")
-            elif current_ext_score < best_ext_score:
-                logger.info("Accuracy dropped. Stopping extension.")
-                break
-            # current_ext_score == best_ext_score (plateau) のときは続行し、本当に下がるまで延長する
-        
-        # Restore best weights from extension phase
-        if os.path.exists(temp_weights_path):
-            model.load_weights(temp_weights_path)
-            logger.info(f"Restored best extension weights (Final Score: {final_val_acc:.4f})")
 
-    # BEST_EPOCH の最終確定（延長を含めた実epochを出力）
+    # BEST_EPOCH の最終確定
     if 'best_epoch_abs' in locals():
         if args.fine_tune.lower() == 'true':
             print(f"FT_BEST_EPOCH: {best_epoch_abs}")
-            logger.info(f"FT Best Score (final): {final_val_acc:.4f} (at abs_epoch {best_epoch_abs})")
+            logger.info(f"FT Best Score (final): {final_val_acc:.4f} (at epoch {best_epoch_abs})")
         else:
             print(f"BEST_EPOCH: {best_epoch_abs}")
-            logger.info(f"Best Target Score (final): {final_val_acc:.4f} (at abs_epoch {best_epoch_abs})")
-
-    # クリーンアップ
-    if os.path.exists(temp_weights_path):
-        os.remove(temp_weights_path)
+            logger.info(f"Best Target Score (final): {final_val_acc:.4f} (at epoch {best_epoch_abs})")
 
     # モデル保存 (Fine-tuning時のみ、seed付きファイル名で保存)
     if args.fine_tune.lower() == 'true':

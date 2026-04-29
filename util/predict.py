@@ -15,6 +15,7 @@ from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as ef
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as resnet_preprocess
 from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
 from tensorflow.keras.applications.densenet import preprocess_input as densenet_preprocess
+from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenet_v3_preprocess
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -27,9 +28,12 @@ def get_preprocessing_function(model_name):
     """モデル名から適切な前処理関数を返す"""
     preprocess_map = {
         'EfficientNetV2B0': efficientnet_preprocess,
+        'EfficientNetV2S': efficientnet_preprocess,
         'ResNet50V2': resnet_preprocess,
+        'ResNet101V2': resnet_preprocess,
         'Xception': xception_preprocess,
-        'DenseNet121': densenet_preprocess
+        'DenseNet121': densenet_preprocess,
+        'MobileNetV3': mobilenet_v3_preprocess,
     }
     for name, func in preprocess_map.items():
         if name.lower() in model_name.lower():

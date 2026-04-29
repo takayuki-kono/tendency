@@ -4,6 +4,8 @@ LR_TARGET_EPOCH = 13
 LR_ACCEPTABLE_MIN = 11
 LR_ACCEPTABLE_MAX = 15  # 許容範囲・ピーク後下降で終了する上限（両方に使用）
 LR_MAX_ADJUSTMENTS = 6
+# calibrate_base_lr（optimize / train_sequential）の試行回数上限。run_trial の LR 再調整回数とは独立。
+LR_CALIBRATION_MAX_ITERATIONS = 10
 LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ以上で「last≠best」とみなす
 # 学習（optimizer / LR スケジューラ）に乗せる絶対域。極小 LR は .8f ログで 0 表示になり実質停止、
 # 極大は設定ミス時の数値破綻を防ぐ。再調整「比」クランプとは独立。
@@ -14,7 +16,7 @@ LR_TRAIN_ABSOLUTE_MAX = 0.1
 
 def clip_learning_rate_for_training(lr):
     """
-    train_multitask_trial から optimizer / scheduler / 延長学習に渡す直前に適用する。
+    train_multitask_trial から optimizer / scheduler に渡す直前に適用する。
     戻り値は常に [LR_TRAIN_ABSOLUTE_MIN, LR_TRAIN_ABSOLUTE_MAX]。
     """
     try:

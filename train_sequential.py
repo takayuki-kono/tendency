@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
-    LR_MAX_ADJUSTMENTS, LR_LAST_ACCU_EPS,
+    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
@@ -195,7 +195,6 @@ def run_trial(params):
                     continue
                 cmd.extend([f"--{key}", str(value)])
             cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
-            # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
 
             # Popenでリアルタイム出力
             process = subprocess.Popen(
@@ -445,7 +444,6 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
         cmd.extend([f"--{key}", str(value)])
     cmd.extend(["--single_task_mode", str(SINGLE_TASK_MODE)])
     cmd.extend(["--enable_early_stopping", "False"])
-    # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
     
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
     
@@ -514,7 +512,7 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
     logger.info(f"{'='*50}")
     
     best_candidate = None  # (sort_key, lr, best_epoch, score)
-    max_iterations = LR_MAX_ADJUSTMENTS + 1  # trainのLR調整と同じ最大試行数
+    max_iterations = LR_CALIBRATION_MAX_ITERATIONS
 
     # 二分探索の境界 (LR値で管理)
     lr_low = None   # best_epoch > target になった最大LR（LR低すぎ側）
@@ -543,8 +541,8 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         if should_stop and stop_msg:
             logger.info(stop_msg)
             break
-        if iteration >= LR_MAX_ADJUSTMENTS:
-            logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping calibration.")
+        if iteration >= LR_CALIBRATION_MAX_ITERATIONS - 1:
+            logger.info(f"Reached max calibration iterations ({LR_CALIBRATION_MAX_ITERATIONS}). Stopping calibration.")
             break
 
         # 境界更新

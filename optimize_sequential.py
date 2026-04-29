@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
-    LR_MAX_ADJUSTMENTS, LR_LAST_ACCU_EPS,
+    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
 
@@ -265,8 +265,6 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     cmd_train.extend(["--epochs", str(cal_epochs)])
     cmd_train.extend(["--fine_tune", "False"])
     cmd_train.extend(["--enable_early_stopping", "False"])
-    # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
-    
     logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
     
     process = subprocess.Popen(
@@ -346,7 +344,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     best_candidate = None  # (distance, -score, lr, best_epoch, score)
     lr_low = None   # best_epoch >= target_min になった最大LR（LR低すぎ or 帯内）
     lr_high = None  # best_epoch <  target_min になった最小LR（LR高すぎ）
-    max_iterations = LR_MAX_ADJUSTMENTS + 1
+    max_iterations = LR_CALIBRATION_MAX_ITERATIONS
 
     for iteration in range(max_iterations):
         best_epoch, score, last_epoch_accu = run_calibration_trial(model_name, current_lr, cal_epochs)
@@ -372,8 +370,8 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         if should_stop and stop_msg:
             logger.info(stop_msg)
             break
-        if iteration >= LR_MAX_ADJUSTMENTS:
-            logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping calibration.")
+        if iteration >= LR_CALIBRATION_MAX_ITERATIONS - 1:
+            logger.info(f"Reached max calibration iterations ({LR_CALIBRATION_MAX_ITERATIONS}). Stopping calibration.")
             break
 
         # 境界更新
@@ -705,7 +703,6 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         cmd_train.extend(["--epochs", "20"])
         cmd_train.extend(["--fine_tune", "False"])
         cmd_train.extend(["--auto_lr_target_epoch", "0"])  # 内部自動スケーリングを無効化
-        # Conditional Extension は train_multitask_trial 側で必要時のみ発動させる
 
         # train_sequential.py と同じ LR 再調整条件（モジュール定数で共用）
         training_epochs = 20
