@@ -43,6 +43,11 @@ suspicious_labels/
 grouped_faces_cnn_euclidean/
 error_analysis*/
 
+# Experimental third-party clones (see experimental/convnext_v2_probe/README.md)
+experimental/convnext_v2_probe/convnext-v2_tensorflow/
+experimental/convnext_v2_probe/venv_convnext_v2/
+experimental/convnext_v2_train_env/venv/
+
 # Large/Binary Files
 *.db
 *.pkl

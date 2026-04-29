@@ -229,11 +229,16 @@ def create_dataset(directory, task_labels, weight_tables=None, augment_params=No
     ds = ds.cache() # Cache raw images before weights/mixup
     ds = ds.map(apply_weights, num_parallel_calls=AUTOTUNE)
 
-    # Mixup / Smoothing Logic
-    if augment_params and (augment_params.get('mixup_alpha', 0.0) > 0.0 or augment_params.get('label_smoothing', 0.0) > 0.0):
+    # Mixup / Smoothing Logic（検証用 one_hot_labels_only は Mixup なしで one-hot のみ）
+    use_one_hot = augment_params and (
+        augment_params.get('mixup_alpha', 0.0) > 0.0
+        or augment_params.get('label_smoothing', 0.0) > 0.0
+        or augment_params.get('one_hot_labels_only', False)
+    )
+    if use_one_hot:
         # Convert to one-hot first (Required for both Mixup and Label Smoothing)
         ds = ds.map(to_one_hot, num_parallel_calls=AUTOTUNE)
-        
+
         # Mixup (Only if alpha > 0)
         if augment_params.get('mixup_alpha', 0.0) > 0.0:
             # Create shuffle pair
@@ -578,8 +583,10 @@ def main():
     # Head carryover: Phase 0（head-only）で学習済みベスト重みを FT 初期値にロードするための経路
     # - init_weights_path: 既存の .weights.h5 をロード（by_name, skip_mismatch）
     # - save_best_head_weights_path: head-only 学習中のベスト重みをこのパスに保存
+    # - save_best_head_model_path: head-only 終了後、ベスト重みをロードした上で完全モデルをこのパスに保存（任意）
     parser.add_argument('--init_weights_path', type=str, default='')
     parser.add_argument('--save_best_head_weights_path', type=str, default='')
+    parser.add_argument('--save_best_head_model_path', type=str, default='')
 
     args = parser.parse_args()
     
@@ -615,10 +622,17 @@ def main():
     weight_tables = calculate_class_weights_as_tables(PREPROCESSED_TRAIN_DIR, task_labels, single_task_mode=single_task_mode)
     val_weight_tables = calculate_class_weights_as_tables(PREPROCESSED_VALIDATION_DIR, task_labels, single_task_mode=single_task_mode)
 
+    val_augment_params = None
+    if args.mixup_alpha > 0.0 or args.label_smoothing > 0.0:
+        val_augment_params = {
+            'mixup_alpha': 0.0,
+            'label_smoothing': 0.0,
+            'one_hot_labels_only': True,
+        }
+
     train_ds = create_dataset(PREPROCESSED_TRAIN_DIR, task_labels, weight_tables=weight_tables, augment_params=augment_params, single_task_mode=single_task_mode)\
         .shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-    # 検証データにはMixup/Label Smoothingを適用しない（生データで正しく評価）
-    val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, task_labels, weight_tables=val_weight_tables, augment_params=None, single_task_mode=single_task_mode)\
+    val_ds = create_dataset(PREPROCESSED_VALIDATION_DIR, task_labels, weight_tables=val_weight_tables, augment_params=val_augment_params, single_task_mode=single_task_mode)\
         .batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
     # --- 学習率の自動算出 (auto_lr_target_epoch > 0 の場合) ---
@@ -1004,6 +1018,27 @@ def main():
         verbose=2
     )
     
+    # Head-only: ベスト epoch 重みと整合した完全モデルを別パスへ（weights.h5 のみでは復元しづらい用途向け）
+    if args.fine_tune.lower() != 'true' and args.save_best_head_model_path:
+        if args.save_best_head_weights_path and os.path.exists(args.save_best_head_weights_path):
+            try:
+                model.load_weights(args.save_best_head_weights_path, by_name=True, skip_mismatch=True)
+                logger.info(
+                    f"[Head model] Loaded best weights for export: {args.save_best_head_weights_path}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Head model] load_weights failed; exporting last-epoch model: {e}"
+                )
+        try:
+            _dn = os.path.dirname(args.save_best_head_model_path)
+            if _dn:
+                os.makedirs(_dn, exist_ok=True)
+            model.save(args.save_best_head_model_path)
+            logger.info(f"[Head model] Saved full model: {args.save_best_head_model_path}")
+        except Exception as e:
+            logger.warning(f"[Head model] model.save failed: {e}")
+
     # ベストスコア記録
     final_val_acc = 0.0
     best_epoch = 1

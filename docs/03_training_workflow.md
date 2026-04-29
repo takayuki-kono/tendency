@@ -217,7 +217,7 @@
 - **条件付きEpoch拡張 (Conditional Extension)**（2026-05-03 廃止）: 旧実装では最終 epoch がベストのとき追加の 1 epoch 学習を繰り返していたが、**本リポジトリでは削除済み**（LR 再調整・`calibrate_base_lr` で代替）。
 - **Weight Decay**: Dense層の `kernel_regularizer=l2(wd)` で実装 (AdamW不要)
 - **Mixup**: Beta(α, α) 分布からサンプリング (Gamma分布2つから構築)
-- **検証データ**: Mixup/Label Smoothingは適用しない (生データで評価)
+- **検証データ**: データ拡張・Mixup は適用しない。**`CategoricalCrossentropy` を使う設定**（`mixup_alpha>0` または `label_smoothing>0`）では、損失と整合するためラベルのみ **one-hot** に変換する（学習側と同じクラス次元）。
 
 ### `outputs/best_train_params.json` の学習率の扱い
 - `train_sequential.py` の最終採用ハイパラを保存する。
@@ -241,20 +241,22 @@
 - **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。
 - **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
-- **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
+- **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。あわせて同一ベスト重みをロードした **完全モデル**を `outputs/best_head_weights/best_head_only.keras` に別保存する（推論・検証用。FT の head carryover は従来どおり `.weights.h5` のみ使用）。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
 - **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
 - **Step 4 / 4.5** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
 - **Best-of-N（先）** — 複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。直後、**4.7 の探索で `model_seed{seed}.keras` が上書きされる前に** `best_sequential_model.keras` へ **Best-of-N 時点の**重みをコピー（**重み＝4.5 時点 LR、JSON の `learning_rate_ft`＝4.7 採用 LR**と必ずしも一致しない点に注意）。
-- **Step 4.7** — `seed` 固定のまま `search_ft_lr_by_targets` で **target epoch 帯 `[min(targets), max(targets)]`（既定 10〜15）に対し `calibrate_base_lr` を 1 回だけ**実行し、**最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定（旧: 10..15 を各 `target_best_epoch=t` で別キャリブし毎回 `initial_lr` に戻していた）。追加の**最終 `run_trial` 1 本は行わない**。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。
+- **Step 4.7** — `seed` 固定のまま `search_ft_lr_by_targets` で **target epoch 帯 `[min(targets), max(targets)]`（既定 10〜15）に対し `calibrate_base_lr` を 1 回だけ**実行し、**最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定（旧: 10..15 を各 `target_best_epoch=t` で別キャリブし毎回 `initial_lr` に戻していた）。追加の**最終 `run_trial` 1 本は行わない**。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。**実行直前に `outputs/cache/train_opt_cache.json` を削除**し、`run_trial` の古いキャッシュヒットを避ける。
 - **掃除** — `model_seed{42..44}.keras` を削除。
 
 ### Head carryover に使う weights ファイル
-- **パス**: `outputs/best_head_weights/best_head.weights.h5`
+- **パス（重み・FT 初期値）**: `outputs/best_head_weights/best_head.weights.h5`
+- **パス（head-only 完全モデル）**: `outputs/best_head_weights/best_head_only.keras`
 - **書き手**: `components/train_multitask_trial.py` の `BestHeadWeightsSaver` コールバック（head-only 学習中、全タスク平均 `val_min_class_accuracy` のベスト更新時に保存）。
 - **読み手**: `components/train_multitask_trial.py` 本体。`--init_weights_path` 指定時に `model.load_weights(path, by_name=True, skip_mismatch=True)` で読み込む。
 - **追加 CLI 引数**（`components/train_multitask_trial.py`）:
     - `--init_weights_path <path>`: 指定された .weights.h5 をロード（by_name, skip_mismatch）。存在しなければ WARNING で継続。
     - `--save_best_head_weights_path <path>`: head-only 学習中のみ、ベスト重みをこのパスに保存。FT 時（`--fine_tune True`）には無視。
+    - `--save_best_head_model_path <path>`: head-only 学習**終了後**、ベスト重みをロードしたうえで完全モデル（`.keras`）をこのパスに保存。FT 時には無視。
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`

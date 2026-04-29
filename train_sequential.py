@@ -26,6 +26,8 @@ BEST_PARAMS_FILE = "outputs/best_train_params.json"
 # Phase 0（head-only）のベスト重みを保存するパス。FT 側の head carryover で初期値として使う。
 BEST_HEAD_WEIGHTS_DIR = "outputs/best_head_weights"
 BEST_HEAD_WEIGHTS_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head.weights.h5")
+# Step 3.9: head-only の完全モデル（FT 用 .h5 とは別ファイル。推論・検証用）
+BEST_HEAD_MODEL_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head_only.keras")
 os.makedirs(BEST_HEAD_WEIGHTS_DIR, exist_ok=True)
 
 if not os.path.exists(PYTHON_EXEC): PYTHON_EXEC = "python"
@@ -381,11 +383,13 @@ def train_and_save_best_head_weights(current_params, weights_path):
     # 念のため既存重み load は無効化（head-only の再学習時に自分自身を上書きしないため）
     params['init_weights_path'] = ''
     params['save_best_head_weights_path'] = weights_path
+    params['save_best_head_model_path'] = BEST_HEAD_MODEL_PATH
 
     logger.info(f"\n{'='*50}")
     logger.info(f"Saving Best Head Weights (epochs={params['epochs']})")
     logger.info(f"  learning_rate = {params.get('learning_rate'):.8f}")
     logger.info(f"  weights_path  = {weights_path}")
+    logger.info(f"  model_path    = {BEST_HEAD_MODEL_PATH}")
     logger.info(f"{'='*50}")
 
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
@@ -420,6 +424,10 @@ def train_and_save_best_head_weights(current_params, weights_path):
         logger.info(f"Best head weights saved: {weights_path} (score={score:.4f})")
     else:
         logger.warning(f"Best head weights file was NOT created: {weights_path}")
+    if os.path.exists(BEST_HEAD_MODEL_PATH):
+        logger.info(f"Best head-only model saved: {BEST_HEAD_MODEL_PATH}")
+    else:
+        logger.warning(f"Best head-only model was NOT created: {BEST_HEAD_MODEL_PATH}")
     return score
 
 
@@ -872,6 +880,14 @@ def main():
         logger.info(f"Best-of-N model -> {_bon_dst} (4.7 前に保存; 4.7 は採用 LR/スコアの探索のみ)")
 
     # --- Step 4.7: 勝ち seed 固定 + FT LR を target epoch 帯 [10,15] で **一回** calibrate（LR を initial に戻さず一気通貫）
+    # 4.7 前に train 最適化キャッシュを消す（FT 確定後のパラメータと古いキャッシュの不一致を避ける）
+    if os.path.exists(CACHE_FILE):
+        try:
+            os.remove(CACHE_FILE)
+            logger.info(f"Step 4.7: removed train opt cache: {CACHE_FILE}")
+        except OSError as e:
+            logger.warning(f"Step 4.7: could not remove {CACHE_FILE}: {e}")
+
     current_params['seed'] = best_seed
     logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
     final_lr, final_ft_score = search_ft_lr_by_targets(
