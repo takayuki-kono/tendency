@@ -242,10 +242,11 @@
 - **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
 - **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。あわせて同一ベスト重みをロードした **完全モデル**を `outputs/best_head_weights/best_head_only.keras` に別保存する（推論・検証用。FT の head carryover は従来どおり `.weights.h5` のみ使用）。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
-- **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。
-- **Step 4 / 4.5** — `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
-- **Best-of-N（先）** — 複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。直後、**4.7 の探索で `model_seed{seed}.keras` が上書きされる前に** `best_sequential_model.keras` へ **Best-of-N 時点の**重みをコピー（**重み＝4.5 時点 LR、JSON の `learning_rate_ft`＝4.7 採用 LR**と必ずしも一致しない点に注意）。
-- **Step 4.7** — `seed` 固定のまま `search_ft_lr_by_targets` で **target epoch 帯 `[min(targets), max(targets)]`（既定 10〜15）に対し `calibrate_base_lr` を 1 回だけ**実行し、**最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定（旧: 10..15 を各 `target_best_epoch=t` で別キャリブし毎回 `initial_lr` に戻していた）。追加の**最終 `run_trial` 1 本は行わない**。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。**実行直前に `outputs/cache/train_opt_cache.json` を削除**し、`run_trial` の古いキャッシュヒットを避ける。
+- **Step 3.5: FT LR Calibration** — `init_weights_path` に Step 3.9 の保存ファイルを設定。保存に成功している場合は `warmup_lr=0` / `warmup_epochs=0` として warmup フェーズをスキップし、head carryover された初期重みから直接 FT に入る（保存失敗時のみ従来の warmup にフォールバック）。終了時の採用スコア（`FINAL_VAL_ACCURACY`）は **直前の Step 3.9 の head-only スコア**と比較され、**3.9 の方が高い**場合は以降 **head-only 仕上げ**に切り替わる（下記）。
+- **分岐: Step 3.9 > Step 3.5（FT キャリブ）のとき** — **Step 4 / 4.5 / Step 4.7 をスキップ**。`fine_tune=False`・`learning_rate=head_lr`・`init_weights_path=best_head.weights.h5`（無ければ WARNING）で **Best-of-N のみ**（各 run に `--export_model_path=outputs/models/model_seed{seed}.keras`）。採用 seed のモデルを `best_sequential_model.keras` にコピー。`outputs/best_train_params.json` に `finish_mode=head_only`、`score_step_3_9_head` / `score_step_3_5_ft_calib` を記録。
+- **Step 4 / 4.5** — **上記分岐で head-only 仕上げの場合はスキップ。** それ以外（FT の方が良い or 同点）では、従来どおり `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
+- **Best-of-N（先）** — **head-only 仕上げ**のときは複数 seed で **head-only**（上記）。**FT 継続**のときは複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。直後、**FT かつ 4.7 実行時のみ**、**4.7 の探索で `model_seed{seed}.keras` が上書きされる前に** `best_sequential_model.keras` へ **Best-of-N 時点の**重みをコピー（**重み＝4.5 時点 LR、JSON の `learning_rate_ft`＝4.7 採用 LR**と必ずしも一致しない点に注意）。
+- **Step 4.7** — **head-only 仕上げのときはスキップ。** **FT 継続**のとき、`seed` 固定のまま `search_ft_lr_by_targets` で **target epoch 帯 `[min(targets), max(targets)]`（既定 10〜15）に対し `calibrate_base_lr` を 1 回だけ**実行し、**最良 Val の LR** と **採用スコア**（`final_ft_score`）を確定（旧: 10..15 を各 `target_best_epoch=t` で別キャリブし毎回 `initial_lr` に戻していた）。追加の**最終 `run_trial` 1 本は行わない**。Best-of-N スコア（pre-4.7 LR）と 4.7 最良はログで併記。**実行直前に `outputs/cache/train_opt_cache.json` を削除**し、`run_trial` の古いキャッシュヒットを避ける。
 - **掃除** — `model_seed{42..44}.keras` を削除。
 
 ### Head carryover に使う weights ファイル
@@ -257,6 +258,7 @@
     - `--init_weights_path <path>`: 指定された .weights.h5 をロード（by_name, skip_mismatch）。存在しなければ WARNING で継続。
     - `--save_best_head_weights_path <path>`: head-only 学習中のみ、ベスト重みをこのパスに保存。FT 時（`--fine_tune True`）には無視。
     - `--save_best_head_model_path <path>`: head-only 学習**終了後**、ベスト重みをロードしたうえで完全モデル（`.keras`）をこのパスに保存。FT 時には無視。
+    - `--export_model_path <path>`: head-only でも **完全モデル**を指定パスへ保存（`train_sequential` の head-only 仕上げ Best-of-N で使用）。FT 時は従来どおり `fine_tune` 側の `model_seed{seed}.keras` 保存が優先され、本引数は通常未使用。
 
 ### ラベル定義
 - **ソース**: `components/train_for_filter_search.py`

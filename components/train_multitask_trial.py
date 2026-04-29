@@ -587,6 +587,8 @@ def main():
     parser.add_argument('--init_weights_path', type=str, default='')
     parser.add_argument('--save_best_head_weights_path', type=str, default='')
     parser.add_argument('--save_best_head_model_path', type=str, default='')
+    # train_sequential の head-only 仕上げパス: Best-of-N 用に .keras を任意パスへ保存（FT 時は従来どおり別経路）
+    parser.add_argument('--export_model_path', type=str, default='')
 
     args = parser.parse_args()
     
@@ -1115,6 +1117,15 @@ def main():
         os.makedirs('outputs/models', exist_ok=True)
         model.save(save_path)
         logger.info(f"Fine-tuned model saved to {save_path}")
+    elif args.export_model_path:
+        try:
+            _ed = os.path.dirname(args.export_model_path)
+            if _ed:
+                os.makedirs(_ed, exist_ok=True)
+            model.save(args.export_model_path)
+            logger.info(f"Exported model (head-only / sequential) to {args.export_model_path}")
+        except Exception as e:
+            logger.warning(f"export_model_path save failed: {e}")
 
     # 最終結果出力
     # 上記ロジックで final_val_acc が計算されている場合がある

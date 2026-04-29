@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 import re
@@ -787,6 +788,9 @@ def main():
     logger.info(f"Best Params before FT: {current_params}")
     logger.info("="*50)
 
+    N_FINAL_RUNS = 3
+    FINAL_EPOCHS = 20
+
     # --- Step 3.9: Best Head Weights 再学習＆保存（FT の head carryover 用） ---
     # これまで Step 3 の best params は保存されても、その重み自体は破棄されていたため、
     # FT の warmup で head を再初期化 → 精度低下という問題があった。
@@ -797,7 +801,7 @@ def main():
     head_save_params['epochs'] = 20
     # Step1/1.2 で確定した head LR を使う（learning_rate_head がキャリブ済み値）
     head_save_params['learning_rate'] = head_lr
-    train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
+    score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
 
     # --- Step 3.5: Fine-Tuning LR Calibration ---
     # FT本番: Head の重みは Step 3.9 で保存した best_head_weights をロードして引き継ぐ（head carryover）。
@@ -824,78 +828,131 @@ def main():
     
     logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
     ft_initial_lr = _get_ft_lr_from_best(prev_best, default=current_params['learning_rate'])
-    ft_lr, _ = calibrate_base_lr(
+    ft_lr, score_3_5 = calibrate_base_lr(
         current_params, initial_lr=ft_initial_lr,
         cal_epochs=20, target_best_epoch=13
     )
     current_params['learning_rate'] = ft_lr
     current_params['learning_rate_ft'] = ft_lr
-    
-    # --- Step 4: Unfreeze Layers Optimization ---
-    best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
-    current_params['unfreeze_layers'] = best_unfreeze
-    
-    # --- Step 4.5: FT LR Re-calibration (unfreeze_layers確定後) ---
-    if best_unfreeze != 60:
-        logger.info(f"\n>>> Step 4.5: FT LR Re-calibration (unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<")
-        ft_lr2, _ = calibrate_base_lr(
-            current_params, initial_lr=current_params['learning_rate'],
-            cal_epochs=20, target_best_epoch=13
-        )
-        current_params['learning_rate'] = ft_lr2
-        current_params['learning_rate_ft'] = ft_lr2
-    else:
-        logger.info(f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<")
 
-    # --- Final: Best-of-N Runs (seed 先: Step 4.7 より前) ---
-    N_FINAL_RUNS = 3
-    FINAL_EPOCHS = 20
+    head_finish = score_3_9 > score_3_5
+    logger.info(
+        f"\n{'='*50}\n"
+        f"Step 3.9 (head-only) FINAL_VAL={score_3_9:.4f} vs Step 3.5 (FT LR calib)={score_3_5:.4f}\n"
+        f"-> {'HEAD-ONLY finish: skip FT Steps 4–4.7, brush-up with head Best-of-N' if head_finish else 'FT pipeline: Steps 4–4.7 as usual'}\n"
+        f"{'='*50}"
+    )
+
+    if head_finish:
+        current_params['fine_tune'] = 'False'
+        current_params['learning_rate'] = head_lr
+        current_params['learning_rate_ft'] = float(head_lr)
+        current_params['epochs'] = FINAL_EPOCHS
+        if os.path.exists(BEST_HEAD_WEIGHTS_PATH):
+            current_params['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
+            current_params['warmup_lr'] = 0.0
+            current_params['warmup_epochs'] = 0
+        else:
+            current_params['init_weights_path'] = ''
+            current_params['warmup_lr'] = head_lr
+            current_params['warmup_epochs'] = 5
+            logger.warning(
+                "head_finish: best_head.weights.h5 missing — brush-up runs without carryover"
+            )
+        logger.info(
+            "\n>>> Step 4 & 4.5: skipped (head-only finish — unfreeze / FT 再キャリブ不要) <<<"
+        )
+    else:
+        # --- Step 4: Unfreeze Layers Optimization ---
+        best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
+        current_params['unfreeze_layers'] = best_unfreeze
+
+        # --- Step 4.5: FT LR Re-calibration (unfreeze_layers確定後) ---
+        if best_unfreeze != 60:
+            logger.info(
+                f"\n>>> Step 4.5: FT LR Re-calibration "
+                f"(unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<"
+            )
+            ft_lr2, _ = calibrate_base_lr(
+                current_params, initial_lr=current_params['learning_rate'],
+                cal_epochs=20, target_best_epoch=13
+            )
+            current_params['learning_rate'] = ft_lr2
+            current_params['learning_rate_ft'] = ft_lr2
+        else:
+            logger.info(
+                f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<"
+            )
+
+    # --- Final: Best-of-N（FT: seed 選定→4.7 / head-only: Step3.9 からのブラッシュアップ） ---
     logger.info(f"\n{'='*50}")
-    logger.info(f"Final: Best-of-{N_FINAL_RUNS} runs (epochs={FINAL_EPOCHS}, LR=Step4.5 まで) — seed 選定")
+    if head_finish:
+        logger.info(
+            f"Final: Best-of-{N_FINAL_RUNS} head-only brush-up "
+            f"(epochs={FINAL_EPOCHS}, LR=head_lr, init=Step3.9 weights)"
+        )
+    else:
+        logger.info(
+            f"Final: Best-of-{N_FINAL_RUNS} runs (epochs={FINAL_EPOCHS}, LR=Step4.5 まで) — seed 選定"
+        )
     logger.info(f"{'='*50}")
 
     best_bon_score = -1.0
     best_seed = 42
 
-    bon_params = current_params.copy()
-    bon_params['epochs'] = FINAL_EPOCHS
-
     for run_idx in range(N_FINAL_RUNS):
         seed = 42 + run_idx
+        bon_params = current_params.copy()
+        bon_params['epochs'] = FINAL_EPOCHS
         bon_params['seed'] = seed
+        if head_finish:
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            bon_params['export_model_path'] = os.path.join(MODEL_DIR, f"model_seed{seed}.keras")
         score = run_trial(bon_params)
         logger.info(f"  Best-of-N #{run_idx+1} (seed={seed}): Score={score:.4f}")
         if score > best_bon_score:
             best_bon_score = score
             best_seed = seed
 
-    logger.info(f"Best-of-N: seed={best_seed}, Score={best_bon_score:.4f} (LR=pre-4.7)")
+    if head_finish:
+        logger.info(
+            f"Best-of-N (head-only): seed={best_seed}, Score={best_bon_score:.4f} (LR=head_lr)"
+        )
+    else:
+        logger.info(f"Best-of-N: seed={best_seed}, Score={best_bon_score:.4f} (LR=pre-4.7)")
 
-    # 4.7 が同じ model_seed{seed} を上書きする前に、Best-of-N 時点の重みを最終名で退避
-    import shutil
     _bon_src = os.path.join(MODEL_DIR, f"model_seed{best_seed}.keras")
     _bon_dst = os.path.join(MODEL_DIR, "best_sequential_model.keras")
     if os.path.exists(_bon_src):
         shutil.copy2(_bon_src, _bon_dst)
-        logger.info(f"Best-of-N model -> {_bon_dst} (4.7 前に保存; 4.7 は採用 LR/スコアの探索のみ)")
+        if head_finish:
+            logger.info(f"Best-of-N head-only model -> {_bon_dst}")
+        else:
+            logger.info(
+                f"Best-of-N model -> {_bon_dst} (4.7 前に保存; 4.7 は採用 LR/スコアの探索のみ)"
+            )
 
-    # --- Step 4.7: 勝ち seed 固定 + FT LR を target epoch 帯 [10,15] で **一回** calibrate（LR を initial に戻さず一気通貫）
-    # 4.7 前に train 最適化キャッシュを消す（FT 確定後のパラメータと古いキャッシュの不一致を避ける）
-    if os.path.exists(CACHE_FILE):
-        try:
-            os.remove(CACHE_FILE)
-            logger.info(f"Step 4.7: removed train opt cache: {CACHE_FILE}")
-        except OSError as e:
-            logger.warning(f"Step 4.7: could not remove {CACHE_FILE}: {e}")
+    if head_finish:
+        logger.info("\n>>> Step 4.7: skipped (head-only finish — FT LR 帯探索は不要) <<<")
+        final_lr = float(head_lr)
+        final_report_score = best_bon_score
+    else:
+        if os.path.exists(CACHE_FILE):
+            try:
+                os.remove(CACHE_FILE)
+                logger.info(f"Step 4.7: removed train opt cache: {CACHE_FILE}")
+            except OSError as e:
+                logger.warning(f"Step 4.7: could not remove {CACHE_FILE}: {e}")
 
-    current_params['seed'] = best_seed
-    logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
-    final_lr, final_ft_score = search_ft_lr_by_targets(
-        current_params, initial_lr=current_params['learning_rate'],
-        targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
-    )
-    current_params['learning_rate'] = final_lr
-    current_params['learning_rate_ft'] = final_lr
+        current_params['seed'] = best_seed
+        logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
+        final_lr, final_ft_score = search_ft_lr_by_targets(
+            current_params, initial_lr=current_params['learning_rate'],
+            targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
+        )
+        current_params['learning_rate'] = final_lr
+        current_params['learning_rate_ft'] = final_lr
+        final_report_score = final_ft_score
 
     for run_idx in range(N_FINAL_RUNS):
         s = 42 + run_idx
@@ -908,21 +965,36 @@ def main():
 
     logger.info(f"\n{'='*50}")
     logger.info("ALL PROCESSES COMPLETE")
-    logger.info(
-        f"best-of-N (pre-4.7 LR): seed={best_seed}, Score={best_bon_score:.4f} | "
-        f"Step4.7 best (FT LR band [10,15] single calibrate): Score={final_ft_score:.4f}, LR={final_lr:.8g}"
-    )
+    if head_finish:
+        logger.info(
+            f"finish=head_only | Step3.9={score_3_9:.4f} vs Step3.5(FT cal)={score_3_5:.4f} | "
+            f"best-of-N: seed={best_seed}, Score={best_bon_score:.4f}, LR={final_lr:.8g}"
+        )
+    else:
+        logger.info(
+            f"finish=ft | best-of-N (pre-4.7 LR): seed={best_seed}, Score={best_bon_score:.4f} | "
+            f"Step4.7 best (FT LR band [10,15]): Score={final_report_score:.4f}, LR={final_lr:.8g}"
+        )
     logger.info(f"{'='*50}")
 
     # Save Best Params (ベストseedを含める)
     best_params = current_params.copy()
     best_params['seed'] = best_seed
     best_params['epochs'] = FINAL_EPOCHS
+    best_params['finish_mode'] = 'head_only' if head_finish else 'fine_tune'
+    best_params['score_step_3_9_head'] = float(score_3_9)
+    best_params['score_step_3_5_ft_calib'] = float(score_3_5)
     # 互換: learning_rate はFT側として残す。head/ft は明示キーで保存する。
     # headなし側は learning_rate_nohead を正とし、互換で learning_rate_head も併記する
-    best_params['learning_rate_nohead'] = float(best_params.get('learning_rate_nohead', best_params.get('learning_rate_head', head_lr)))
-    best_params['learning_rate_head'] = float(best_params.get('learning_rate_head', best_params['learning_rate_nohead']))
-    best_params['learning_rate_ft'] = float(best_params.get('learning_rate_ft', best_params.get('learning_rate', final_lr)))
+    best_params['learning_rate_nohead'] = float(
+        best_params.get('learning_rate_nohead', best_params.get('learning_rate_head', head_lr))
+    )
+    best_params['learning_rate_head'] = float(
+        best_params.get('learning_rate_head', best_params['learning_rate_nohead'])
+    )
+    best_params['learning_rate_ft'] = float(
+        best_params.get('learning_rate_ft', best_params.get('learning_rate', final_lr))
+    )
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
         json.dump(best_params, f, indent=4)
     logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")
@@ -930,7 +1002,7 @@ def main():
     # 結果を自動記録
     from components.result_logger import log_result
     log_result("train_sequential", {
-        "best_score": final_ft_score,
+        "best_score": final_report_score,
         "best_params": best_params,
     })
 
