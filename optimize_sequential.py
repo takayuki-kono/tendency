@@ -66,7 +66,8 @@ logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
-    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_LAST_ACCU_EPS,
+    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_CALIBRATION_INITIAL,
+    LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
 
@@ -217,18 +218,6 @@ def load_best_train_params():
     else:
         logger.info("Best train params not found. Using defaults.")
     return {}
-
-def _get_head_lr_from_best(best_params: dict, default: float) -> float:
-    # optimize_sequential は fine_tune=False（head-only）の評価が中心。
-    # head のLRと本体(backbone/nohead)のLRは乖離する想定のため、head 側のみ参照する。
-    # learning_rate_nohead は body 側の LR で head calibration では使わない。
-    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
-        if k in best_params:
-            try:
-                return float(best_params[k])
-            except Exception:
-                pass
-    return float(default)
 
 def save_best_train_params(params: dict) -> None:
     """最適化された学習パラメータを書き戻す（存在しない場合は新規作成）。"""
@@ -694,8 +683,11 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             adjusted_lr = CALIBRATED_BASE_LR
             logger.info(f"LR (Calibrated): {adjusted_lr:.8f}")
         else:
-            adjusted_lr = _get_head_lr_from_best(best_params, default=0.0001)
-            logger.info(f"LR (Fallback): {adjusted_lr:.8f}")
+            adjusted_lr = LR_CALIBRATION_INITIAL
+            logger.info(
+                f"LR (Fallback, CALIBRATED_BASE_LR unset): {adjusted_lr:.8f} "
+                f"(lr_adjustment.LR_CALIBRATION_INITIAL)"
+            )
         
         cmd_train.extend(["--learning_rate", str(adjusted_lr)])
         
@@ -1063,11 +1055,14 @@ def main():
     subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
 
     best_params = load_best_train_params()
-    initial_lr = _get_head_lr_from_best(best_params, default=0.0005)
+    initial_lr = LR_CALIBRATION_INITIAL
 
     logger.info(
         f"\n>>> Step 0: Per-model LR calibration ({len(MODEL_NAME_CANDIDATES)} candidates, "
         f"target_best_epoch=13) <<<"
+    )
+    logger.info(
+        f"  calibrate initial_lr={initial_lr:g} (fixed, JSON の過去 LR は参照しない)"
     )
     model_calib_rows = []
     for m in MODEL_NAME_CANDIDATES:
@@ -1087,13 +1082,15 @@ def main():
         f"Step 0 selected: best_model={best_model}, "
         f"CALIBRATED_BASE_LR={CALIBRATED_BASE_LR:.8f}, score={best_model_score:.4f}"
     )
-    # head LR は勝ちモデルのキャリブ結果。body/FT は触らない。
+    # 勝ちモデルの head キャリブ結果を learning_rate のみ保存（旧 head/ft/nohead キーは削除）。
     try:
-        best_params["learning_rate_head"] = float(CALIBRATED_BASE_LR)
+        best_params["learning_rate"] = float(CALIBRATED_BASE_LR)
         best_params["model_name"] = best_model
+        for _k in ("learning_rate_head", "learning_rate_ft", "learning_rate_nohead"):
+            best_params.pop(_k, None)
         save_best_train_params(best_params)
         logger.info(
-            f"Updated {BEST_TRAIN_PARAMS_FILE} learning_rate_head + model_name -> "
+            f"Updated {BEST_TRAIN_PARAMS_FILE} learning_rate + model_name -> "
             f"LR={CALIBRATED_BASE_LR:.8f}, {best_model}"
         )
     except Exception as e:

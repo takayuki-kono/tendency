@@ -48,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
-    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_LAST_ACCU_EPS,
+    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_CALIBRATION_INITIAL,
+    LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
@@ -95,38 +96,6 @@ def _log_subprocess_fail(tag: str, returncode: int, lines: list) -> None:
     logger.error(
         f"{tag} 異常終了 (returncode={returncode})。子プロセス出力末尾(最大8000字):\n{tail}"
     )
-
-
-def load_best_params():
-    """前回の最終採用パラメータ（存在すれば）を読む。"""
-    if os.path.exists(BEST_PARAMS_FILE):
-        try:
-            with open(BEST_PARAMS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-        except Exception as e:
-            logger.warning(f"Failed to load {BEST_PARAMS_FILE}: {e}")
-    return {}
-
-def _get_head_lr_from_best(best_params: dict, default: float) -> float:
-    # head 側LR（= fine_tune=False 時、または head-only フェーズ用）を引き継ぐ。
-    # body (learning_rate_nohead) や FT (learning_rate_ft) は別条件で乖離するため参照しない。
-    # 互換として warmup_lr（旧 FT 用 warmup）/ learning_rate（最古形式）も fallback に残す。
-    for k in ("learning_rate_head", "warmup_lr", "learning_rate"):
-        if k in best_params:
-            try:
-                return float(best_params[k])
-            except Exception:
-                pass
-    return float(default)
-
-def _get_ft_lr_from_best(best_params: dict, default: float) -> float:
-    for k in ("learning_rate_ft", "learning_rate"):
-        if k in best_params:
-            try:
-                return float(best_params[k])
-            except Exception:
-                pass
-    return float(default)
 
 
 def count_files(directory):
@@ -646,8 +615,6 @@ def search_ft_lr_by_targets(current_params, initial_lr, targets=(10, 11, 12, 13,
 
 def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
-    
-    prev_best = load_best_params() or {}
     # Step 1 の LR キャリブは常に B0 前提。Step 1.1 で B0/S を毎回確定（フィルタ確定後のデータ向け）。
 
     # 初期パラメータ (デフォルト値)
@@ -673,18 +640,17 @@ def main():
     # head-only: optimize_param / shift で同点が出た (param, 同点候補) を蓄積（Step1.1・1.5・2/3 すべて渡す）→3.8
     head_only_tie_log: list = []
 
-    # --- Step 1: Learning Rate Calibration（B0 固定。1.1 前の暫定 head LR） ---
-    # LR_TARGET_EPOCH(13)でベストになるLRをキャリブレーション
+    # --- Step 1: Learning Rate Calibration（B0 固定。1.1 前の head LR） ---
+    # LR_TARGET_EPOCH(13)。キャリブ探索は常に LR_CALIBRATION_INITIAL から開始（JSON の過去 LR は使わない）。
     logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
-    head_initial_lr = _get_head_lr_from_best(prev_best, default=5e-4)
+    logger.info(f"  calibrate initial_lr={LR_CALIBRATION_INITIAL:g} (fixed, lr_adjustment.LR_CALIBRATION_INITIAL)")
     calibrated_lr, _ = calibrate_base_lr(
-        current_params, initial_lr=head_initial_lr,
+        current_params, initial_lr=LR_CALIBRATION_INITIAL,
         cal_epochs=20, target_best_epoch=13
     )
     logger.info(f"Calibrated Head LR={calibrated_lr:.8f}")
     head_lr = calibrated_lr
     current_params['learning_rate'] = head_lr
-    current_params['learning_rate_head'] = head_lr
     # --- Step 1.1: Model Architecture (キャリブレーション済みLRで B0/S 比較) ---
     # 毎回 optimize_param（best_train_params の model_name ではスキップしない）
     best_model, _ = optimize_param(
@@ -700,15 +666,11 @@ def main():
             f"(model_name={best_model}, Step1 時は {LRCALIB_BASE_BACKBONE} のため再調整) <<<"
         )
         head_lr2, _ = calibrate_base_lr(
-            current_params, initial_lr=head_lr,
+            current_params, initial_lr=LR_CALIBRATION_INITIAL,
             cal_epochs=20, target_best_epoch=13
         )
         head_lr = head_lr2
         current_params['learning_rate'] = head_lr
-        current_params['learning_rate_head'] = head_lr
-        # NOTE: head LR と body LR は別条件で乖離する想定のため、learning_rate_nohead は
-        # ここでは更新しない（head calibration の結果を body 側へミラーすると、後続の
-        # body/FT LR の引き継ぎが狂う）。
     else:
         logger.info(
             f"\n>>> Step 1.2: Skipped (model_name={best_model} = Step1 時と {LRCALIB_BASE_BACKBONE} 一致) <<<"
@@ -799,7 +761,7 @@ def main():
     head_save_params = current_params.copy()
     head_save_params['fine_tune'] = 'False'
     head_save_params['epochs'] = 20
-    # Step1/1.2 で確定した head LR を使う（learning_rate_head がキャリブ済み値）
+    # Step1/1.2 で確定した head LR を使う（current_params['learning_rate'] と同値）
     head_save_params['learning_rate'] = head_lr
     score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
 
@@ -827,13 +789,12 @@ def main():
         )
     
     logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
-    ft_initial_lr = _get_ft_lr_from_best(prev_best, default=current_params['learning_rate'])
+    logger.info(f"  calibrate initial_lr={LR_CALIBRATION_INITIAL:g}")
     ft_lr, score_3_5 = calibrate_base_lr(
-        current_params, initial_lr=ft_initial_lr,
+        current_params, initial_lr=LR_CALIBRATION_INITIAL,
         cal_epochs=20, target_best_epoch=13
     )
     current_params['learning_rate'] = ft_lr
-    current_params['learning_rate_ft'] = ft_lr
 
     head_finish = score_3_9 > score_3_5
     logger.info(
@@ -846,7 +807,6 @@ def main():
     if head_finish:
         current_params['fine_tune'] = 'False'
         current_params['learning_rate'] = head_lr
-        current_params['learning_rate_ft'] = float(head_lr)
         current_params['epochs'] = FINAL_EPOCHS
         if os.path.exists(BEST_HEAD_WEIGHTS_PATH):
             current_params['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
@@ -874,11 +834,10 @@ def main():
                 f"(unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<"
             )
             ft_lr2, _ = calibrate_base_lr(
-                current_params, initial_lr=current_params['learning_rate'],
+                current_params, initial_lr=LR_CALIBRATION_INITIAL,
                 cal_epochs=20, target_best_epoch=13
             )
             current_params['learning_rate'] = ft_lr2
-            current_params['learning_rate_ft'] = ft_lr2
         else:
             logger.info(
                 f"\n>>> Step 4.5: Skipped (unfreeze_layers=60 = キャリブレーション時と同値) <<<"
@@ -946,12 +905,12 @@ def main():
 
         current_params['seed'] = best_seed
         logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
+        logger.info(f"  calibrate initial_lr={LR_CALIBRATION_INITIAL:g}")
         final_lr, final_ft_score = search_ft_lr_by_targets(
-            current_params, initial_lr=current_params['learning_rate'],
+            current_params, initial_lr=LR_CALIBRATION_INITIAL,
             targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
         )
         current_params['learning_rate'] = final_lr
-        current_params['learning_rate_ft'] = final_lr
         final_report_score = final_ft_score
 
     for run_idx in range(N_FINAL_RUNS):
@@ -984,17 +943,10 @@ def main():
     best_params['finish_mode'] = 'head_only' if head_finish else 'fine_tune'
     best_params['score_step_3_9_head'] = float(score_3_9)
     best_params['score_step_3_5_ft_calib'] = float(score_3_5)
-    # 互換: learning_rate はFT側として残す。head/ft は明示キーで保存する。
-    # headなし側は learning_rate_nohead を正とし、互換で learning_rate_head も併記する
-    best_params['learning_rate_nohead'] = float(
-        best_params.get('learning_rate_nohead', best_params.get('learning_rate_head', head_lr))
-    )
-    best_params['learning_rate_head'] = float(
-        best_params.get('learning_rate_head', best_params['learning_rate_nohead'])
-    )
-    best_params['learning_rate_ft'] = float(
-        best_params.get('learning_rate_ft', best_params.get('learning_rate', final_lr))
-    )
+    # 保存する LR は learning_rate のみ（キャリブ結果・終端フェーズの採用値）。旧キーは削除。
+    for _k in ('learning_rate_head', 'learning_rate_ft', 'learning_rate_nohead'):
+        best_params.pop(_k, None)
+    best_params['learning_rate'] = float(final_lr)
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
         json.dump(best_params, f, indent=4)
     logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")
