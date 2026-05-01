@@ -59,6 +59,9 @@ from components.lr_adjustment import (
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
 
+# main() がセットする。run_trial は (model_name, data_file_count, head|ft) に整合した開始 LR をここから解決する。
+_LR_CALIB_STATE: dict = {'persisted_ctx': None, 'last_ctx': None}
+
 
 def _log_subprocess_line(line: str, tag: str = "[Train]") -> None:
     """子プロセスの 1 行を親ログへ。学習行に加え、重み取得の Downloading / 例外・エラー行も通す。"""
@@ -157,8 +160,22 @@ def run_trial(params):
     logger.info(f"{'='*50}")
 
     try:
-        # LR自動調整: 許容範囲外なら target で再調整（定数はモジュール共通）
-        current_lr = params.get('learning_rate', 1e-3)
+        # 開始 LR: params['learning_rate'] は「直前に確定したモデル用」が残りやすい（例: Step1.1 で model だけ差し替え）。
+        # model / データ枚数 / head|ft が last または persisted と一致するときだけ base_lr を引き継ぎ、異なれば resolve が 0.01 側へ寄せる。
+        mn = params.get('model_name')
+        mode = lr_calib_mode_from_fine_tune(params.get('fine_tune', 'False'))
+        n_fc = train_sequential_data_file_count()
+        start_lr, lr_resolve_note = resolve_calib_initial_lr(
+            mn, n_fc, mode,
+            last_ctx=_LR_CALIB_STATE.get('last_ctx'),
+            persisted_ctx=_LR_CALIB_STATE.get('persisted_ctx'),
+        )
+        logger.info(f"  run_trial start LR: {lr_resolve_note}")
+        logger.info(
+            f"  → using LR={start_lr:.8g} (model={mn}, data_file_count={n_fc}, mode={mode}); "
+            f"params['learning_rate']={params.get('learning_rate')} は参照しない"
+        )
+        current_lr = start_lr
         best_trial_score = -1.0
         best_trial_output = None
         training_epochs = int(params.get('epochs', 20))
@@ -626,7 +643,7 @@ def search_ft_lr_by_targets(current_params, initial_lr, targets=(10, 11, 12, 13,
 
 def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
-    # Step 1 の LR キャリブは常に B0 前提。Step 1.1 で B0/S を毎回確定（フィルタ確定後のデータ向け）。
+    # Step 1.1 でバックボーン確定 → Step 1.2 で確定 model の head LR をキャリブ（旧 Step1 の B0 先行キャリブは廃止）。
 
     persisted_calib_ctx = None
     if os.path.isfile(BEST_PARAMS_FILE):
@@ -636,15 +653,16 @@ def main():
             persisted_calib_ctx = parse_lr_calib_context(_bp_prev.get(LR_CALIB_CONTEXT_JSON_KEY))
         except Exception as e:
             logger.warning(f"Could not read prior {LR_CALIB_CONTEXT_JSON_KEY} from {BEST_PARAMS_FILE}: {e}")
-    calib_last_ctx_holder: dict = {'ctx': None}
+    _LR_CALIB_STATE['persisted_ctx'] = persisted_calib_ctx
+    _LR_CALIB_STATE['last_ctx'] = None
 
     def initial_lr_for_calibrate(model_name: str, fine_tune_val) -> float:
         n = train_sequential_data_file_count()
         mode = lr_calib_mode_from_fine_tune(fine_tune_val)
         lr, msg = resolve_calib_initial_lr(
             model_name, n, mode,
-            last_ctx=calib_last_ctx_holder['ctx'],
-            persisted_ctx=persisted_calib_ctx,
+            last_ctx=_LR_CALIB_STATE['last_ctx'],
+            persisted_ctx=_LR_CALIB_STATE['persisted_ctx'],
         )
         logger.info(f"  LR calib: {msg}")
         logger.info(
@@ -655,7 +673,7 @@ def main():
     def record_calibrate_context(model_name: str, fine_tune_val, calibrated_lr: float) -> None:
         n = train_sequential_data_file_count()
         mode = lr_calib_mode_from_fine_tune(fine_tune_val)
-        calib_last_ctx_holder['ctx'] = make_lr_calib_context(
+        _LR_CALIB_STATE['last_ctx'] = make_lr_calib_context(
             model_name, n, mode, calibrated_lr
         )
 
@@ -682,44 +700,27 @@ def main():
     # head-only: optimize_param / shift で同点が出た (param, 同点候補) を蓄積（Step1.1・1.5・2/3 すべて渡す）→3.8
     head_only_tie_log: list = []
 
-    # --- Step 1: Learning Rate Calibration（B0 固定。1.1 前の head LR） ---
-    # LR_TARGET_EPOCH(13)。model / データ数 / head|ft が前回保存と一致すれば保存 base_lr から、異なれば 0.01。
-    logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
-    _il1 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
-    calibrated_lr, _ = calibrate_base_lr(
-        current_params, initial_lr=_il1,
-        cal_epochs=20, target_best_epoch=13
-    )
-    record_calibrate_context(current_params['model_name'], current_params['fine_tune'], calibrated_lr)
-    logger.info(f"Calibrated Head LR={calibrated_lr:.8f}")
-    head_lr = calibrated_lr
-    current_params['learning_rate'] = head_lr
-    # --- Step 1.1: Model Architecture (キャリブレーション済みLRで B0/S 比較) ---
+    # --- Step 1.1: Model Architecture ---
+    # 各候補 model は run_trial 内で (model, data_count, head|ft) に応じた開始 LR を resolve（B0 の LR をそのまま流用しない）。
     # 毎回 optimize_param（best_train_params の model_name ではスキップしない）
     best_model, _ = optimize_param(
         'model_name', MODEL_NAME_CANDIDATES, current_params, head_only_tie_log
     )
     current_params['model_name'] = best_model
 
-    # --- Step 1.2: Head LR Re-calibration (B0 で Step1 したあと S が選ばれた場合のみ) ---
-    # Step1 は B0 基準のため、1.1 で S が選ばれた場合は S に合わせて LR を取り直す。
-    if best_model != LRCALIB_BASE_BACKBONE:
-        logger.info(
-            f"\n>>> Step 1.2: Head LR Re-calibration "
-            f"(model_name={best_model}, Step1 時は {LRCALIB_BASE_BACKBONE} のため再調整) <<<"
-        )
-        _il12 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
-        head_lr2, _ = calibrate_base_lr(
-            current_params, initial_lr=_il12,
-            cal_epochs=20, target_best_epoch=13
-        )
-        record_calibrate_context(current_params['model_name'], current_params['fine_tune'], head_lr2)
-        head_lr = head_lr2
-        current_params['learning_rate'] = head_lr
-    else:
-        logger.info(
-            f"\n>>> Step 1.2: Skipped (model_name={best_model} = Step1 時と {LRCALIB_BASE_BACKBONE} 一致) <<<"
-        )
+    # --- Step 1.2: Head LR calibration（1.1 で確定したバックボーン向け・常に実行） ---
+    logger.info(
+        f"\n>>> Step 1.2: Head LR Calibration "
+        f"(model_name={best_model}, target_best_epoch=13) <<<"
+    )
+    _il12 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
+    head_lr, _ = calibrate_base_lr(
+        current_params, initial_lr=_il12,
+        cal_epochs=20, target_best_epoch=13
+    )
+    record_calibrate_context(current_params['model_name'], current_params['fine_tune'], head_lr)
+    current_params['learning_rate'] = head_lr
+    logger.info(f"Calibrated head LR for {best_model}: {head_lr:.8f}")
 
     # --- Step 1.5: Weight Decay (Optimizer Selection) ---
     # 0.0=Adam, >0=AdamW
