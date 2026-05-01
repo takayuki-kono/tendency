@@ -48,9 +48,14 @@ logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
-    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_CALIBRATION_INITIAL,
+    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
+    LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
+    lr_calib_mode_from_fine_tune,
+    parse_lr_calib_context,
+    resolve_calib_initial_lr,
+    make_lr_calib_context,
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
 
@@ -105,6 +110,12 @@ def count_files(directory):
     for root, _, files in os.walk(directory):
         count += len(files)
     return count
+
+
+def train_sequential_data_file_count() -> int:
+    """LR キャリブ文脈・キャッシュキーと同じ: preprocessed_multitask/train のファイル数。"""
+    return count_files(DATA_SOURCE_DIR)
+
 
 def load_cache():
     if os.path.exists(CACHE_FILE):
@@ -617,6 +628,37 @@ def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
     # Step 1 の LR キャリブは常に B0 前提。Step 1.1 で B0/S を毎回確定（フィルタ確定後のデータ向け）。
 
+    persisted_calib_ctx = None
+    if os.path.isfile(BEST_PARAMS_FILE):
+        try:
+            with open(BEST_PARAMS_FILE, encoding='utf-8') as f:
+                _bp_prev = json.load(f)
+            persisted_calib_ctx = parse_lr_calib_context(_bp_prev.get(LR_CALIB_CONTEXT_JSON_KEY))
+        except Exception as e:
+            logger.warning(f"Could not read prior {LR_CALIB_CONTEXT_JSON_KEY} from {BEST_PARAMS_FILE}: {e}")
+    calib_last_ctx_holder: dict = {'ctx': None}
+
+    def initial_lr_for_calibrate(model_name: str, fine_tune_val) -> float:
+        n = train_sequential_data_file_count()
+        mode = lr_calib_mode_from_fine_tune(fine_tune_val)
+        lr, msg = resolve_calib_initial_lr(
+            model_name, n, mode,
+            last_ctx=calib_last_ctx_holder['ctx'],
+            persisted_ctx=persisted_calib_ctx,
+        )
+        logger.info(f"  LR calib: {msg}")
+        logger.info(
+            f"  → initial_lr={lr:.8g} (data_file_count={n}, mode={mode}, model={model_name})"
+        )
+        return lr
+
+    def record_calibrate_context(model_name: str, fine_tune_val, calibrated_lr: float) -> None:
+        n = train_sequential_data_file_count()
+        mode = lr_calib_mode_from_fine_tune(fine_tune_val)
+        calib_last_ctx_holder['ctx'] = make_lr_calib_context(
+            model_name, n, mode, calibrated_lr
+        )
+
     # 初期パラメータ (デフォルト値)
     current_params = {
         'model_name': LRCALIB_BASE_BACKBONE,
@@ -641,13 +683,14 @@ def main():
     head_only_tie_log: list = []
 
     # --- Step 1: Learning Rate Calibration（B0 固定。1.1 前の head LR） ---
-    # LR_TARGET_EPOCH(13)。キャリブ探索は常に LR_CALIBRATION_INITIAL から開始（JSON の過去 LR は使わない）。
+    # LR_TARGET_EPOCH(13)。model / データ数 / head|ft が前回保存と一致すれば保存 base_lr から、異なれば 0.01。
     logger.info("\n>>> Step 1: Base LR Calibration (Target Epoch 13) <<<")
-    logger.info(f"  calibrate initial_lr={LR_CALIBRATION_INITIAL:g} (fixed, lr_adjustment.LR_CALIBRATION_INITIAL)")
+    _il1 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
     calibrated_lr, _ = calibrate_base_lr(
-        current_params, initial_lr=LR_CALIBRATION_INITIAL,
+        current_params, initial_lr=_il1,
         cal_epochs=20, target_best_epoch=13
     )
+    record_calibrate_context(current_params['model_name'], current_params['fine_tune'], calibrated_lr)
     logger.info(f"Calibrated Head LR={calibrated_lr:.8f}")
     head_lr = calibrated_lr
     current_params['learning_rate'] = head_lr
@@ -665,10 +708,12 @@ def main():
             f"\n>>> Step 1.2: Head LR Re-calibration "
             f"(model_name={best_model}, Step1 時は {LRCALIB_BASE_BACKBONE} のため再調整) <<<"
         )
+        _il12 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
         head_lr2, _ = calibrate_base_lr(
-            current_params, initial_lr=LR_CALIBRATION_INITIAL,
+            current_params, initial_lr=_il12,
             cal_epochs=20, target_best_epoch=13
         )
+        record_calibrate_context(current_params['model_name'], current_params['fine_tune'], head_lr2)
         head_lr = head_lr2
         current_params['learning_rate'] = head_lr
     else:
@@ -789,11 +834,12 @@ def main():
         )
     
     logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
-    logger.info(f"  calibrate initial_lr={LR_CALIBRATION_INITIAL:g}")
+    _il35 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
     ft_lr, score_3_5 = calibrate_base_lr(
-        current_params, initial_lr=LR_CALIBRATION_INITIAL,
+        current_params, initial_lr=_il35,
         cal_epochs=20, target_best_epoch=13
     )
+    record_calibrate_context(current_params['model_name'], current_params['fine_tune'], ft_lr)
     current_params['learning_rate'] = ft_lr
 
     head_finish = score_3_9 > score_3_5
@@ -833,10 +879,12 @@ def main():
                 f"\n>>> Step 4.5: FT LR Re-calibration "
                 f"(unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<"
             )
+            _il45 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
             ft_lr2, _ = calibrate_base_lr(
-                current_params, initial_lr=LR_CALIBRATION_INITIAL,
+                current_params, initial_lr=_il45,
                 cal_epochs=20, target_best_epoch=13
             )
+            record_calibrate_context(current_params['model_name'], current_params['fine_tune'], ft_lr2)
             current_params['learning_rate'] = ft_lr2
         else:
             logger.info(
@@ -905,11 +953,12 @@ def main():
 
         current_params['seed'] = best_seed
         logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
-        logger.info(f"  calibrate initial_lr={LR_CALIBRATION_INITIAL:g}")
+        _il47 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
         final_lr, final_ft_score = search_ft_lr_by_targets(
-            current_params, initial_lr=LR_CALIBRATION_INITIAL,
+            current_params, initial_lr=_il47,
             targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
         )
+        record_calibrate_context(current_params['model_name'], current_params['fine_tune'], final_lr)
         current_params['learning_rate'] = final_lr
         final_report_score = final_ft_score
 
@@ -947,6 +996,13 @@ def main():
     for _k in ('learning_rate_head', 'learning_rate_ft', 'learning_rate_nohead'):
         best_params.pop(_k, None)
     best_params['learning_rate'] = float(final_lr)
+    _ctx_mode = 'head' if head_finish else 'ft'
+    best_params[LR_CALIB_CONTEXT_JSON_KEY] = make_lr_calib_context(
+        best_params.get('model_name', current_params['model_name']),
+        train_sequential_data_file_count(),
+        _ctx_mode,
+        final_lr,
+    )
     with open(BEST_PARAMS_FILE, 'w', encoding='utf-8') as f:
         json.dump(best_params, f, indent=4)
     logger.info(f"Best training params saved to {BEST_PARAMS_FILE}")

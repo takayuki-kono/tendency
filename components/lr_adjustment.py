@@ -6,8 +6,10 @@ LR_ACCEPTABLE_MAX = 15  # 許容範囲・ピーク後下降で終了する上限
 LR_MAX_ADJUSTMENTS = 6
 # calibrate_base_lr（optimize / train_sequential）の試行回数上限。run_trial の LR 再調整回数とは独立。
 LR_CALIBRATION_MAX_ITERATIONS = 10
-# calibrate_base_lr の探索開始 LR（モデル・データ量・head/FT は試行内で別条件。JSON の過去 LR は参照しない）
+# calibrate_base_lr の「新規」探索開始 LR（モデル・データ数・head/FT のいずれかが前回と異なるとき）
 LR_CALIBRATION_INITIAL = 0.01
+# best_train_params.json に保存する LR キャリブ文脈のキー（model / data_file_count / mode / base_lr）
+LR_CALIB_CONTEXT_JSON_KEY = "lr_calib_context"
 LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ以上で「last≠best」とみなす
 # 学習（optimizer / LR スケジューラ）に乗せる絶対域。極小 LR は .8f ログで 0 表示になり実質停止、
 # 極大は設定ミス時の数値破綻を防ぐ。再調整「比」クランプとは独立。
@@ -79,3 +81,80 @@ def lr_calibration_should_stop(best_epoch, last_epoch_accu, score):
     if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and last_epoch_accu < score:
         return (True, f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu < best (peaked then declined). Stopping calibration.")
     return (False, None)
+
+
+def lr_calib_mode_from_fine_tune(fine_tune_val) -> str:
+    """head-only → 'head'、fine_tune 有効 → 'ft'。"""
+    s = str(fine_tune_val).strip().lower()
+    return "ft" if s in ("true", "1", "yes") else "head"
+
+
+def parse_lr_calib_context(blob) -> dict | None:
+    """
+    JSON の lr_calib_context オブジェクトを検証して正規化 dict にする。
+    戻り値: {"model_name", "data_file_count", "mode", "base_lr"} または None。
+    """
+    if not blob or not isinstance(blob, dict):
+        return None
+    try:
+        mn = blob.get("model_name")
+        dc = int(blob["data_file_count"])
+        mode = blob.get("mode")
+        blr = float(blob["base_lr"])
+        if mn is None or mode not in ("head", "ft"):
+            return None
+        return {
+            "model_name": str(mn),
+            "data_file_count": dc,
+            "mode": str(mode),
+            "base_lr": clip_learning_rate_for_training(blr),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def lr_calib_triple_match(ctx: dict, model_name: str, data_file_count: int, mode: str) -> bool:
+    if not ctx:
+        return False
+    return (
+        str(ctx.get("model_name")) == str(model_name)
+        and int(ctx["data_file_count"]) == int(data_file_count)
+        and str(ctx.get("mode")) == str(mode)
+    )
+
+
+def resolve_calib_initial_lr(
+    model_name: str,
+    data_file_count: int,
+    mode: str,
+    *,
+    last_ctx: dict | None,
+    persisted_ctx: dict | None,
+    fresh_initial: float = LR_CALIBRATION_INITIAL,
+) -> tuple[float, str]:
+    """
+    calibrate_base_lr の initial_lr を決める。
+    - 同一実行内の直前キャリブと (model, data_file_count, mode) が一致 → その base_lr から再キャリブ
+    - そうでなければディスク上の lr_calib_context と一致 → 保存 base_lr から再キャリブ
+    - いずれでもなければ fresh_initial（通常 0.01）
+    """
+    mode = str(mode)
+    if last_ctx is not None and lr_calib_triple_match(last_ctx, model_name, data_file_count, mode):
+        lr = clip_learning_rate_for_training(float(last_ctx["base_lr"]))
+        return lr, "同一ラン直前のキャリブと model/data_count/head|ft 一致 → 引き継ぎ base_lr でキャリブ"
+    if persisted_ctx is not None and lr_calib_triple_match(
+        persisted_ctx, model_name, data_file_count, mode
+    ):
+        lr = clip_learning_rate_for_training(float(persisted_ctx["base_lr"]))
+        return lr, "保存 lr_calib_context と model/data_count/head|ft 一致 → 保存 base_lr でキャリブ"
+    lr0 = clip_learning_rate_for_training(float(fresh_initial))
+    return lr0, "model・データ数・head|ft のいずれかが不一致または初回 → initial_lr=新規探索（既定0.01）でキャリブ"
+
+
+def make_lr_calib_context(model_name: str, data_file_count: int, mode: str, base_lr: float) -> dict:
+    return {
+        "model_name": str(model_name),
+        "data_file_count": int(data_file_count),
+        "mode": str(mode),
+        "base_lr": float(clip_learning_rate_for_training(base_lr)),
+    }

@@ -50,7 +50,7 @@
 - **Step 0（モデル＋head LR）**:
     - `MODEL_NAME_CANDIDATES`（`model_architecture.py`）の**各** `model_name` に対し、フィルタなし前処理の上で **`calibrate_base_lr`（`target_best_epoch=13` 他、他軸と同ロジック）**を実行し、キャリブ終了時の Val スコアが最大のモデルを採択。
     - **`calibrate_base_lr` の試行回数上限**は `LR_CALIBRATION_MAX_ITERATIONS`（既定 **10**、`components/lr_adjustment.py`）。`run_trial` 内の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS`（最大 7 回）で別定数。
-    - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / **`learning_rate`**（採択モデルの head キャリブ結果）を更新。`calibrate_base_lr` の **`initial_lr` は常に `LR_CALIBRATION_INITIAL`（既定 `0.01`）固定**で、JSON の過去 LR は参照しない。
+    - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / **`learning_rate`** / **`lr_calib_context`**（head・train+val 枚数・`base_lr`）を更新。Step 0 の各モデルキャリブでは **保存 `lr_calib_context` と（モデル・枚数・head）が一致する候補だけ** 保存 `base_lr` を `initial_lr` に、それ以外は `LR_CALIBRATION_INITIAL`（0.01）。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
     - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) 同範囲 **かつ** last_epoch_accu < trial_score（ピーク後下降）→ 再調整せず終了 (3) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
@@ -99,7 +99,8 @@
      - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。
      - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
      - 収束判定: `|new_lr - current_lr| / current_lr < 0.02` なら以降の trial を打ち切り、最良候補を採用。
-  - **LR の一本化（2026-04-25）**: `best_train_params.json` に記録する教師あり LR は **`learning_rate` のみ**（終端フェーズで実際に使う値）。head-only と FT で最適 LR は異なるが、JSON に複数スロットで保持しない。各 `calibrate_base_lr` の探索開始は **`LR_CALIBRATION_INITIAL`（既定 `0.01`）固定**（モデル・データ量・head/FT は試行内で別条件）。旧キー `learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead` は保存時に削除され、読み込み互換のため `_skip_keys` でサブプロセスに転送しないだけ残す。
+  - **LR の一本化（2026-04-25）**: `best_train_params.json` に記録する教師あり LR は **`learning_rate` のみ**（終端フェーズで実際に使う値）。旧キー `learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead` は保存時に削除され、読み込み互換のため `_skip_keys` でサブプロセスに転送しないだけ残す。
+  - **`lr_calib_context` と `calibrate_base_lr` の initial_lr（2026-04-25）**: JSON に **`lr_calib_context`**（`model_name`, `data_file_count`, `mode`=`head`|`ft`, `base_lr`）を保存する。**いずれかが変われば**（モデル・データ枚数・head-only vs FT）次回の `calibrate_base_lr` は **`LR_CALIBRATION_INITIAL`（0.01）から**。**三つとも前回保存と一致**すれば（同一ラン内は「直前のキャリブ結果」、別ランはディスクの `lr_calib_context`）**保存 `base_lr` を initial_lr にして再キャリブ**。`train_sequential` のデータ枚数は **`preprocessed_multitask/train` のファイル数**、`optimize_sequential` の Step 0 は **`train`+`validation` のファイル数**（各スクリプトのキャッシュキーと一致）。
 - **キャリブレーション設定**:
   - **学習率減衰特性 (Exponent) の探索**:
     - 探索範囲: `0.15` ～ `1.0`
@@ -221,8 +222,8 @@
 
 ### `outputs/best_train_params.json` の学習率の扱い
 - `train_sequential.py` の最終採用ハイパラを保存する。
-- **`learning_rate` のみ**を保存する（パイプライン終了時点で採用した LR。head-only 仕上げなら head LR、FT 継続なら Step 4.7 までを経た FT 側の値）。
-- **`calibrate_base_lr` の `initial_lr`** は **`LR_CALIBRATION_INITIAL`（既定 `0.01`）固定**。過去 JSON の LR でキャリブを初期化しない。
+- **`learning_rate` のみ**を保存する（パイプライン終了時点で採用した LR）。
+- **`lr_calib_context`**: 上記 LR をキャリブしたときの **`model_name` / `data_file_count` / `mode`（`head`|`ft`）/ `base_lr`**。次回 `calibrate_base_lr` の `initial_lr` はこの三つが一致するとき保存 `base_lr`、変化時は `LR_CALIBRATION_INITIAL`（0.01）。
 - **旧キー**（`learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead`）は今後書き込まず、読み込んだ古いファイルに残っていても `_skip_keys` で転送のみ除外する。
 - **`train_multitask_trial.py` へ転送しないメタ情報キー**:
     - 上記旧キーは `train_sequential.py` / `optimize_sequential.py` 側のメタ情報であり、`components/train_multitask_trial.py` の argparse には存在しない。
@@ -231,7 +232,7 @@
 
 ### `train_sequential.py` の主要ステップ
 - **`model_name` の扱い（2026-04-28 更新）**: `outputs/best_train_params.json` に `model_name` があっても `train_sequential` は **Step 1.1（バックボーン比較）をスキップしない**（**現在の前処理データ**で毎回確定）。**`optimize_sequential.py` Step 0** は `MODEL_NAME_CANDIDATES` ごとに **LR キャリブ**してから最高スコアの `best_model` を選び、同 JSON に `model_name` / **`learning_rate`** を書き戻す。`train_sequential` では 1.1 を再確定する想定。
-- **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR を、**`components/model_architecture.py` の `LRCALIB_BASE_BACKBONE`（既定 `EfficientNetV2B0`）固定**でキャリブ。**`initial_lr = LR_CALIBRATION_INITIAL`（既定 `0.01`）固定**。バックボーン切替は 1.1 以降。
+- **Step 1: Base LR Calibration** — `target_best_epoch=13` を狙う head LR を、**`LRCALIB_BASE_BACKBONE` 固定**でキャリブ。**`initial_lr`** は `lr_calib_context` / 同一ラン直前キャリブとの一致で決定（不一致なら 0.01）。バックボーン切替は 1.1 以降。
 - **Step 1.1: Model Architecture** — 毎回: `MODEL_NAME_CANDIDATES`（`model_architecture.py`、例: EfficientNet B0/S、ResNet50/101V2、MobileNetV3Large）から `model_name` を比較確定。**MobileNetV4** 相当は **MobileNetV3Large** を代用。`optimize_param` に **`head_only_tie_log` を渡す**。
 - **Step 1.2: Head LR Re-calibration** — **1.1** で `model_name != LRCALIB_BASE_BACKBONE` のときだけ、確定したバックボーンで head LR を再キャリブ（Step1 は基準バックボーンのみのため）。基準と同じ `model_name` ならスキップ。
 - **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（head-only）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。

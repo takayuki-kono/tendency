@@ -66,9 +66,14 @@ logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
-    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS, LR_CALIBRATION_INITIAL,
+    LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
+    LR_CALIBRATION_INITIAL,
+    LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
+    parse_lr_calib_context,
+    resolve_calib_initial_lr,
+    make_lr_calib_context,
 )
 
 
@@ -683,10 +688,17 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             adjusted_lr = CALIBRATED_BASE_LR
             logger.info(f"LR (Calibrated): {adjusted_lr:.8f}")
         else:
-            adjusted_lr = LR_CALIBRATION_INITIAL
+            data_ct_fb = count_files("train") + count_files("validation")
+            persisted_fb = parse_lr_calib_context(best_params.get(LR_CALIB_CONTEXT_JSON_KEY))
+            adjusted_lr, fb_msg = resolve_calib_initial_lr(
+                model_name,
+                data_ct_fb,
+                "head",
+                last_ctx=None,
+                persisted_ctx=persisted_fb,
+            )
             logger.info(
-                f"LR (Fallback, CALIBRATED_BASE_LR unset): {adjusted_lr:.8f} "
-                f"(lr_adjustment.LR_CALIBRATION_INITIAL)"
+                f"LR (Fallback, CALIBRATED_BASE_LR unset): {adjusted_lr:.8f} — {fb_msg}"
             )
         
         cmd_train.extend(["--learning_rate", str(adjusted_lr)])
@@ -1055,21 +1067,31 @@ def main():
     subprocess.run(cmd_pre_cal, capture_output=True, text=True, encoding='utf-8', errors='replace')
 
     best_params = load_best_train_params()
-    initial_lr = LR_CALIBRATION_INITIAL
+    persisted_calib = parse_lr_calib_context(best_params.get(LR_CALIB_CONTEXT_JSON_KEY))
+    opt_data_file_count = count_files("train") + count_files("validation")
 
     logger.info(
         f"\n>>> Step 0: Per-model LR calibration ({len(MODEL_NAME_CANDIDATES)} candidates, "
         f"target_best_epoch=13) <<<"
     )
     logger.info(
-        f"  calibrate initial_lr={initial_lr:g} (fixed, JSON の過去 LR は参照しない)"
+        f"  data_file_count(train+val)={opt_data_file_count} — "
+        f"一致時は保存 base_lr、変化時は {LR_CALIBRATION_INITIAL:g} からキャリブ"
     )
     model_calib_rows = []
     for m in MODEL_NAME_CANDIDATES:
         logger.info(f"--- calibrate_base_lr: model_name={m} ---")
+        il0, why0 = resolve_calib_initial_lr(
+            m,
+            opt_data_file_count,
+            "head",
+            last_ctx=None,
+            persisted_ctx=persisted_calib,
+        )
+        logger.info(f"  {why0}")
         lr_m, sc_m = calibrate_base_lr(
             m,
-            initial_lr,
+            il0,
             cal_epochs=20,
             target_best_epoch=13,
         )
@@ -1086,6 +1108,12 @@ def main():
     try:
         best_params["learning_rate"] = float(CALIBRATED_BASE_LR)
         best_params["model_name"] = best_model
+        best_params[LR_CALIB_CONTEXT_JSON_KEY] = make_lr_calib_context(
+            best_model,
+            opt_data_file_count,
+            "head",
+            CALIBRATED_BASE_LR,
+        )
         for _k in ("learning_rate_head", "learning_rate_ft", "learning_rate_nohead"):
             best_params.pop(_k, None)
         save_best_train_params(best_params)
