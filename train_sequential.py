@@ -62,6 +62,25 @@ from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CAND
 # main() がセットする。run_trial は (model_name, data_file_count, head|ft) に整合した開始 LR をここから解決する。
 _LR_CALIB_STATE: dict = {'persisted_ctx': None, 'last_ctx': None}
 
+# FT 以前の head-only 試行（run_trial / head キャリブ / Step3.9）で観測した FINAL_VAL の最大値
+_HEAD_ONLY_PHASE_BEST: dict = {'score': -1.0}
+
+
+def _reset_head_only_phase_best() -> None:
+    _HEAD_ONLY_PHASE_BEST['score'] = -1.0
+
+
+def _maybe_record_head_only_phase_best(params: dict, score: float) -> None:
+    """fine_tune=False のときだけ score を FT 以前フェーズのベスト候補として記録する。"""
+    if lr_calib_mode_from_fine_tune(params.get('fine_tune', 'False')) != 'head':
+        return
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return
+    if s > _HEAD_ONLY_PHASE_BEST['score']:
+        _HEAD_ONLY_PHASE_BEST['score'] = s
+
 
 def _log_subprocess_line(line: str, tag: str = "[Train]") -> None:
     """子プロセスの 1 行を親ログへ。学習行に加え、重み取得の Downloading / 例外・エラー行も通す。"""
@@ -151,10 +170,12 @@ def run_trial(params):
     
     cache = load_cache()
     if cache_key in cache:
-        logger.info(f"Cache Hit! Skipping execution. Val Accuracy: {cache[cache_key]}")
+        sc = cache[cache_key]
+        _maybe_record_head_only_phase_best(params, sc)
+        logger.info(f"Cache Hit! Skipping execution. Val Accuracy: {sc}")
         logger.info(f"Original Params: {params}")
         logger.info(f"{'='*50}")
-        return cache[cache_key]
+        return sc
 
     logger.info(f"Cache Miss. Running process... (File Count: {file_count})")
     logger.info(f"{'='*50}")
@@ -279,7 +300,8 @@ def run_trial(params):
             cache = load_cache()
             cache[cache_key] = score
             save_cache(cache)
-            
+
+            _maybe_record_head_only_phase_best(params, score)
             return score
         else:
             logger.error("Score not found in output.")
@@ -485,6 +507,8 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
 
     logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+    if not is_ft:
+        _maybe_record_head_only_phase_best(params, score)
     return best_epoch, score, last_epoch_accu
 
 
@@ -655,6 +679,7 @@ def main():
             logger.warning(f"Could not read prior {LR_CALIB_CONTEXT_JSON_KEY} from {BEST_PARAMS_FILE}: {e}")
     _LR_CALIB_STATE['persisted_ctx'] = persisted_calib_ctx
     _LR_CALIB_STATE['last_ctx'] = None
+    _reset_head_only_phase_best()
 
     def initial_lr_for_calibrate(model_name: str, fine_tune_val) -> float:
         n = train_sequential_data_file_count()
@@ -810,6 +835,7 @@ def main():
     # Step1/1.2 で確定した head LR を使う（current_params['learning_rate'] と同値）
     head_save_params['learning_rate'] = head_lr
     score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
+    _maybe_record_head_only_phase_best(head_save_params, score_3_9)
 
     # --- Step 3.5: Fine-Tuning LR Calibration ---
     # FT本番: Head の重みは Step 3.9 で保存した best_head_weights をロードして引き継ぐ（head carryover）。
@@ -843,10 +869,14 @@ def main():
     record_calibrate_context(current_params['model_name'], current_params['fine_tune'], ft_lr)
     current_params['learning_rate'] = ft_lr
 
-    head_finish = score_3_9 > score_3_5
+    head_only_best = float(_HEAD_ONLY_PHASE_BEST['score'])
+    # FT キャリブが、FT 以前の head-only フェーズで観測したベスト検証より良くないとき head-only 仕上げ。
+    head_finish = score_3_5 < head_only_best
     logger.info(
         f"\n{'='*50}\n"
-        f"Step 3.9 (head-only) FINAL_VAL={score_3_9:.4f} vs Step 3.5 (FT LR calib)={score_3_5:.4f}\n"
+        f"Head-only phase best (pre-FT) FINAL_VAL={head_only_best:.4f} "
+        f"[includes Step3.9={score_3_9:.4f} and prior head trials/calib]\n"
+        f"Step 3.5 (FT LR calib) FINAL_VAL={score_3_5:.4f}\n"
         f"-> {'HEAD-ONLY finish: skip FT Steps 4–4.7, brush-up with head Best-of-N' if head_finish else 'FT pipeline: Steps 4–4.7 as usual'}\n"
         f"{'='*50}"
     )
@@ -1003,7 +1033,8 @@ def main():
     logger.info("ALL PROCESSES COMPLETE")
     if head_finish:
         logger.info(
-            f"finish=head_only | Step3.9={score_3_9:.4f} vs Step3.5(FT cal)={score_3_5:.4f} | "
+            f"finish=head_only | head-only phase best={head_only_best:.4f} vs Step3.5(FT cal)={score_3_5:.4f} "
+            f"(Step3.9={score_3_9:.4f}) | "
             f"best-of-N: seed={best_seed}, Score={best_bon_score:.4f}, LR={final_lr:.8g}"
         )
     else:
@@ -1021,6 +1052,7 @@ def main():
     best_params['finish_mode'] = 'head_only' if head_finish else 'fine_tune'
     best_params['score_step_3_9_head'] = float(score_3_9)
     best_params['score_step_3_5_ft_calib'] = float(score_3_5)
+    best_params['score_head_only_phase_best'] = float(head_only_best)
     # 保存する LR は learning_rate のみ（キャリブ結果・終端フェーズの採用値）。旧キーは削除。
     for _k in ('learning_rate_head', 'learning_rate_ft', 'learning_rate_nohead'):
         best_params.pop(_k, None)
