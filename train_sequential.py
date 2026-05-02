@@ -963,6 +963,33 @@ def main():
         current_params['learning_rate'] = final_lr
         final_report_score = final_ft_score
 
+        if final_ft_score > best_bon_score:
+            logger.info(
+                f"\n>>> Step 4.7 export: score {final_ft_score:.4f} > Best-of-N {best_bon_score:.4f} — "
+                f"full FT ({FINAL_EPOCHS} ep) at LR={final_lr:.8g}, seed={best_seed} <<<"
+            )
+            export_params = current_params.copy()
+            export_params['seed'] = best_seed
+            export_params['epochs'] = FINAL_EPOCHS
+            export_params.pop('export_model_path', None)
+            export_score = run_trial(export_params)
+            logger.info(f"  Full FT at Step 4.7 LR: reported score={export_score:.4f}")
+            _src47 = os.path.join(MODEL_DIR, f"model_seed{best_seed}.keras")
+            _dst47 = os.path.join(MODEL_DIR, "best_sequential_model.keras")
+            if os.path.exists(_src47):
+                shutil.copy2(_src47, _dst47)
+                logger.info(f"Step 4.7 LR model saved -> {_dst47}")
+                final_report_score = float(export_score)
+            else:
+                logger.warning(
+                    "Step 4.7 export: model_seed keras missing after run_trial; "
+                    "keeping Best-of-N copy at best_sequential_model.keras"
+                )
+        else:
+            logger.info(
+                f"\n>>> Step 4.7: score {final_ft_score:.4f} <= Best-of-N {best_bon_score:.4f} — "
+                f"keep Best-of-N weights in best_sequential_model.keras <<<"
+            )
     for run_idx in range(N_FINAL_RUNS):
         s = 42 + run_idx
         path = os.path.join(MODEL_DIR, f'model_seed{s}.keras')
@@ -982,7 +1009,8 @@ def main():
     else:
         logger.info(
             f"finish=ft | best-of-N (pre-4.7 LR): seed={best_seed}, Score={best_bon_score:.4f} | "
-            f"Step4.7 best (FT LR band [10,15]): Score={final_report_score:.4f}, LR={final_lr:.8g}"
+            f"Step4.7 calib (FT LR band [10,15]): Score={final_ft_score:.4f}, LR={final_lr:.8g} | "
+            f"saved model score={final_report_score:.4f}"
         )
     logger.info(f"{'='*50}")
 
