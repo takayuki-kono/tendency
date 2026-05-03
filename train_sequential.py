@@ -837,35 +837,87 @@ def main():
     score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
     _maybe_record_head_only_phase_best(head_save_params, score_3_9)
 
-    # --- Step 3.5: Fine-Tuning LR Calibration ---
-    # FT本番: Head の重みは Step 3.9 で保存した best_head_weights をロードして引き継ぐ（head carryover）。
-    # これにより warmup フェーズは不要になるため warmup_lr=0 に設定。
+    # --- Step 3.5: Fine-Tuning LR Calibration（2 系統 → 高精度側を採用） ---
+    # A: Step 3.9 の best_head をロード（warmup スキップ）
+    # B: init なし・head_lr で warmup（従来どおり）
+    # 同一 initial_lr で両方キャリブし、FINAL_VAL が高い方の LR・init/warmup を以降に引き継ぐ。
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
+    base_ft = current_params.copy()
+
+    _il35 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
+
+    lr_carry = None
+    score_3_5_carry = -1.0
     if os.path.exists(BEST_HEAD_WEIGHTS_PATH):
-        current_params['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
-        current_params['warmup_lr'] = 0.0  # head carryover 済みなので warmup スキップ
-        current_params['warmup_epochs'] = 0
+        p_carry = base_ft.copy()
+        p_carry['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
+        p_carry['warmup_lr'] = 0.0
+        p_carry['warmup_epochs'] = 0
         logger.info(
-            f"Head carryover enabled: init_weights_path={BEST_HEAD_WEIGHTS_PATH} "
-            f"(warmup skipped)"
+            "\n>>> Step 3.5 (A carryover): FT LR Calibration "
+            f"(init_weights_path={BEST_HEAD_WEIGHTS_PATH}, warmup skipped) <<<"
+        )
+        lr_carry, score_3_5_carry = calibrate_base_lr(
+            p_carry, initial_lr=_il35,
+            cal_epochs=20, target_best_epoch=13
+        )
+        logger.info(
+            f"Step 3.5 (A): calibrated_lr={lr_carry:.8g}, score={score_3_5_carry:.4f}"
         )
     else:
-        # フォールバック: best_head_weights 保存に失敗した場合は従来どおり warmup を走らせる
+        logger.warning(
+            "Step 3.5 (A carryover): skipped — best_head.weights.h5 missing"
+        )
+
+    p_scratch = base_ft.copy()
+    p_scratch['init_weights_path'] = ''
+    p_scratch['warmup_lr'] = head_lr
+    p_scratch['warmup_epochs'] = 5
+    logger.info(
+        "\n>>> Step 3.5 (B warmup): FT LR Calibration "
+        f"(no init_weights, warmup_lr={head_lr:.8g}, warmup_epochs=5) <<<"
+    )
+    lr_scratch, score_3_5_scratch = calibrate_base_lr(
+        p_scratch, initial_lr=_il35,
+        cal_epochs=20, target_best_epoch=13
+    )
+    logger.info(
+        f"Step 3.5 (B): calibrated_lr={lr_scratch:.8g}, score={score_3_5_scratch:.4f}"
+    )
+
+    if lr_carry is not None and (
+        score_3_5_carry > score_3_5_scratch
+        or _is_same_score(score_3_5_carry, score_3_5_scratch)
+    ):
+        ft_calib_carryover_selected = True
+        ft_lr, score_3_5 = lr_carry, score_3_5_carry
+        logger.info(
+            f"\nStep 3.5 winner: carryover "
+            f"(score {score_3_5_carry:.4f} vs warmup path {score_3_5_scratch:.4f}; "
+            f"tie goes to carryover)"
+        )
+        current_params['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
+        current_params['warmup_lr'] = 0.0
+        current_params['warmup_epochs'] = 0
+    else:
+        ft_calib_carryover_selected = False
+        ft_lr, score_3_5 = lr_scratch, score_3_5_scratch
+        logger.info(
+            f"\nStep 3.5 winner: warmup / no carryover "
+            f"(score {score_3_5_scratch:.4f}"
+            + (
+                f" vs carryover {score_3_5_carry:.4f}"
+                if lr_carry is not None
+                else " (carryover skipped)"
+            )
+            + ")"
+        )
         current_params['init_weights_path'] = ''
         current_params['warmup_lr'] = head_lr
         current_params['warmup_epochs'] = 5
-        logger.warning(
-            f"Head carryover disabled (file missing). Falling back to warmup_lr={head_lr:.8f}"
-        )
-    
-    logger.info("\n>>> Step 3.5: FT LR Calibration (Target Epoch 13) <<<")
-    _il35 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
-    ft_lr, score_3_5 = calibrate_base_lr(
-        current_params, initial_lr=_il35,
-        cal_epochs=20, target_best_epoch=13
-    )
+
     record_calibrate_context(current_params['model_name'], current_params['fine_tune'], ft_lr)
     current_params['learning_rate'] = ft_lr
 
@@ -876,7 +928,8 @@ def main():
         f"\n{'='*50}\n"
         f"Head-only phase best (pre-FT) FINAL_VAL={head_only_best:.4f} "
         f"[includes Step3.9={score_3_9:.4f} and prior head trials/calib]\n"
-        f"Step 3.5 (FT LR calib) FINAL_VAL={score_3_5:.4f}\n"
+        f"Step 3.5 (FT LR calib, selected={'carryover' if ft_calib_carryover_selected else 'warmup'}) "
+        f"FINAL_VAL={score_3_5:.4f}\n"
         f"-> {'HEAD-ONLY finish: skip FT Steps 4–4.7, brush-up with head Best-of-N' if head_finish else 'FT pipeline: Steps 4–4.7 as usual'}\n"
         f"{'='*50}"
     )
@@ -1053,6 +1106,15 @@ def main():
     best_params['score_step_3_9_head'] = float(score_3_9)
     best_params['score_step_3_5_ft_calib'] = float(score_3_5)
     best_params['score_head_only_phase_best'] = float(head_only_best)
+    best_params['ft_calib_carryover_selected'] = bool(ft_calib_carryover_selected)
+    best_params['score_step_3_5_ft_calib_carry'] = (
+        float(score_3_5_carry) if lr_carry is not None else None
+    )
+    best_params['lr_step_3_5_ft_calib_carry'] = (
+        float(lr_carry) if lr_carry is not None else None
+    )
+    best_params['score_step_3_5_ft_calib_warmup'] = float(score_3_5_scratch)
+    best_params['lr_step_3_5_ft_calib_warmup'] = float(lr_scratch)
     # 保存する LR は learning_rate のみ（キャリブ結果・終端フェーズの採用値）。旧キーは削除。
     for _k in ('learning_rate_head', 'learning_rate_ft', 'learning_rate_nohead'):
         best_params.pop(_k, None)

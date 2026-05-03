@@ -95,8 +95,8 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - `BEST_EPOCH: N` を標準出力し、キャリブレーション時に利用可能。
     - **Step 1.2 (確定バックボーンの head LR):** `MODEL_NAME_CANDIDATES` を Step 1.1 で比較した**後**、選ばれた `model_name` に対し `calibrate_base_lr` を実施（旧: Step 1 で B0 固定の先行キャリブ→1.1 は廃止）。
         - `cal_epochs=20`, `target_best_epoch=13`。Early Stopping はキャリブ時オフ。
-    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning前にLRキャリブレーションを実施。
-        - `calibrate_base_lr`（`train_sequential` の Step 3.5 と同趣旨の target）。
+    - **Step 3.5 (Fine-Tuning LR):** Fine-tuning 前に LR キャリブ。**`train_sequential`** では **carryover（3.9 重み・warmup 無し）と warmup（init 無し）の 2 系統**を同一 `initial_lr` で走らせ、**検証が高い方**を採用（`docs/03_training_workflow.md` 参照）。
+        - `calibrate_base_lr`（target は `train_sequential` の Step 3.5 と同趣旨）。
         - `unfreeze_layers=60` を暫定値として使用。
     - **Step 4.7（Final FT LR）:** `search_ft_lr_by_targets` が **epoch 帯 10〜15** を `target_best_epoch=(10,15)` として **`calibrate_base_lr` を 1 回**実行し、その中で最良の Val / LR を採用。**キャリブスコアが Best-of-N を上回るとき**は、その LR で **フル FT の `run_trial` 1 本**を回して `best_sequential_model.keras` を更新する。
     - **Step 4.5-4.7 (FT後の再最適化):**
