@@ -58,6 +58,7 @@ from components.lr_adjustment import (
     make_lr_calib_context,
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
+from components.filter_threshold_manifest import copy_filter_manifest_beside_model
 
 # main() がセットする。run_trial は (model_name, data_file_count, head|ft) に整合した開始 LR をここから解決する。
 _LR_CALIB_STATE: dict = {'persisted_ctx': None, 'last_ctx': None}
@@ -1016,6 +1017,7 @@ def main():
     _bon_dst = os.path.join(MODEL_DIR, "best_sequential_model.keras")
     if os.path.exists(_bon_src):
         shutil.copy2(_bon_src, _bon_dst)
+        copy_filter_manifest_beside_model(_bon_dst)
         if head_finish:
             logger.info(f"Best-of-N head-only model -> {_bon_dst}")
         else:
@@ -1061,6 +1063,7 @@ def main():
             _dst47 = os.path.join(MODEL_DIR, "best_sequential_model.keras")
             if os.path.exists(_src47):
                 shutil.copy2(_src47, _dst47)
+                copy_filter_manifest_beside_model(_dst47)
                 logger.info(f"Step 4.7 LR model saved -> {_dst47}")
                 final_report_score = float(export_score)
             else:

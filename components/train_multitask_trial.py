@@ -26,6 +26,7 @@ from lr_adjustment import (
     LR_TRAIN_ABSOLUTE_MIN,
     clip_learning_rate_for_training,
 )
+from filter_threshold_manifest import copy_filter_manifest_beside_model
 
 # デフォルトシード（--seed引数で上書き可能）
 DEFAULT_SEED = 42
@@ -1117,6 +1118,7 @@ def main():
         os.makedirs('outputs/models', exist_ok=True)
         model.save(save_path)
         logger.info(f"Fine-tuned model saved to {save_path}")
+        copy_filter_manifest_beside_model(save_path)
     elif args.export_model_path:
         try:
             _ed = os.path.dirname(args.export_model_path)
@@ -1124,6 +1126,7 @@ def main():
                 os.makedirs(_ed, exist_ok=True)
             model.save(args.export_model_path)
             logger.info(f"Exported model (head-only / sequential) to {args.export_model_path}")
+            copy_filter_manifest_beside_model(args.export_model_path)
         except Exception as e:
             logger.warning(f"export_model_path save failed: {e}")
 

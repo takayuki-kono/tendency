@@ -69,6 +69,13 @@
         - 3-tuple: `val_min_cnt` 不明のため `saved_images = total - filtered` のヒューリスティックで推定。`saved < LEGACY_CACHE_MIN_SAVED`（既定 `MIN_VAL_PER_CLASS × 10 = 200`）なら同様に `score=0.0` に上書き（`INVALIDATED (legacy 3-tuple, saved=... )` を WARNING 出力）。
     - 目的: フィルタを強くしすぎて validation が激減すると、小標本ノイズで偶然の高精度（min class acc）が出て採用される問題を排除する。キャッシュヒットでも最新ガードが適用されるため、旧ラン由来のノイズエントリが `Selected` に昇格する事故を防ぐ。
 
+### フィルタ閾値マニフェスト（推論・サービスデプロイ）
+- **`preprocess_multitask.py`** は各実行で、パーセンタイルから **実際に判定に使った実数閾値** を JSON に書き出す。既定ファイルは **`--out_dir` 直下の** `filter_threshold_manifest.json`（train / validation / test を 1 ファイルの `splits` にまとめる）。
+- 内容は **グローバル閾値**（pitch / symmetry 等）に加え、眉-目距離について **ラベル（フォルダ階層由来の `label`）ごと**の閾値 `per_label_eyebrow_thresholds`。単一画像の合否判定では、サービス側で同じパイプライン計測値を用意し、この JSON の不等号条件に沿って照合する（学習時と異なるソース集合ではパーセンタイルのみでは再現不能なため）。
+- **スプリット間の注意**: train / validation / test はそれぞれ **当該スプリットの valid 顔集合** で閾値を再計算する。推論を学習画像と同一基準に揃える場合は通常 **`splits.train`** を参照する。
+- **アンダーサンプリング**: JSON の閾値だけでは再現しない（枚数キャップ・シャッフルあり）。マニフェストの `notes` にも記載。
+- **`components/train_multitask_trial.py`** が FT 済み `.keras` または `--export_model_path` を保存したとき、`preprocessed_multitask/filter_threshold_manifest.json` を **モデルと同じディレクトリ**へ `filter_threshold_manifest.json` としてコピーする（ファイルが無い場合は WARN のみ）。
+- **`train_sequential.py`** が `best_sequential_model.keras` を Best-of-N または Step 4.7 で更新したときも同様にコピーする。
 
 ### 学習率の動的スケーリング (Dynamic LR Scaling)
 前処理フィルタによりデータ量が減少した場合、学習率を以下の多項式曲線に基づいて自動調整します。

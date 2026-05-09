@@ -1,9 +1,11 @@
 import os
 import cv2
+import json
 import logging
 import shutil
 import argparse
 import concurrent.futures
+import datetime
 import numpy as np
 import random
 from collections import defaultdict
@@ -66,6 +68,89 @@ LEFT_EYE_IDX = 94
 
 # Global for Worker
 face_app = None
+
+MANIFEST_SCHEMA_VERSION = 1
+
+
+def _manifest_filter_percentile_args(args):
+    """CLI で渡したフィルタ関連引数のスナップショット（再現用）。"""
+    return {
+        "pitch_percentile": int(args.pitch_percentile),
+        "symmetry_percentile": int(args.symmetry_percentile),
+        "y_diff_percentile": int(args.y_diff_percentile),
+        "mouth_open_percentile": int(args.mouth_open_percentile),
+        "eyebrow_eye_percentile_high": int(args.eyebrow_eye_percentile_high),
+        "eyebrow_eye_percentile_low": int(args.eyebrow_eye_percentile_low),
+        "sharpness_percentile_low": int(args.sharpness_percentile_low),
+        "sharpness_percentile_high": int(args.sharpness_percentile_high),
+        "face_size_percentile_low": int(args.face_size_percentile_low),
+        "face_size_percentile_high": int(args.face_size_percentile_high),
+        "aspect_ratio_cutoff": int(args.aspect_ratio_cutoff),
+        "retouching_percentile": int(args.retouching_percentile),
+        "mask_percentile": int(args.mask_percentile),
+        "glasses_percentile": int(args.glasses_percentile),
+        "grayscale": bool(getattr(args, "grayscale", False)),
+    }
+
+
+def _build_split_filter_manifest(
+    split_output_subdir,
+    src_root,
+    dst_root,
+    args,
+    total,
+    valid_count,
+    saved_count,
+    skipped_count,
+    th_pitch,
+    th_sym,
+    th_y,
+    th_mouth,
+    th_sharpness_low,
+    th_sharpness_high,
+    th_face_size_low,
+    th_face_size_high,
+    th_ar_low,
+    th_ar_high,
+    th_retouching,
+    th_mask,
+    th_glasses,
+    per_label_eyebrow,
+    no_valid_faces=False,
+):
+    """
+    当該スプリットで実際にフィルタ判定に使った実数閾値を記録する。
+    キーは preprocess_multitask.process_dataset 内の elif チェーンと対応。
+    """
+    g = {
+        "pitch_upper_reject_if_strictly_greater": float(th_pitch) if args.pitch_percentile > 0 else None,
+        "symmetry_upper_reject_if_strictly_greater": float(th_sym) if args.symmetry_percentile > 0 else None,
+        "y_diff_upper_reject_if_strictly_greater": float(th_y) if args.y_diff_percentile > 0 else None,
+        "mouth_open_upper_reject_if_strictly_greater": float(th_mouth) if args.mouth_open_percentile > 0 else None,
+        "sharpness_lower_reject_if_strictly_less": float(th_sharpness_low) if args.sharpness_percentile_low > 0 else None,
+        "sharpness_upper_reject_if_strictly_greater": float(th_sharpness_high) if args.sharpness_percentile_high > 0 else None,
+        "face_size_lower_reject_if_strictly_less": float(th_face_size_low) if args.face_size_percentile_low > 0 else None,
+        "face_size_upper_reject_if_strictly_greater": float(th_face_size_high) if args.face_size_percentile_high > 0 else None,
+        "aspect_ratio_lower_reject_if_strictly_less": float(th_ar_low) if args.aspect_ratio_cutoff > 0 else None,
+        "aspect_ratio_upper_reject_if_strictly_greater": float(th_ar_high) if args.aspect_ratio_cutoff > 0 else None,
+        "skin_smoothness_lower_reject_if_strictly_less": float(th_retouching) if args.retouching_percentile > 0 else None,
+        "mask_score_upper_reject_if_strictly_greater": float(th_mask) if args.mask_percentile > 0 else None,
+        "glasses_score_upper_reject_if_strictly_greater": float(th_glasses) if args.glasses_percentile > 0 else None,
+    }
+    return {
+        "split_output_subdir": split_output_subdir,
+        "source_root": src_root,
+        "destination_root": dst_root,
+        "total_files_scanned": int(total),
+        "valid_face_count": int(valid_count),
+        "saved_count": int(saved_count),
+        "skipped_count_reported": int(skipped_count),
+        "no_valid_faces": bool(no_valid_faces),
+        "filter_percentile_args": _manifest_filter_percentile_args(args),
+        "global_numeric_thresholds": g,
+        "per_label_eyebrow_thresholds": per_label_eyebrow,
+    }
+
 
 def get_skin_mask(img):
     """
@@ -434,7 +519,22 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     logger.info(f"Valid faces detected: {len(valid_items)}/{total}")
     
     if not valid_items:
-        return total, 0, total # All skipped
+        split_sub = os.path.basename(os.path.normpath(dst_root))
+        empty_manifest = {
+            "split_output_subdir": split_sub,
+            "source_root": src_root,
+            "destination_root": dst_root,
+            "total_files_scanned": int(total),
+            "valid_face_count": 0,
+            "saved_count": 0,
+            "skipped_count_reported": int(total),
+            "no_valid_faces": True,
+            "filter_percentile_args": _manifest_filter_percentile_args(args),
+            "global_numeric_thresholds": None,
+            "per_label_eyebrow_thresholds": {},
+            "note": "valid 顔が0件のためパーセンタイル閾値は未算出。",
+        }
+        return total, 0, total, empty_manifest
 
     # --- Global Threshold Calculation ---
     def get_th(key, pct):
@@ -532,6 +632,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
 
     # フィルタのみ → dict[label, tasks]
     filtered_by_label = {}
+    per_label_eyebrow = {}
     for label, items in grouped.items():
         eb_vals = [r['metrics']['eb_eye_dist'] for r in items]
         th_eb_high = 999.0
@@ -542,6 +643,15 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                 th_eb_high = np.percentile(eb_vals, 100 - args.eyebrow_eye_percentile_high)
             if args.eyebrow_eye_percentile_low > 0:
                 th_eb_low = np.percentile(eb_vals, args.eyebrow_eye_percentile_low)
+
+        per_label_eyebrow[label] = {
+            "eb_eye_dist_upper_reject_if_strictly_greater": float(th_eb_high)
+            if args.eyebrow_eye_percentile_high > 0
+            else None,
+            "eb_eye_dist_lower_reject_if_strictly_less": float(th_eb_low)
+            if args.eyebrow_eye_percentile_low > 0
+            else None,
+        }
 
         label_valid_tasks = []
         for item in items:
@@ -657,7 +767,33 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     logger.info(f"Processed {src_root}: Total={total}, Saved={saved_count}, Skipped={skipped_count}")
     if skip_reasons:
         logger.info(f"Skip Reasons: {dict(skip_reasons)}")
-    return total, saved_count, skipped_count
+
+    split_sub = os.path.basename(os.path.normpath(dst_root))
+    manifest = _build_split_filter_manifest(
+        split_sub,
+        src_root,
+        dst_root,
+        args,
+        total,
+        len(valid_items),
+        saved_count,
+        skipped_count,
+        th_pitch,
+        th_sym,
+        th_y,
+        th_mouth,
+        th_sharpness_low,
+        th_sharpness_high,
+        th_face_size_low,
+        th_face_size_high,
+        th_ar_low,
+        th_ar_high,
+        th_retouching,
+        th_mask,
+        th_glasses,
+        per_label_eyebrow,
+    )
+    return total, saved_count, skipped_count, manifest
 
 def main():
     parser = argparse.ArgumentParser(description="Multitask Preprocessing with Face Filtering")
@@ -694,7 +830,23 @@ def main():
     
     # Grayscale
     parser.add_argument("--grayscale", action="store_true", help="Convert images to grayscale")
-    
+
+    parser.add_argument(
+        "--filter_manifest_path",
+        type=str,
+        default="",
+        help=(
+            "フィルタ実数閾値JSONの出力パス。"
+            "空文字なら <out_dir>/filter_threshold_manifest.json 。"
+            "\"none\"（大小無視）で出力スキップ。"
+        ),
+    )
+    parser.add_argument(
+        "--no_filter_manifest",
+        action="store_true",
+        help="filter_threshold_manifest.json を書き出さない",
+    )
+
     args = parser.parse_args()
     
     prepro_dir = args.out_dir
@@ -722,12 +874,46 @@ def main():
         logger.info(f"  Mask Pct: {args.mask_percentile}")
         logger.info(f"  Glasses Pct: {args.glasses_percentile}")
         logger.info(f"  Grayscale: {args.grayscale}")
+        fmp_raw = (getattr(args, "filter_manifest_path", "") or "").strip()
+        write_manifest = not getattr(args, "no_filter_manifest", False)
+        manifest_out = ""
+        if write_manifest:
+            if fmp_raw.lower() == "none":
+                write_manifest = False
+            else:
+                manifest_out = fmp_raw if fmp_raw else os.path.join(prepro_dir, "filter_threshold_manifest.json")
+        if write_manifest:
+            logger.info(f"  Filter manifest -> {manifest_out}")
         logger.info("=" * 60)
         
-        process_dataset(args.train_dir, prepro_train, args)
-        process_dataset(args.val_dir, prepro_valid, args)
+        _, _, _, m_train = process_dataset(args.train_dir, prepro_train, args)
+        _, _, _, m_val = process_dataset(args.val_dir, prepro_valid, args)
+        split_manifests = {"train": m_train, "validation": m_val}
         if os.path.exists(args.test_dir):
-            process_dataset(args.test_dir, prepro_test, args)
+            _, _, _, m_test = process_dataset(args.test_dir, prepro_test, args)
+            split_manifests["test"] = m_test
+
+        if write_manifest and manifest_out:
+            manifest_abspath = os.path.abspath(manifest_out)
+            mdir = os.path.dirname(manifest_abspath)
+            if mdir:
+                os.makedirs(mdir, exist_ok=True)
+            combined = {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
+                "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "out_dir": os.path.abspath(prepro_dir),
+                "preprocess_filter_args": _manifest_filter_percentile_args(args),
+                "notes": [
+                    "train / validation / test は各スプリットの valid 顔集合に対して別々にパーセンタイル閾値を算出している。",
+                    "推論で学習データと同じ基準に揃える場合は通常 train の global / per_label を参照する。",
+                    "眉-目距離はラベル（人物フォルダ等）単位。同一キーで per_label_eyebrow_thresholds を参照すること。",
+                    "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。",
+                ],
+                "splits": split_manifests,
+            }
+            with open(manifest_abspath, "w", encoding="utf-8") as _mf:
+                json.dump(combined, _mf, indent=2, ensure_ascii=False)
+            logger.info(f"Wrote filter threshold manifest: {manifest_abspath}")
         
         logger.info("All processing complete.")
     except Exception as e:

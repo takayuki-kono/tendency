@@ -66,7 +66,12 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
 
 ### ステージ 2: 前処理と高度なフィルタリング
 **スクリプト:** `preprocess_multitask.py`
-... (以下、変更なし) ...
+
+**主な処理:**
+- InsightFace を用いた顔検出・各種メトリクス算出のうえ、`--pitch_percentile` など **パーセンタイル引数**から **実数閾値** を当該スプリットの valid 顔分布に対して算出しフィルタリングする（眉-目距離は **ラベル単位**）。
+- train / validation / （存在すれば）test を順に処理し、`--out_dir` 配下へコピー。
+- **`filter_threshold_manifest.json`**（既定: `<out_dir>/filter_threshold_manifest.json`）を出力する。中身は `schema_version`、`splits.train` / `validation`（/ `test`）ごとの **グローバル実数閾値** と **`per_label_eyebrow_thresholds`**。サービス側で単一画像の「学習時フィルタ通過」を再現するときはこのファイルをモデルと併せて保持する。
+- 出力しない場合: `--no_filter_manifest`、または `--filter_manifest_path none`。
 
 ### 補助: 未分類フォルダの自動振り分け（最新モデル）
 `master_data/未分類/{人物フォルダ}/` がある場合、最新の学習済みモデルでフォルダ内画像を推論し、
