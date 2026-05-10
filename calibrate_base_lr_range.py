@@ -15,6 +15,8 @@ import logging
 import json
 import math
 
+from components.lr_adjustment import TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
+
 # --- Config ---
 PYTHON_TRAIN = r"d:\tendency\tendency.venv_tf210_gpu\Scripts\python.exe"
 BEST_TRAIN_PARAMS_FILE = "outputs/best_train_params.json"
@@ -56,6 +58,8 @@ def run_training_trial(lr, model_name='EfficientNetV2B0', epochs=25):
     params['enable_early_stopping'] = 'True' # Valid for calibration
     
     for k, v in params.items():
+        if k in TRAIN_MULTITASK_CLI_EXCLUDE_KEYS:
+            continue
         cmd.extend([f"--{k}", str(v)])
         
     logger.info(f"  Training with LR={lr:.8f}...")

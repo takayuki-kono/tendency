@@ -107,6 +107,7 @@
      - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
      - 収束判定: `|new_lr - current_lr| / current_lr < 0.02` なら以降の trial を打ち切り、最良候補を採用。
   - **LR の一本化（2026-04-25）**: `best_train_params.json` に記録する教師あり LR は **`learning_rate` のみ**（終端フェーズで実際に使う値）。旧キー `learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead` は保存時に削除され、読み込み互換のため `_skip_keys` でサブプロセスに転送しないだけ残す。
+  - **JSON のみフィールド**: `finish_mode`・`score_step_3_*`・`lr_step_3_5_ft_calib_*`・`lr_calib_context` 等は **記録・復元用のみ**であり、`train_multitask_trial.py` には渡さない（`components/lr_adjustment.py` の **`TRAIN_MULTITASK_CLI_EXCLUDE_KEYS`** を `train_sequential` / `optimize_sequential` が subprocess 構築時に適用）。
   - **`lr_calib_context` と `calibrate_base_lr` の initial_lr（2026-04-25）**: JSON に **`lr_calib_context`**（`model_name`, `data_file_count`, `mode`=`head`|`ft`, `base_lr`）を保存する。**いずれかが変われば**（モデル・データ枚数・head-only vs FT）次回の `calibrate_base_lr` は **`LR_CALIBRATION_INITIAL`（0.01）から**。**三つとも前回保存と一致**すれば（同一ラン内は「直前のキャリブ結果」、別ランはディスクの `lr_calib_context`）**保存 `base_lr` を initial_lr にして再キャリブ**。`train_sequential` のデータ枚数は **`preprocessed_multitask/train` のファイル数**、`optimize_sequential` の Step 0 は **`train`+`validation` のファイル数**（各スクリプトのキャッシュキーと一致）。**`train_sequential.run_trial` の開始 LR も同じ `resolve_calib_initial_lr` で決める**（`params['learning_rate']` だけではモデル切替時に B0 用 LR が残るため）。
 - **キャリブレーション設定**:
   - **学習率減衰特性 (Exponent) の探索**:

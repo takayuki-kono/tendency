@@ -70,6 +70,7 @@ from components.lr_adjustment import (
     LR_CALIBRATION_INITIAL,
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
+    TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
     parse_lr_calib_context,
     resolve_calib_initial_lr,
@@ -247,11 +248,9 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     best_params = load_best_train_params()
     
     cmd_train = [PYTHON_TRAIN, "components/train_multitask_trial.py", "--model_name", model_name]
-    # learning_rate_nohead/head/ft は optimize 側のメタ情報で train_multitask_trial には存在しない引数
     _skip_keys = {
         'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
-        'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft',
-    }
+    } | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
     for k, v in best_params.items():
         if k not in _skip_keys:
             cmd_train.extend([f"--{k}", str(v)])
@@ -608,8 +607,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         best_params = load_best_train_params()
         _skip_keys = {
             'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
-            'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft',
-        }
+        } | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
         for k, v in best_params.items():
             if k not in _skip_keys:
                 cmd_train.extend([f"--{k}", str(v)])

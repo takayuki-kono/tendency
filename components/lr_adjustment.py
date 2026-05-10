@@ -10,6 +10,26 @@ LR_CALIBRATION_MAX_ITERATIONS = 10
 LR_CALIBRATION_INITIAL = 0.01
 # best_train_params.json に保存する LR キャリブ文脈のキー（model / data_file_count / mode / base_lr）
 LR_CALIB_CONTEXT_JSON_KEY = "lr_calib_context"
+# JSON のみ／親スクリプト用で train_multitask_trial の argparse に存在しないキー（子プロセスへ渡さない）
+TRAIN_MULTITASK_META_JSON_KEYS_ONLY = frozenset(
+    (
+        LR_CALIB_CONTEXT_JSON_KEY,
+        "finish_mode",
+        "score_step_3_9_head",
+        "score_step_3_5_ft_calib",
+        "score_head_only_phase_best",
+        "ft_calib_carryover_selected",
+        "score_step_3_5_ft_calib_carry",
+        "lr_step_3_5_ft_calib_carry",
+        "score_step_3_5_ft_calib_warmup",
+        "lr_step_3_5_ft_calib_warmup",
+    )
+)
+# train_sequential 互換で JSON に残り得る旧 LR フィールドも CLI に載せない
+TRAIN_MULTITASK_LEGACY_LR_JSON_KEYS = frozenset(
+    ("learning_rate_nohead", "learning_rate_head", "learning_rate_ft")
+)
+TRAIN_MULTITASK_CLI_EXCLUDE_KEYS = TRAIN_MULTITASK_META_JSON_KEYS_ONLY | TRAIN_MULTITASK_LEGACY_LR_JSON_KEYS
 LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ以上で「last≠best」とみなす
 # 学習（optimizer / LR スケジューラ）に乗せる絶対域。極小 LR は .8f ログで 0 表示になり実質停止、
 # 極大は設定ミス時の数値破綻を防ぐ。再調整「比」クランプとは独立。

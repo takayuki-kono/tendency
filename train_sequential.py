@@ -51,6 +51,7 @@ from components.lr_adjustment import (
     LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
+    TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
     lr_calib_mode_from_fine_tune,
     parse_lr_calib_context,
@@ -210,8 +211,8 @@ def run_trial(params):
                 logger.info(f"  [LR Adjust #{adj_iter}] LR={current_lr:.8f}...")
             
             cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
-            # learning_rate_nohead/head/ft は train_sequential 側のメタ情報で train_multitask_trial には存在しない引数
-            _skip_keys = {'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft'}
+            # best_train_params 由来のメタ・旧 LR フィールドは子 CLI に存在しない
+            _skip_keys = set(TRAIN_MULTITASK_CLI_EXCLUDE_KEYS)
             for key, value in trial_params.items():
                 if key in _skip_keys:
                     continue
@@ -414,7 +415,7 @@ def train_and_save_best_head_weights(current_params, weights_path):
     logger.info(f"{'='*50}")
 
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
-    _skip_keys = {'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft'}
+    _skip_keys = set(TRAIN_MULTITASK_CLI_EXCLUDE_KEYS)
     for key, value in params.items():
         if key in _skip_keys:
             continue
@@ -465,8 +466,8 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     params['epochs'] = cal_epochs
 
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
-    # learning_rate_nohead/head/ft は train_sequential 側のメタ情報で train_multitask_trial には存在しない引数
-    _skip_keys = {'auto_lr_target_epoch', 'learning_rate_nohead', 'learning_rate_head', 'learning_rate_ft'}
+    # キャリブは LR/epochs を上書きするため auto_lr_target_epoch も渡さない（他は JSON メタ除外）
+    _skip_keys = {'auto_lr_target_epoch'} | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
     for key, value in params.items():
         if key in _skip_keys:
             continue
