@@ -237,16 +237,86 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
+
+# Step 0 / calibrate_base_lr 用キャッシュ（filter trial と同一 JSON。キーは @ 接頭で衝突回避）
+_CALIB_CACHE_VERSION = 1
+
+_CALIB_SKIP_KEYS = frozenset(
+    {
+        "model_name",
+        "fine_tune",
+        "epochs",
+        "learning_rate",
+        "auto_lr_target_epoch",
+    }
+) | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
+
+
+def _calibration_hyperparam_digest(best_params: dict) -> str:
+    """run_calibration_trial が best_train_params から載せる CLI のみでダイジェスト（再現性）。"""
+    if not best_params:
+        return "empty"
+    sub = {}
+    for k in sorted(best_params.keys()):
+        if k in _CALIB_SKIP_KEYS:
+            continue
+        v = best_params[k]
+        try:
+            json.dumps(v)
+            sub[k] = v
+        except (TypeError, ValueError):
+            sub[k] = str(v)
+    blob = json.dumps(sub, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
+
+
+def _calib_trial_cache_key(model_name, lr, cal_epochs, data_fc, digest_extra: str) -> str:
+    lr_s = f"{float(lr):.12g}"
+    return (
+        f"@calib{_CALIB_CACHE_VERSION}:{model_name}:ep{int(cal_epochs)}:"
+        f"lr{lr_s}:cnt{int(data_fc)}:x{digest_extra}"
+    )
+
+
+def _calib_full_cache_key(
+    model_name,
+    initial_lr,
+    cal_epochs,
+    target_min,
+    target_max,
+    data_fc,
+    digest_extra: str,
+) -> str:
+    il = f"{float(initial_lr):.12g}"
+    return (
+        f"@calfull{_CALIB_CACHE_VERSION}:{model_name}:ep{int(cal_epochs)}:"
+        f"t{float(target_min):g}-{float(target_max):g}:"
+        f"mx{int(LR_CALIBRATION_MAX_ITERATIONS)}:il{il}:cnt{int(data_fc)}:x{digest_extra}"
+    )
+
+
 def run_calibration_trial(model_name, lr, cal_epochs=5):
     """
     LRキャリブレーション用: 前処理済みデータで学習のみ実行し、BEST_EPOCHを返す。
     preprocessed_multitask が既に準備されている前提で呼ぶこと。
     
     Returns:
-        tuple: (best_epoch, score)
+        tuple: (best_epoch, score, last_epoch_accu)
     """
     best_params = load_best_train_params()
-    
+    data_fc = count_files("train") + count_files("validation")
+    digest = _calibration_hyperparam_digest(best_params)
+    ckey = _calib_trial_cache_key(model_name, lr, cal_epochs, data_fc, digest)
+
+    cache = load_cache()
+    if ckey in cache and isinstance(cache[ckey], (list, tuple)) and len(cache[ckey]) >= 3:
+        be, sc, lac = cache[ckey][0], cache[ckey][1], cache[ckey][2]
+        logger.info(
+            f"[Calibration] Cache Hit {ckey[:72]}… -> "
+            f"BestEpoch={int(be)}/{cal_epochs}, Score={float(sc):.4f}"
+        )
+        return int(be), float(sc), float(lac)
+
     cmd_train = [PYTHON_TRAIN, "components/train_multitask_trial.py", "--model_name", model_name]
     _skip_keys = {
         'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
@@ -275,6 +345,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     full_output = "\n".join(output_lines)
     if rc != 0:
         _log_subprocess_fail("[Calibration] train_multitask_trial", rc, output_lines)
+        # 失敗時はキャッシュしない（再試行できるように）
 
     # BEST_EPOCH抽出
     match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
@@ -292,6 +363,13 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
     last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
 
     logger.info(f"[Calibration] Result: BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}")
+    if rc == 0:
+        try:
+            cache = load_cache()
+            cache[ckey] = [best_epoch, score, last_epoch_accu]
+            save_cache(cache)
+        except Exception as e:
+            logger.warning(f"[Calibration] Failed to save trial cache: {e}")
     return best_epoch, score, last_epoch_accu
 
 
@@ -321,6 +399,21 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         target_max = float(target_best_epoch[1])
     else:
         target_min = target_max = float(target_best_epoch)
+
+    data_fc = count_files("train") + count_files("validation")
+    digest = _calibration_hyperparam_digest(load_best_train_params())
+    fk = _calib_full_cache_key(
+        model_name, initial_lr, cal_epochs, target_min, target_max, data_fc, digest
+    )
+    cache = load_cache()
+    if fk in cache:
+        cached = cache[fk]
+        if isinstance(cached, (list, tuple)) and len(cached) >= 2:
+            logger.info(
+                f"[Calibration] Full cache Hit {fk[:80]}… -> "
+                f"LR={float(cached[0]):.8f}, Score={float(cached[1]):.4f}"
+            )
+            return float(cached[0]), float(cached[1])
 
     current_lr = initial_lr
     target_mid = (target_min + target_max) / 2.0
@@ -410,6 +503,12 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
 
     logger.info(f"\nCalibrated Base LR: {current_lr:.8f}, Final Score: {score:.4f}")
     logger.info(f"{'='*50}")
+    try:
+        cache = load_cache()
+        cache[fk] = [float(current_lr), float(score)]
+        save_cache(cache)
+    except Exception as e:
+        logger.warning(f"[Calibration] Failed to save full calibration cache: {e}")
     return current_lr, score
 
 

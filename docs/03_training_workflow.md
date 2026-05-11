@@ -53,6 +53,7 @@
     - `MODEL_NAME_CANDIDATES`（`model_architecture.py`）の**各** `model_name` に対し、フィルタなし前処理の上で **`calibrate_base_lr`（`target_best_epoch=13` 他、他軸と同ロジック）**を実行し、キャリブ終了時の Val スコアが最大のモデルを採択。
     - **`calibrate_base_lr` の試行回数上限**は `LR_CALIBRATION_MAX_ITERATIONS`（既定 **10**、`components/lr_adjustment.py`）。`run_trial` 内の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS`（最大 7 回）で別定数。
     - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / **`learning_rate`** / **`lr_calib_context`**（head・train+val 枚数・`base_lr`）を更新。Step 0 の各モデルキャリブでは **保存 `lr_calib_context` と（モデル・枚数・head）が一致する候補だけ** 保存 `base_lr` を `initial_lr` に、それ以外は `LR_CALIBRATION_INITIAL`（0.01）。
+    - **Step 0 も `filter_opt_cache.json` に記録**（`@calib…`＝各試行 `run_calibration_trial` の結果、`@calfull…`＝モデル単位の `calibrate_base_lr` 完走結果）。データ枚数が変わると既存どおりキャッシュ全消去。`best_train_params` のキャリブ対象ハイパラが変わればダイジェストでミスヒット。アルゴリズム更新時はコード内 `_CALIB_CACHE_VERSION` を上げる。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
     - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) `for adj_iter in range(LR_MAX_ADJUSTMENTS+1)` の試行回数上限（最大 7 試行）でループ終了
