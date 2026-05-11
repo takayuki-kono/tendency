@@ -51,7 +51,7 @@ SHARPNESS_PERCENTILE_LOW = 0  # Filter bottom X% by sharpness (Laplacian varianc
 SHARPNESS_PERCENTILE_HIGH = 0  # Filter top X% by sharpness
 FACE_SIZE_PERCENTILE_LOW = 0   # Filter bottom X% by face size (small images)
 FACE_SIZE_PERCENTILE_HIGH = 0  # Filter top X% by face size (large images)
-# 元画像に対する in-plane 傾き補正量（絶対度数）。part1 の _rz ミリ度またはランドマークから推定
+# 元画像に対する in-plane 傾き補正量（絶対度数）。ファイル名 `_rz` のみ。無ければ 0。
 ROTATION_FILTER_PERCENTILE = 0
 RETOUCHING_PERCENTILE = 0  # Filter bottom X% by skin smoothness (retouched images have lower values)
 MASK_PERCENTILE = 0 # Filter top X% by mask likelihood (high score = mask)
@@ -73,15 +73,6 @@ LEFT_EYE_IDX = 94
 face_app = None
 
 MANIFEST_SCHEMA_VERSION = 1
-
-
-def roll_degrees_from_landmarks_106(lmk) -> float:
-    """鼻先(86)〜顎(0)の線と縦軸から in-plane roll（度）。part1_setup.process_and_save_face と同一。"""
-    if lmk is None or len(lmk) < 87:
-        return 0.0
-    dx = float(lmk[86][0] - lmk[0][0])
-    dy = float(lmk[86][1] - lmk[0][1])
-    return float(np.arctan2(dx, -dy) * 180.0 / np.pi)
 
 
 def face_roll_abs_deg_from_filename(filename: str):
@@ -405,10 +396,10 @@ def analyze_single_image(args):
     sz_match = re.search(r'_sz(\d+)', filename)
     face_size = int(sz_match.group(1)) if sz_match else 0
 
-    # In-plane roll（元画像に対する傾き補正の大きさ［度・絶対値］）。part1 の _rz 優先、無ければランドマーク
+    # In-plane roll（元画像に対する傾き補正の大きさ［度・絶対値］）。ファイル名の _rz のみ。
+    # 正立化済み切り出し画像からは元の回転角は復元不能のため、無ければ 0。
     roll_fn = face_roll_abs_deg_from_filename(filename)
-    roll_lmk_abs = abs(roll_degrees_from_landmarks_106(lmk))
-    face_roll_deg_abs = roll_fn if roll_fn is not None else roll_lmk_abs
+    face_roll_deg_abs = roll_fn if roll_fn is not None else 0.0
 
     # Mask & Glasses
     mask_score = calculate_mask_likehood(img, lmk)
@@ -490,7 +481,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     os.makedirs(cache_dir, exist_ok=True)
     
     # Include face_pos_filter arg in cache key because it affects analysis result (valid bit)
-    cache_key = f"{os.path.basename(src_root)}_{total}_rz1"
+    cache_key = f"{os.path.basename(src_root)}_{total}_rz2"
     cache_file = os.path.join(cache_dir, f"metrics_{hashlib.md5(cache_key.encode()).hexdigest()}.pkl")
     
     results = []
@@ -855,7 +846,7 @@ def main():
         "--rotation_percentile",
         type=int,
         default=ROTATION_FILTER_PERCENTILE,
-        help="Filter top X% by in-plane face roll correction (degrees abs; from filename _rz or landmarks)",
+        help="Filter top X% by in-plane roll correction (deg abs); only when filename has part1 _rz tag, else metric is 0",
     )
 
     # Aspect Ratio
