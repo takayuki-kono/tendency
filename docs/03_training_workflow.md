@@ -74,6 +74,7 @@
 - 内容は **グローバル閾値**（pitch / symmetry 等）に加え、眉-目距離について **ラベル（フォルダ階層由来の `label`）ごと**の閾値 `per_label_eyebrow_thresholds`。単一画像の合否判定では、サービス側で同じパイプライン計測値を用意し、この JSON の不等号条件に沿って照合する（学習時と異なるソース集合ではパーセンタイルのみでは再現不能なため）。
 - **スプリット間の注意**: train / validation / test はそれぞれ **当該スプリットの valid 顔集合** で閾値を再計算する。推論を学習画像と同一基準に揃える場合は通常 **`splits.train`** を参照する。
 - **アンダーサンプリング**: JSON の閾値だけでは再現しない（枚数キャップ・シャッフルあり）。マニフェストの `notes` にも記載。
+- **`face_size`（`_sz<px>`）** と **`face_roll_deg_abs`（`_rz<ミリ度>`）**: `components/part1_setup.py` が保存時に **バウンディングボックス幅** を `_sz`、**回転補正に使った in-plane 角**（度×1000 の符号付き整数、例 `_rz-3250` = −3.25°）を `_rz` としてファイル名に埋め込む。`preprocess_multitask.py` は `face_size` と同様にパースし、`_rz` が無いレガシー画像は **ランドマーク 0・86 から同式で推定**（絶対値で `face_roll_deg_abs`）。**`--rotation_percentile`**（既定0）が正のとき、学習ストリーム全体で「傾き補正が大きい顔」の **上位 X％** を閾値で落とす（pitch と同様の片側パーセンタイル）。`filter_threshold_manifest.json` の `face_roll_abs_deg_upper_reject_if_strictly_greater` に実数閾値を記録。
 - **`components/train_multitask_trial.py`** が FT 済み `.keras` または `--export_model_path` を保存したとき、`preprocessed_multitask/filter_threshold_manifest.json` を **モデルと同じディレクトリ**へ `filter_threshold_manifest.json` としてコピーする（ファイルが無い場合は WARN のみ）。
 - **`train_sequential.py`** が `best_sequential_model.keras` を Best-of-N または Step 4.7 で更新したときも同様にコピーする。
 

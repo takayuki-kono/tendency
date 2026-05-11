@@ -413,7 +413,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     return current_lr, score
 
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='EfficientNetV2B0', active_param_name=None):
+def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, rotation=0, grayscale=False, model_name='EfficientNetV2B0', active_param_name=None):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
     
@@ -421,7 +421,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         tuple: (raw_score, total_images, filtered_count)
     """
     logger.info(f"\n{'='*50}")
-    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Grayscale={grayscale}")
+    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Rotation={rotation}%, Grayscale={grayscale}")
     
     file_count = count_files("train") + count_files("validation")
     # キャッシュキーにLR情報を含める（キャリブレーション後はLRが変わるため）
@@ -434,14 +434,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         'eb_eye_high': 'eyebrow_eye_percentile_high', 'eb_eye_low': 'eyebrow_eye_percentile_low',
         'face_size_low': 'face_size_percentile_low', 'face_size_high': 'face_size_percentile_high',
         'mouth_open': 'mouth_open_percentile', 'retouching': 'retouching_percentile',
-        'mask': 'mask_percentile', 'glasses': 'glasses_percentile'
+        'mask': 'mask_percentile', 'glasses': 'glasses_percentile', 'rotation': 'rotation_percentile',
     }
     current_vals = {
         'pitch': pitch, 'sym': sym, 'y_diff': y_diff, 'mouth_open': mouth_open,
         'eb_eye_high': eb_eye_high, 'eb_eye_low': eb_eye_low, 
         'sharpness_low': sharpness_low, 'sharpness_high': sharpness_high,
         'face_size_low': face_size_low, 'face_size_high': face_size_high,
-        'retouching': retouching, 'mask': mask, 'glasses': glasses
+        'retouching': retouching, 'mask': mask, 'glasses': glasses, 'rotation': rotation,
     }
     
     total_weighted_exp = 0.0
@@ -466,7 +466,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
     cache_exp_tag = f"_exp={total_weighted_exp/total_power:.4f}" if total_power > 0 else f"_exp_def"
     
     # 互換性のため、以前の形式のキャッシュキーも生成
-    cache_key_legacy = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}{lr_tag}_cnt={file_count}"
+    cache_key_legacy = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_rot={rotation}_gray={grayscale}{lr_tag}_cnt={file_count}"
     
     # 新しい形式のキャッシュキー (exp値加味)
     cache_key = cache_key_legacy + cache_exp_tag
@@ -542,6 +542,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             "--sharpness_percentile_high", str(sharpness_high),
             "--face_size_percentile_low", str(face_size_low),
             "--face_size_percentile_high", str(face_size_high),
+            "--rotation_percentile", str(rotation),
             "--retouching_percentile", str(retouching),
             "--mask_percentile", str(mask),
             "--glasses_percentile", str(glasses)
@@ -634,7 +635,8 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 'mouth_open': 'mouth_open_percentile',
                 'retouching': 'retouching_percentile',
                 'mask': 'mask_percentile',
-                'glasses': 'glasses_percentile'
+                'glasses': 'glasses_percentile',
+                'rotation': 'rotation_percentile',
             }
             
             current_vals = {
@@ -642,7 +644,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 'eb_eye_high': eb_eye_high, 'eb_eye_low': eb_eye_low, 
                 'sharpness_low': sharpness_low, 'sharpness_high': sharpness_high,
                 'face_size_low': face_size_low, 'face_size_high': face_size_high,
-                'retouching': retouching, 'mask': mask, 'glasses': glasses
+                'retouching': retouching, 'mask': mask, 'glasses': glasses, 'rotation': rotation,
             }
             
             total_weighted_exp = 0.0
@@ -845,7 +847,8 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
             'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
-            'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
+            'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0,
+            'rotation': 0,
         }
         test_params[target_name] = val
         
@@ -856,6 +859,7 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
             test_params['sharpness_low'], test_params['sharpness_high'],
             test_params['face_size_low'], test_params['face_size_high'],
             test_params['retouching'], test_params['mask'], test_params['glasses'],
+            rotation=test_params['rotation'],
             model_name=model_name,
             active_param_name=target_name
         )
@@ -1040,7 +1044,7 @@ def main():
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
         'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
-        'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
+        'face_size_low': 0, 'face_size_high': 0, 'rotation': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
     }
     
     # 効率情報を記録する辞書
@@ -1058,6 +1062,7 @@ def main():
         "--eyebrow_eye_percentile_high", "0", "--eyebrow_eye_percentile_low", "0",
         "--sharpness_percentile_low", "0", "--sharpness_percentile_high", "0",
         "--face_size_percentile_low", "0", "--face_size_percentile_high", "0",
+        "--rotation_percentile", "0",
         "--retouching_percentile", "0", "--mask_percentile", "0",
         "--glasses_percentile", "0"
     ]
@@ -1128,7 +1133,7 @@ def main():
     param_names = [
         'pitch', 'sym', 'y_diff', 'mouth_open',
         'eb_eye_high', 'eb_eye_low', 'sharpness_low', 'sharpness_high',
-        'face_size_low', 'face_size_high', 'retouching', 'mask', 'glasses'
+        'face_size_low', 'face_size_high', 'rotation', 'retouching', 'mask', 'glasses'
     ]
     
     # Phase 1 loop
@@ -1196,7 +1201,8 @@ def main():
                     'mouth_open': f'mouth={tv}', 'eb_eye_high': f'ebh={tv}', 'eb_eye_low': f'ebl={tv}',
                     'sharpness_low': f'sharplow={tv}', 'sharpness_high': f'sharphigh={tv}',
                     'face_size_low': f'fsl={tv}', 'face_size_high': f'fsh={tv}',
-                    'retouching': f'retouch={tv}', 'mask': f'mask={tv}', 'glasses': f'glasses={tv}'
+                    'retouching': f'retouch={tv}', 'mask': f'mask={tv}', 'glasses': f'glasses={tv}',
+                    'rotation': f'rot={tv}',
                 }
                 if param_name in param_key_map and param_key_map[param_name] in ck:
                     keys_to_delete.append(ck)
@@ -1219,6 +1225,7 @@ def main():
                 eval_params['sharpness_low'], eval_params['sharpness_high'],
                 eval_params['face_size_low'], eval_params['face_size_high'],
                 eval_params['retouching'], eval_params['mask'], eval_params['glasses'],
+                rotation=eval_params['rotation'],
                 grayscale=False, model_name=best_model, active_param_name=param_name
             )
             retry_score = res[0]
@@ -1309,7 +1316,7 @@ def main():
     
     # ベースライン（Grayscale=False）のスコア計測
     base_res = run_trial(
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, rotation=0,
         grayscale=False, model_name=best_model
     )
     current_best_score = base_res[0]
@@ -1342,6 +1349,7 @@ def main():
             temp_params['sharpness_low'], temp_params['sharpness_high'],
             temp_params['face_size_low'], temp_params['face_size_high'],
             temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
+            rotation=temp_params['rotation'],
             grayscale=False, model_name=best_model
         )
         score, total, filtered = res
@@ -1369,6 +1377,7 @@ def main():
         current_params['sharpness_low'], current_params['sharpness_high'],
         current_params['face_size_low'], current_params['face_size_high'],
         current_params['retouching'], current_params['mask'], current_params['glasses'],
+        rotation=current_params['rotation'],
         grayscale=False, model_name=best_model
     )
     original_score, original_total, original_filtered = original_result
@@ -1398,6 +1407,7 @@ def main():
         global_best_params['sharpness_low'], global_best_params['sharpness_high'],
         global_best_params['face_size_low'], global_best_params['face_size_high'],
         global_best_params['retouching'], global_best_params['mask'], global_best_params['glasses'],
+        rotation=global_best_params['rotation'],
         grayscale=False, model_name=best_model
     )
     sb_score = sb_res[0]
@@ -1425,6 +1435,7 @@ def main():
         final_params['sharpness_low'], final_params['sharpness_high'],
         final_params['face_size_low'], final_params['face_size_high'],
         final_params['retouching'], final_params['mask'], final_params['glasses'],
+        rotation=final_params.get('rotation', 0),
         grayscale=False, model_name=best_model
     )
     res_gray = run_trial(
@@ -1433,6 +1444,7 @@ def main():
         final_params['sharpness_low'], final_params['sharpness_high'],
         final_params['face_size_low'], final_params['face_size_high'],
         final_params['retouching'], final_params['mask'], final_params['glasses'],
+        rotation=final_params.get('rotation', 0),
         grayscale=True, model_name=best_model
     )
     
@@ -1509,7 +1521,8 @@ def main():
                 'face_size_high': '--face_size_percentile_high',
                 'retouching': '--retouching_percentile',
                 'mask': '--mask_percentile',
-                'glasses': '--glasses_percentile'
+                'glasses': '--glasses_percentile',
+                'rotation': '--rotation_percentile',
             }
             if k in arg_map:
                 cmd_parts.extend([arg_map[k], str(v)])

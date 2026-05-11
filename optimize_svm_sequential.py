@@ -67,12 +67,12 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, grayscale=False, model_name='SVM', svm_params={}):
+def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, rotation=0, grayscale=False, model_name='SVM', svm_params={}):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
     """
     # Merge SVM params into log string if present
-    param_log = f"Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Grayscale={grayscale}"
+    param_log = f"Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Rotation={rotation}%, Grayscale={grayscale}"
     if svm_params:
         param_log += f", SVM_Params={svm_params}"
 
@@ -82,7 +82,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
     file_count = count_files("train") + count_files("validation")
     # Cache key includes SVM params if present
     svm_key = f"_C={svm_params.get('C')}_k={svm_params.get('kernel')}_g={svm_params.get('gamma')}" if svm_params else ""
-    cache_key = f"model={model_name}{svm_key}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_gray={grayscale}_cnt={file_count}"
+    cache_key = f"model={model_name}{svm_key}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_rot={rotation}_gray={grayscale}_cnt={file_count}"
     
     cache = load_cache()
     if cache_key in cache:
@@ -116,6 +116,7 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             "--sharpness_percentile_high", str(sharpness_high),
             "--face_size_percentile_low", str(face_size_low),
             "--face_size_percentile_high", str(face_size_high),
+            "--rotation_percentile", str(rotation),
             "--retouching_percentile", str(retouching),
             "--mask_percentile", str(mask),
             "--glasses_percentile", str(glasses)
@@ -185,9 +186,9 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 logger.warning("Score is exactly 0.5 with custom SVM params. These params might be unsuitable for the current data.")
                 logger.warning("Retrying with DEFAULT SVM params (gamma='scale', C=1.0)...")
                 return run_trial(
-                    pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, 
-                    sharpness_low, sharpness_high, face_size_low, face_size_high, 
-                    retouching, mask, glasses, grayscale, model_name, svm_params={}
+                    pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low,
+                    sharpness_low, sharpness_high, face_size_low, face_size_high,
+                    retouching, mask, glasses, rotation=rotation, grayscale=grayscale, model_name=model_name, svm_params={}
                 )
 
             cache = load_cache()
@@ -221,7 +222,8 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
         test_params = {
             'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
             'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
-            'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
+            'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0,
+            'rotation': 0,
         }
         test_params[target_name] = val
         
@@ -231,6 +233,7 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
             test_params['sharpness_low'], test_params['sharpness_high'],
             test_params['face_size_low'], test_params['face_size_high'],
             test_params['retouching'], test_params['mask'], test_params['glasses'],
+            rotation=test_params['rotation'],
             model_name=model_name,
             svm_params=svm_params
         )
@@ -376,7 +379,7 @@ def main():
     best_svm_score = -1.0
     for candidate in svm_candidates:
         logger.info(f"Testing SVM params: {candidate}")
-        score, _, _ = run_trial(0,0,0,0,0,0,0,0,0,0,0,0,0, model_name="SVM", svm_params=candidate)
+        score, _, _ = run_trial(0,0,0,0,0,0,0,0,0,0,0,0,0, rotation=0, model_name="SVM", svm_params=candidate)
         logger.info(f"  -> Score: {score:.4f}")
         if score > best_svm_score:
             best_svm_score = score
@@ -389,7 +392,7 @@ def main():
     current_params = {
         'pitch': 0, 'sym': 0, 'y_diff': 0, 'mouth_open': 0,
         'eb_eye_high': 0, 'eb_eye_low': 0, 'sharpness_low': 0, 'sharpness_high': 0,
-        'face_size_low': 0, 'face_size_high': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
+        'face_size_low': 0, 'face_size_high': 0, 'rotation': 0, 'retouching': 0, 'mask': 0, 'glasses': 0
     }
     
     param_efficiency = {}
@@ -397,14 +400,14 @@ def main():
 
     # --- Step 0: Baseline ---
     logger.info("\n>>> Step 0: Baseline <<<")
-    baseline_score, total_images, baseline_filtered = run_trial(0,0,0,0,0,0,0,0,0,0,0,0,0, model_name=best_model, svm_params=best_svm_params)
+    baseline_score, total_images, baseline_filtered = run_trial(0,0,0,0,0,0,0,0,0,0,0,0,0, rotation=0, model_name=best_model, svm_params=best_svm_params)
     logger.info(f"Baseline: Score={baseline_score:.4f}, Filtered={baseline_filtered}")
     
     # --- Parameter Optimization ---
     param_names = [
         'pitch', 'sym', 'y_diff', 'mouth_open',
         'eb_eye_high', 'eb_eye_low', 'sharpness_low', 'sharpness_high',
-        'face_size_low', 'face_size_high', 'retouching', 'mask', 'glasses'
+        'face_size_low', 'face_size_high', 'rotation', 'retouching', 'mask', 'glasses'
     ]
     
     global_best_score = baseline_score
@@ -445,6 +448,7 @@ def main():
     # Base check (Grayscale=False)
     base_res = run_trial(
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        rotation=0,
         grayscale=False, model_name=best_model, svm_params=best_svm_params
     )
     current_best_score = base_res[0]
@@ -463,6 +467,7 @@ def main():
             temp_params['sharpness_low'], temp_params['sharpness_high'],
             temp_params['face_size_low'], temp_params['face_size_high'],
             temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
+            rotation=temp_params['rotation'],
             grayscale=False, model_name=best_model, svm_params=best_svm_params
         )
         score = res[0]
@@ -494,6 +499,7 @@ def main():
         global_best_params['sharpness_low'], global_best_params['sharpness_high'],
         global_best_params['face_size_low'], global_best_params['face_size_high'],
         global_best_params['retouching'], global_best_params['mask'], global_best_params['glasses'],
+        rotation=global_best_params['rotation'],
         grayscale=False, model_name=best_model, svm_params=best_svm_params
     )
     sb_score = sb_res[0]
@@ -517,6 +523,7 @@ def main():
         final_params['sharpness_low'], final_params['sharpness_high'],
         final_params['face_size_low'], final_params['face_size_high'],
         final_params['retouching'], final_params['mask'], final_params['glasses'],
+        rotation=final_params.get('rotation', 0),
         grayscale=False, model_name=best_model, svm_params=best_svm_params
     )
     res_gray = run_trial(
@@ -525,6 +532,7 @@ def main():
         final_params['sharpness_low'], final_params['sharpness_high'],
         final_params['face_size_low'], final_params['face_size_high'],
         final_params['retouching'], final_params['mask'], final_params['glasses'],
+        rotation=final_params.get('rotation', 0),
         grayscale=True, model_name=best_model, svm_params=best_svm_params
     )
     
@@ -573,6 +581,7 @@ def main():
         f"--sharpness_percentile_high {final_params['sharpness_high']} "
         f"--face_size_percentile_low {final_params['face_size_low']} "
         f"--face_size_percentile_high {final_params['face_size_high']} "
+        f"--rotation_percentile {final_params['rotation']} "
         f"--retouching_percentile {final_params['retouching']} "
         f"--mask_percentile {final_params['mask']} "
         f"--glasses_percentile {final_params['glasses']} "

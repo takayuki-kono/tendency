@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import json
 import logging
@@ -50,6 +51,8 @@ SHARPNESS_PERCENTILE_LOW = 0  # Filter bottom X% by sharpness (Laplacian varianc
 SHARPNESS_PERCENTILE_HIGH = 0  # Filter top X% by sharpness
 FACE_SIZE_PERCENTILE_LOW = 0   # Filter bottom X% by face size (small images)
 FACE_SIZE_PERCENTILE_HIGH = 0  # Filter top X% by face size (large images)
+# 元画像に対する in-plane 傾き補正量（絶対度数）。part1 の _rz ミリ度またはランドマークから推定
+ROTATION_FILTER_PERCENTILE = 0
 RETOUCHING_PERCENTILE = 0  # Filter bottom X% by skin smoothness (retouched images have lower values)
 MASK_PERCENTILE = 0 # Filter top X% by mask likelihood (high score = mask)
 GLASSES_PERCENTILE = 0 # Filter top X% by glasses likelihood (high score = glasses)
@@ -72,6 +75,27 @@ face_app = None
 MANIFEST_SCHEMA_VERSION = 1
 
 
+def roll_degrees_from_landmarks_106(lmk) -> float:
+    """鼻先(86)〜顎(0)の線と縦軸から in-plane roll（度）。part1_setup.process_and_save_face と同一。"""
+    if lmk is None or len(lmk) < 87:
+        return 0.0
+    dx = float(lmk[86][0] - lmk[0][0])
+    dy = float(lmk[86][1] - lmk[0][1])
+    return float(np.arctan2(dx, -dy) * 180.0 / np.pi)
+
+
+def face_roll_abs_deg_from_filename(filename: str):
+    """
+    part1 が付与する _rz<ミリ度>（度×1000 の整数、符号あり）を読む。
+    無ければ None。
+    """
+    m = re.search(r"_rz(-?\d+)", filename, flags=re.IGNORECASE)
+    if not m:
+        return None
+    mdeg = int(m.group(1))
+    return abs(mdeg / 1000.0)
+
+
 def _manifest_filter_percentile_args(args):
     """CLI で渡したフィルタ関連引数のスナップショット（再現用）。"""
     return {
@@ -85,6 +109,7 @@ def _manifest_filter_percentile_args(args):
         "sharpness_percentile_high": int(args.sharpness_percentile_high),
         "face_size_percentile_low": int(args.face_size_percentile_low),
         "face_size_percentile_high": int(args.face_size_percentile_high),
+        "rotation_percentile": int(getattr(args, "rotation_percentile", 0)),
         "aspect_ratio_cutoff": int(args.aspect_ratio_cutoff),
         "retouching_percentile": int(args.retouching_percentile),
         "mask_percentile": int(args.mask_percentile),
@@ -115,6 +140,7 @@ def _build_split_filter_manifest(
     th_retouching,
     th_mask,
     th_glasses,
+    th_rotation,
     per_label_eyebrow,
     no_valid_faces=False,
 ):
@@ -131,6 +157,9 @@ def _build_split_filter_manifest(
         "sharpness_upper_reject_if_strictly_greater": float(th_sharpness_high) if args.sharpness_percentile_high > 0 else None,
         "face_size_lower_reject_if_strictly_less": float(th_face_size_low) if args.face_size_percentile_low > 0 else None,
         "face_size_upper_reject_if_strictly_greater": float(th_face_size_high) if args.face_size_percentile_high > 0 else None,
+        "face_roll_abs_deg_upper_reject_if_strictly_greater": float(th_rotation)
+        if getattr(args, "rotation_percentile", 0) > 0
+        else None,
         "aspect_ratio_lower_reject_if_strictly_less": float(th_ar_low) if args.aspect_ratio_cutoff > 0 else None,
         "aspect_ratio_upper_reject_if_strictly_greater": float(th_ar_high) if args.aspect_ratio_cutoff > 0 else None,
         "skin_smoothness_lower_reject_if_strictly_less": float(th_retouching) if args.retouching_percentile > 0 else None,
@@ -372,27 +401,19 @@ def analyze_single_image(args):
     aspect_ratio = box_h / (box_w + 1e-6)
     
     # Face Size from filename (e.g., xxx_sz150.jpg -> 150)
-    import re
     filename = os.path.basename(path)
     sz_match = re.search(r'_sz(\d+)', filename)
     face_size = int(sz_match.group(1)) if sz_match else 0
-    
-    res['valid'] = True
-    res['metrics'] = {
-        'pitch': pitch,
-        'symmetry': symmetry,
-        'y_diff': y_diff,
-        'mouth_open': mouth_open,
-        'eb_eye_dist': eb_eye_dist,
-        'sharpness': sharpness,
-        'skin_smoothness': skin_smoothness,
-        'aspect_ratio': aspect_ratio,
-        'face_size': face_size
-    }
+
+    # In-plane roll（元画像に対する傾き補正の大きさ［度・絶対値］）。part1 の _rz 優先、無ければランドマーク
+    roll_fn = face_roll_abs_deg_from_filename(filename)
+    roll_lmk_abs = abs(roll_degrees_from_landmarks_106(lmk))
+    face_roll_deg_abs = roll_fn if roll_fn is not None else roll_lmk_abs
+
     # Mask & Glasses
     mask_score = calculate_mask_likehood(img, lmk)
     glasses_score = calculate_glasses_score(img, lmk)
-    
+
     res['valid'] = True
     res['metrics'] = {
         'pitch': pitch,
@@ -404,8 +425,9 @@ def analyze_single_image(args):
         'skin_smoothness': skin_smoothness,
         'aspect_ratio': aspect_ratio,
         'face_size': face_size,
+        'face_roll_deg_abs': face_roll_deg_abs,
         'mask_score': mask_score,
-        'glasses_score': glasses_score
+        'glasses_score': glasses_score,
     }
     return res
 
@@ -468,7 +490,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     os.makedirs(cache_dir, exist_ok=True)
     
     # Include face_pos_filter arg in cache key because it affects analysis result (valid bit)
-    cache_key = f"{os.path.basename(src_root)}_{total}"
+    cache_key = f"{os.path.basename(src_root)}_{total}_rz1"
     cache_file = os.path.join(cache_dir, f"metrics_{hashlib.md5(cache_key.encode()).hexdigest()}.pkl")
     
     results = []
@@ -546,6 +568,10 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     th_sym = get_th('symmetry', args.symmetry_percentile)
     th_y = get_th('y_diff', args.y_diff_percentile)
     th_mouth = get_th('mouth_open', args.mouth_open_percentile)
+
+    th_rotation = 0.0
+    if getattr(args, "rotation_percentile", 0) > 0:
+        th_rotation = get_th("face_roll_deg_abs", args.rotation_percentile)
     
     # Sharpness threshold (lower bound - filter blurry images)
     th_sharpness_low = 0
@@ -588,7 +614,13 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         if retouch_vals:
             th_retouching = np.percentile(retouch_vals, args.retouching_percentile)
     
-    logger.info(f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}, AR<={th_ar_low:.3f}|>={th_ar_high:.3f}, Retouch>={th_retouching:.1f}")
+    roll_log = f", RollAbsDeg>{th_rotation:.4f}" if getattr(args, "rotation_percentile", 0) > 0 else ""
+    logger.info(
+        f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, "
+        f"Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}, "
+        f"AR<={th_ar_low:.3f}|>={th_ar_high:.3f}, Retouch>={th_retouching:.1f}"
+        f"{roll_log}"
+    )
     
     # Mask thresholds (filter top X% - likely mask)
     th_mask = 999.0
@@ -674,6 +706,8 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                 reason = 'face_size_low_global'
             elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high:
                 reason = 'face_size_high_global'
+            elif getattr(args, "rotation_percentile", 0) > 0 and m.get("face_roll_deg_abs", 0) > th_rotation:
+                reason = 'rotation_global'
             elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high):
                 reason = 'aspect_ratio_global'
             elif args.retouching_percentile > 0 and m.get('skin_smoothness', float('inf')) != float('inf') and m.get('skin_smoothness', float('inf')) < th_retouching:
@@ -791,6 +825,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         th_retouching,
         th_mask,
         th_glasses,
+        th_rotation,
         per_label_eyebrow,
     )
     return total, saved_count, skipped_count, manifest
@@ -816,7 +851,13 @@ def main():
     parser.add_argument("--sharpness_percentile_high", type=int, default=SHARPNESS_PERCENTILE_HIGH, help="Filter top X% by sharpness")
     parser.add_argument("--face_size_percentile_low", type=int, default=FACE_SIZE_PERCENTILE_LOW, help="Filter bottom X% by face size (small images)")
     parser.add_argument("--face_size_percentile_high", type=int, default=FACE_SIZE_PERCENTILE_HIGH, help="Filter top X% by face size (large images)")
-    
+    parser.add_argument(
+        "--rotation_percentile",
+        type=int,
+        default=ROTATION_FILTER_PERCENTILE,
+        help="Filter top X% by in-plane face roll correction (degrees abs; from filename _rz or landmarks)",
+    )
+
     # Aspect Ratio
     parser.add_argument("--aspect_ratio_cutoff", type=int, default=0, help="Filter both top/bottom X% outliers in aspect ratio")
     
@@ -869,6 +910,7 @@ def main():
         logger.info(f"  Eb-Eye Pct (High/Low): {args.eyebrow_eye_percentile_high} / {args.eyebrow_eye_percentile_low} (PER PERSON)")
         logger.info(f"  Sharpness Pct Low/High: {args.sharpness_percentile_low} / {args.sharpness_percentile_high}")
         logger.info(f"  Face Size Pct Low/High: {args.face_size_percentile_low} / {args.face_size_percentile_high}")
+        logger.info(f"  Rotation (roll abs deg) Pct: {getattr(args, 'rotation_percentile', 0)}")
         logger.info(f"  Aspect Ratio Cutoff: {args.aspect_ratio_cutoff}")
         logger.info(f"  Retouching Pct: {args.retouching_percentile}")
         logger.info(f"  Mask Pct: {args.mask_percentile}")

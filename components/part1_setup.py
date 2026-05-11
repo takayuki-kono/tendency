@@ -209,7 +209,9 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name,
             dx = lmk[86][0] - lmk[0][0]
             dy = lmk[86][1] - lmk[0][1]
             angle = np.arctan2(dx, -dy) * 180 / np.pi
-            
+            # preprocess_multitask の顔回転パーセンタイル用（ミリ度＝deg×1000、ファイル名は整数）
+            rz_mdeg = int(round(float(angle) * 1000.0))
+
             center = (work_img.shape[1] / 2, work_img.shape[0] / 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
             rotated_img = cv2.warpAffine(work_img, M, (work_img.shape[1], work_img.shape[0]))
@@ -251,9 +253,9 @@ def process_and_save_face(img_path, rotated_dir, face_app, engine_name,
             # 4. Resize to 224x224
             final_resized = cv2.resize(cropped, (IMG_SIZE, IMG_SIZE))
             
-            # 5. Save with size info (元のface_size - 正規化前の値を記録)
+            # 5. Save with size info (元のface_size - 正規化前の値を記録) + 傾き補正角（_rz はミリ度）
             orig_w = int(face_w)
-            new_filename = f"{engine_name}_{uuid.uuid4().hex[:8]}_sz{orig_w}.jpg"
+            new_filename = f"{engine_name}_{uuid.uuid4().hex[:8]}_sz{orig_w}_rz{rz_mdeg}.jpg"
             dest_path = os.path.join(rotated_dir, new_filename)
             
             if imwrite_safe(dest_path, final_resized):
