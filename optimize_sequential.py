@@ -1130,9 +1130,11 @@ def main():
     baseline_score = best_model_score
     
     # --- Parameter Optimization (recording efficiency) ---
+    # 眉-目はフォルダ単位の相対パーセンタイルのため optimize では探索しない（試行では常に 0）。
+    # 手動で preprocess_multitask.py を実行するときのみ --eyebrow_eye_percentile_* を指定可能。
     param_names = [
         'pitch', 'sym', 'y_diff', 'mouth_open',
-        'eb_eye_high', 'eb_eye_low', 'sharpness_low', 'sharpness_high',
+        'sharpness_low', 'sharpness_high',
         'face_size_low', 'face_size_high', 'rotation', 'retouching', 'mask', 'glasses'
     ]
     

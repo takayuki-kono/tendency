@@ -35,6 +35,7 @@
     - **係数**: `[1.0, 0.5, 0.25]` (例: 係数0.5なら、各カット率を半分にする)。
     - スコアが低下するパラメータはスキップし、残りの候補も継続して試す（途中で打ち切らない）。
 4.  **結果出力**: 最適化されたパラメータを用いた `preprocess_multitask.py` の実行コマンドを表示。
+    - **眉-目パーセンタイル**: 個人フォルダ内の相対カットにつながるため、`optimize_svm_sequential.py` の自動探索からは除外（preprocess 呼び出しは high/low を `0` 固定）。本番データ作成で眉-目を使うときは、`preprocess_multitask.py` を直接叩いて指定する。
 
 ### 手法B: CNNベース最適化 (高精度・低速)
 - **スクリプト**: `optimize_sequential.py`
@@ -42,6 +43,7 @@
 - **特徴**: SVMよりも最終的なタスクに近いが、1試行に時間がかかる（数分/回）。
 - **探索設定**:
     - **探索点**: `[0, 5, 25, 50, 75]` (初期探索) -> 1%刻みの二分探索 (Refinement)。
+    - **眉-目パーセンタイル**（`--eyebrow_eye_percentile_*`）: **探索対象外**（試行では常に 0）。`preprocess_multitask.py` 単体実行時のみ手動で指定可能。
 - **Phase 1 結果サマリー**: 全パラメータの独立探索完了後に「精度上昇効率一覧」をログ出力。各パラメータの Best Score 候補と Best Efficiency 候補をテーブル形式で表示し、全体の Overall Best Score / Best Efficiency も出力する。
 - **出力アーティファクト**:
     - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。

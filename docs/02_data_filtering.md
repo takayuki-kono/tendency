@@ -62,7 +62,7 @@
 最終的な学習用データセットを作成するために、画像品質に基づくフィルタリングを行います。
 
 ### 主なフィルタ項目
-パラメータは `optimize_sequential.py` で最適化されることがあります。
+パラメータの一部は `optimize_sequential.py` / `optimize_svm_sequential.py` で強度が探索されます。**眉-目距離のパーセンタイル（`--eyebrow_eye_percentile_*`）は最適化スクリプトでは探索しない**（常に 0 で呼ぶ）。別途 `preprocess_multitask.py` を手動実行するときのみ指定してください。
 
 1.  **Sharpness (鮮明度)**
     -   手法: **Laplacian Variance** (エッジの鋭さ) を計算。
