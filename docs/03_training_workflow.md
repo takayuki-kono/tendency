@@ -53,7 +53,7 @@
     - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / **`learning_rate`** / **`lr_calib_context`**（head・train+val 枚数・`base_lr`）を更新。Step 0 の各モデルキャリブでは **保存 `lr_calib_context` と（モデル・枚数・head）が一致する候補だけ** 保存 `base_lr` を `initial_lr` に、それ以外は `LR_CALIBRATION_INITIAL`（0.01）。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
     - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
-    - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) 同範囲 **かつ** last_epoch_accu < trial_score（ピーク後下降）→ 再調整せず終了 (3) 試行回数が LR_MAX_ADJUSTMENTS に達した → 終了
+    - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) `for adj_iter in range(LR_MAX_ADJUSTMENTS+1)` の試行回数上限（最大 7 試行）でループ終了
     - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01、plateau）
     - **調整計算（時間軸）**: `ratio = best_epoch / target_epoch`（**比の上下限なし**）で `new_lr = current_lr * ratio`（実 LR は `clip_learning_rate_for_training` の絶対域。auto_lr の sqrt スケールは別）
     - 全試行中の最高スコアの結果を採用する。
@@ -95,7 +95,7 @@
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
    - **手順**:
      1. Epoch 13 に収束するLRを特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**（`lr_calibration_should_stop`）: (1) **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）→ 終了 (2) **11≤best_epoch≤15 かつ last_accu < best**（ピーク後下降）→ 終了 (3) **`calibrate_base_lr` のループが `LR_CALIBRATION_MAX_ITERATIONS`（既定10）回に達した** → 終了。run_calibration_trial は last_epoch_accu も返す。
+  - **キャリブレーションの打ち切り**: **`lr_calibration_should_stop`（各 trial 直後）** — **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）。**そのほか** — **`calibrate_base_lr` が `LR_CALIBRATION_MAX_ITERATIONS`（既定10）到達**、または **LR 相対変化 `< 0.02`**（従来どおり）。run_calibration_trial は last_epoch_accu も返す。
   - **候補採点ルール**（2026-04-22 修正）: 最終選択は `(distance, -score, ...)` タプルで比較する。すなわち `target_best_epoch` からの距離（`abs(best_epoch - target)`）が最小の iteration を優先採用し、距離同率のときのみ score（`MinClassAcc` など）の大きい方を採用する。
      - 旧仕様（`(-score, distance, ...)` = score 最優先）だと、noisy val 環境で target から離れた iteration が score 偶発で採用されるため、target=13 に寄せるループ自体が無意味化していた問題を修正。
      - `train_sequential.py` では `calibrate_base_lr(score_priority=False)` を全呼び出しで使用（デフォルト）。`score_priority=True` の旧挙動は互換のため残存するが実使用しない。

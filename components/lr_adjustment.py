@@ -2,7 +2,7 @@
 
 LR_TARGET_EPOCH = 13
 LR_ACCEPTABLE_MIN = 11
-LR_ACCEPTABLE_MAX = 15  # 許容範囲・ピーク後下降で終了する上限（両方に使用）
+LR_ACCEPTABLE_MAX = 15  # early-stop 帯の上限（lr_calibration_should_stop / should_exit）
 LR_MAX_ADJUSTMENTS = 6
 # calibrate_base_lr（optimize / train_sequential）の試行回数上限。run_trial の LR 再調整回数とは独立。
 LR_CALIBRATION_MAX_ITERATIONS = 10
@@ -72,12 +72,9 @@ def lr_adjustment_decision(best_epoch, last_epoch_accu, trial_score, training_ep
     run_trial 内のLR再調整ループで使う判定。
     戻り値: (should_exit: bool, log_message: str|None, need_adjust: bool, effective_epoch: int|None)
     """
-    # 許容範囲内かつ last≠best なら調整完了
+    # 許容帯内かつ last≠best なら再調整ループ終了（lr_calibration_should_stop と同一）
     if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - trial_score) >= LR_LAST_ACCU_EPS:
         return (True, f"  BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Done.", False, None)
-    # 許容範囲内で last < best（ピーク後に下降）なら再調整しないで終了
-    if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and last_epoch_accu < trial_score:
-        return (True, f"  BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu < best (peaked then declined). Done.", False, None)
 
     need_adjust = False
     effective_epoch = best_epoch
@@ -93,13 +90,12 @@ def lr_adjustment_decision(best_epoch, last_epoch_accu, trial_score, training_ep
 
 def lr_calibration_should_stop(best_epoch, last_epoch_accu, score):
     """
-    キャリブレーションの終了条件（run_trial の lr_adjustment_decision と同一条件に揃える）。
+    calibrate_base_lr の試行ごとの早期終了（満足打ち切り）。
+    run_trial の lr_adjustment_decision の should_exit と同一。
     戻り値: (should_stop: bool, log_message: str|None)
     """
     if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - score) >= LR_LAST_ACCU_EPS:
         return (True, f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Stopping calibration.")
-    if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and last_epoch_accu < score:
-        return (True, f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu < best (peaked then declined). Stopping calibration.")
     return (False, None)
 
 
