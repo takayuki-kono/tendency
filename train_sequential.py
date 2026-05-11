@@ -721,6 +721,7 @@ def main():
         'mixup_alpha': 0.0,
         'label_smoothing': 0.0,
         'weight_decay': 0.0,
+        'optimizer': 'adam',
         'fine_tune': 'False'
     }
 
@@ -749,8 +750,21 @@ def main():
     current_params['learning_rate'] = head_lr
     logger.info(f"Calibrated head LR for {best_model}: {head_lr:.8f}")
 
-    # --- Step 1.5: Weight Decay (Optimizer Selection) ---
-    # 0.0=Adam, >0=AdamW
+    # --- Step 1.25: Optimizer（モデル・head LR 確定後。weight_decay はまだ 0 のまま） ---
+    logger.info(
+        f"\n>>> Step 1.25: Optimizer Selection "
+        f"(model={best_model}, head_lr fixed) <<<"
+    )
+    best_opt, _ = optimize_param(
+        'optimizer',
+        ['adam', 'adamw', 'sgd'],
+        current_params,
+        head_only_tie_log,
+    )
+    current_params['optimizer'] = best_opt
+
+    # --- Step 1.5: Weight Decay ---
+    # weight_decay は AdamW ではオプティマイザ側、adam/sgd では Dense L2（trial 側で振り分け）
     best_wd, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params, head_only_tie_log)
     current_params['weight_decay'] = best_wd
     

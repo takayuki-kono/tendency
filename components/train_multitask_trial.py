@@ -361,6 +361,108 @@ class MinClassAccuracy(tf.keras.metrics.Metric):
         self.total_count.assign(tf.zeros(self.num_classes))
 
 
+_ADAMW_AVAIL_CACHE = None
+
+
+def _adamw_runtime_available():
+    """TensorFlow ビルドに AdamW が含まれるか（起動後1回だけ試行しキャッシュ）。"""
+    global _ADAMW_AVAIL_CACHE
+    if _ADAMW_AVAIL_CACHE is not None:
+        return _ADAMW_AVAIL_CACHE
+    ok = False
+    try:
+        _o = tf.keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-4)
+        del _o
+        ok = True
+    except (AttributeError, TypeError):
+        try:
+            _o = tf.keras.optimizers.legacy.AdamW(learning_rate=1e-4, weight_decay=1e-4)
+            del _o
+            ok = True
+        except (AttributeError, TypeError):
+            ok = False
+    _ADAMW_AVAIL_CACHE = ok
+    return ok
+
+
+def normalize_optimizer_name(name):
+    n = (name or "adam").strip().lower()
+    if n in ("adam", "adamw", "sgd"):
+        return n
+    raise ValueError(
+        f"Unsupported optimizer: {name!r}. Expected one of 'adam', 'adamw', 'sgd'."
+    )
+
+
+def resolve_weight_decay_for_graph(optimizer_name, weight_decay):
+    """
+    AdamW が使え wd>0: オプティマイザ側の weight_decay に任せ Dense L2 は付けない。
+    それ以外（adam/sgd・AdamW不可時のフォールバック）で wd>0: Dense に L2(weight_decay)。
+    戻り値: (use_adamw_weight_decay_on_optimizer: bool, kernel_l2_lambda: float)
+    """
+    wd = float(weight_decay or 0.0)
+    opt = normalize_optimizer_name(optimizer_name)
+    if opt == "adamw" and wd > 0.0 and _adamw_runtime_available():
+        return True, 0.0
+    # adam/sgd、および AdamW要請だが未対応 or wd=0
+    return False, wd
+
+
+def build_optimizer(
+    optimizer_name,
+    learning_rate,
+    *,
+    clipnorm=None,
+    weight_decay_optimizer: float = 0.0,
+):
+    """compile 時用オプティマイザ。momentum は SGD のみ 0.9 + Nesterov 固定。"""
+    extra = {}
+    if clipnorm is not None:
+        extra["clipnorm"] = clipnorm
+    lr = clip_learning_rate_for_training(learning_rate)
+    name = normalize_optimizer_name(optimizer_name)
+    wd_opt = float(weight_decay_optimizer or 0.0)
+
+    if name == "adamw":
+        if _adamw_runtime_available():
+            for factory in (
+                lambda: tf.keras.optimizers.AdamW(
+                    learning_rate=lr, weight_decay=wd_opt, **extra
+                ),
+                lambda: tf.keras.optimizers.legacy.AdamW(
+                    learning_rate=lr, weight_decay=wd_opt, **extra
+                ),
+            ):
+                try:
+                    return factory()
+                except (AttributeError, TypeError):
+                    continue
+        logger.warning(
+            "AdamW が利用できないため Adam にフォールバックしました"
+        )
+
+    if name == "sgd":
+        try:
+            return tf.keras.optimizers.legacy.SGD(
+                learning_rate=lr,
+                momentum=0.9,
+                nesterov=True,
+                **extra,
+            )
+        except AttributeError:
+            return tf.keras.optimizers.SGD(
+                learning_rate=lr,
+                momentum=0.9,
+                nesterov=True,
+                **extra,
+            )
+
+    try:
+        return tf.keras.optimizers.legacy.Adam(learning_rate=lr, **extra)
+    except AttributeError:
+        return tf.keras.optimizers.Adam(learning_rate=lr, **extra)
+
+
 def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropout, learning_rate, augment_params, task_labels):
     model_map = {
         'EfficientNetV2B0': EfficientNetV2B0,
@@ -401,9 +503,14 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(head_dropout)(x)
 
-    # Weight Decay: L2正則化で実装（AdamWが使えない環境向け）
-    wd = augment_params.get('weight_decay', 0.0)
-    kernel_reg = tf.keras.regularizers.l2(wd) if wd > 0 else None
+    # Weight decay: AdamW+対応環境ではオプティマイザ側、それ以外は Dense kernel L2
+    wd_raw = augment_params.get("weight_decay", 0.0)
+    _, kernel_l2 = resolve_weight_decay_for_graph(
+        augment_params.get("optimizer", "adam"), wd_raw,
+    )
+    kernel_reg = (
+        tf.keras.regularizers.l2(kernel_l2) if kernel_l2 > 0 else None
+    )
 
     for _ in range(num_dense_layers):
         x = layers.Dense(dense_units, kernel_regularizer=kernel_reg)(x)
@@ -443,11 +550,27 @@ def create_model(model_name, num_dense_layers, dense_units, dropout, head_dropou
         metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
         metrics_dict[name] = metrics_list
 
-    # Optimizer: Weight DecayはDense層のkernel_regularizerで適用済み
-    try:
-        optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate)
-    except AttributeError:
-        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    opt_raw_str = augment_params.get("optimizer", "adam")
+    use_opt_wd, _ = resolve_weight_decay_for_graph(opt_raw_str, wd_raw)
+    wd_for_opt_scalar = float(wd_raw or 0.0) if use_opt_wd else 0.0
+    opt_name_eff = opt_raw_str
+    if (
+            normalize_optimizer_name(opt_raw_str) == "adamw"
+            and float(wd_raw or 0.0) > 0
+            and not use_opt_wd
+    ):
+        logger.warning(
+            "optimizer=adamw かつ weight_decay>0 だが AdamW が無効なため、"
+            "Adam + Dense L2(weight_decay) で学習します"
+        )
+        opt_name_eff = "adam"
+
+    optimizer = build_optimizer(
+        opt_name_eff,
+        learning_rate,
+        clipnorm=None,
+        weight_decay_optimizer=wd_for_opt_scalar,
+    )
 
     model.compile(
         optimizer=optimizer,
@@ -558,8 +681,13 @@ def main():
     parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--label_smoothing', type=float, default=0.0)
     parser.add_argument('--weight_decay', type=float, default=0.0)
-    
-    # Augmentation Params
+    parser.add_argument(
+        '--optimizer',
+        type=str,
+        default='adam',
+        choices=['adam', 'adamw', 'sgd'],
+        help='adam: Dense L2 when weight_decay>0; adamw: decoupled WD on optimizer when TF supports it',
+    )
     parser.add_argument('--rotation_range', type=float, default=0.0) # 0.0-1.0 (fraction of 2pi)
     parser.add_argument('--width_shift_range', type=float, default=0.0)
     parser.add_argument('--height_shift_range', type=float, default=0.0)
@@ -609,7 +737,8 @@ def main():
         'horizontal_flip': args.horizontal_flip.lower() == 'true',
         'mixup_alpha': args.mixup_alpha,
         'label_smoothing': args.label_smoothing,
-        'weight_decay': args.weight_decay
+        'weight_decay': args.weight_decay,
+        'optimizer': args.optimizer,
     }
     
     single_task_mode = args.single_task_mode.lower() == 'true'
@@ -922,10 +1051,25 @@ def main():
                 m_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
                 metrics_dict_wu[name] = m_list
             
-            try:
-                opt_wu = tf.keras.optimizers.legacy.Adam(learning_rate=args.warmup_lr, clipnorm=1.0)
-            except AttributeError:
-                opt_wu = tf.keras.optimizers.Adam(learning_rate=args.warmup_lr, clipnorm=1.0)
+            use_opt_wd_wu, _ = resolve_weight_decay_for_graph(
+                args.optimizer, args.weight_decay,
+            )
+            wd_side_wu = (
+                float(args.weight_decay or 0.0) if use_opt_wd_wu else 0.0
+            )
+            opt_eff_wu = args.optimizer
+            if (
+                normalize_optimizer_name(args.optimizer) == "adamw"
+                and float(args.weight_decay or 0.0) > 0
+                and not use_opt_wd_wu
+            ):
+                opt_eff_wu = "adam"
+            opt_wu = build_optimizer(
+                opt_eff_wu,
+                args.warmup_lr,
+                clipnorm=1.0,
+                weight_decay_optimizer=wd_side_wu,
+            )
             
             model.compile(
                 optimizer=opt_wu,
@@ -997,11 +1141,31 @@ def main():
         metrics_list.append(MinClassAccuracy(len(labels), name='min_class_accuracy'))
         metrics_dict[name] = metrics_list
     
-    logger.info(f"Training LR: {current_lr:.8f} (clipnorm=1.0)")
-    try:
-        optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=current_lr, clipnorm=1.0)
-    except AttributeError:
-        optimizer = tf.keras.optimizers.Adam(learning_rate=current_lr, clipnorm=1.0)
+    use_opt_ft, _ = resolve_weight_decay_for_graph(
+        augment_params.get('optimizer', 'adam'),
+        augment_params.get('weight_decay', 0.0),
+    )
+    wd_side_ft = (
+        float(augment_params.get('weight_decay', 0.0) or 0.0)
+        if use_opt_ft else 0.0
+    )
+    opt_eff_ft = augment_params.get('optimizer', 'adam')
+    if (
+        normalize_optimizer_name(augment_params.get('optimizer', 'adam')) == 'adamw'
+        and float(augment_params.get('weight_decay', 0.0) or 0.0) > 0
+        and not use_opt_ft
+    ):
+        opt_eff_ft = 'adam'
+
+    logger.info(
+        f"Training LR: {current_lr:.8f} | optimizer={opt_eff_ft} | clipnorm=1.0"
+    )
+    optimizer = build_optimizer(
+        opt_eff_ft,
+        current_lr,
+        clipnorm=1.0,
+        weight_decay_optimizer=wd_side_ft,
+    )
 
     model.compile(
         optimizer=optimizer,
