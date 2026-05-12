@@ -103,11 +103,11 @@ pip install beautifulsoup4 lxml json_repair pyfreeproxy alive_progress pathvalid
     - **Step 3.5 (Fine-Tuning LR):** Fine-tuning 前に LR キャリブ。**`train_sequential`** では **carryover（3.9 重み・warmup 無し）と warmup（init 無し）の 2 系統**を同一 `initial_lr` で走らせ、**検証が高い方**を採用（`docs/03_training_workflow.md` 参照）。
         - `calibrate_base_lr`（target は `train_sequential` の Step 3.5 と同趣旨）。
         - `unfreeze_layers=60` を暫定値として使用。
-    - **Step 4.7（Final FT LR）:** `search_ft_lr_by_targets` が **epoch 帯 10〜15** を `target_best_epoch=(10,15)` として **`calibrate_base_lr` を 1 回**実行し、その中で最良の Val / LR を採用。**キャリブスコアが Best-of-N を上回るとき**は、その LR で **フル FT の `run_trial` 1 本**を回して `best_sequential_model.keras` を更新する。
+    - **Step 4.7（Final FT LR）:** `search_ft_lr_by_targets` が **ターゲット 12, 13, 14** について **`calibrate_base_lr` を連続 3 回**実行する。**開始 LR** は 1 本目だけ共通解決値、**2 本目以降は直前ターゲットの採用 LR を引き継ぎ**（一気通貫）。返った 3 つの Val を比較して **最も高い結果の LR を採用**。**キャリブスコアが Best-of-N を上回るとき**のみ、その LR で **フル FT の `run_trial` 1 本**を回して `best_sequential_model.keras` を更新する。
     - **Step 4.5-4.7 (FT後の再最適化):**
-        - unfreeze_layers確定後、必要に応じてFT LRを再探索（Target=10〜15）。
+        - unfreeze_layers確定後、必要に応じてFT LRを再探索（Target=13 等、Step 4.5 参照）。
         - FT条件下でdropout, head_dropout, weight_decayを再最適化。
-        - 正則化パラメータ変更後に Final FT LR Calibration (Target 10〜15探索) を実施。
+        - 正則化パラメータ変更後に Final FT LR Calibration（Step 4.7: ターゲット 12・13・14 の 3 本キャリブ）を実施。
 - **Fine-tuning:**
     - 最適化されたパラメータを用いて、最終的に全層解凍によるFine-tuningを実施。
     - **FT LRの外部制御 (2026-02-14):** `train_multitask_trial.py` のPhase 2 LRハードコード(`/100`)を廃止。`--learning_rate` をそのまま使用し、`train_sequential.py` のLRキャリブレーションで最適値を決定。

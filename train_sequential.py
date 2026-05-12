@@ -52,6 +52,7 @@ from components.lr_adjustment import (
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
+    clip_learning_rate_for_training,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
     lr_calib_mode_from_fine_tune,
     parse_lr_calib_context,
@@ -517,12 +518,14 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
 def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epoch=None, score_priority=False):
     """
     cal_epochs の学習を繰り返し、target_best_epoch でベストになるLRを二分探索で探す。
-    - best_epoch < target → LR高すぎ → 下げる（上限記録）
-    - best_epoch > target → LR低すぎ → 上げる（下限記録）
-    - 両方の境界が揃ったら中間値を試す
+    - best_epoch < target_min → LR高すぎ → lr_high 記録
+    - best_epoch > target_max → LR低すぎ → lr_low 記録（帯タプルのときのみ target_max を上限とする）
+    - 帯内 → 二分境界は汚さず、ratio または sqrt(lr_low·lr_high) で次 LR
+    `target_best_epoch` がタプル `(lo,hi)` のとき、満足打ち切りは `lo..hi` と一致（11〜15 に固定しない）。
     
     Returns:
-        tuple: (calibrated_lr, final_score)
+        tuple: (calibrated_lr, final_score, chosen_best_epoch)
+            chosen_best_epoch は最終採用候補（距離・score 比較後）の試行で観測した BEST_EPOCH。
     """
     if target_best_epoch is None:
         target_min = target_max = float(max(1, cal_epochs // 2))
@@ -531,8 +534,17 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         target_max = float(target_best_epoch[1])
     else:
         target_min = target_max = float(target_best_epoch)
-        
-    current_lr = initial_lr
+
+    current_lr = clip_learning_rate_for_training(initial_lr)
+
+    # 帯タプルキャリブでは打ち切り帯を target と一致（FT 4.7 の 10〜15 が 11〜15 固定になるのを防ぐ）
+    if isinstance(target_best_epoch, tuple):
+        acceptable_band = (
+            max(1, int(round(target_min))),
+            min(int(cal_epochs), int(round(target_max))),
+        )
+    else:
+        acceptable_band = None
     
     logger.info(f"\n{'='*50}")
     logger.info(f"LR Calibration Start")
@@ -540,15 +552,19 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch={target_min:.0f}")
     else:
         logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch=[{target_min:.0f}, {target_max:.0f}]")
-    logger.info(f"  initial_lr = {initial_lr:.8f}")
+    logger.info(f"  initial_lr(raw) = {float(initial_lr):.8f}")
+    logger.info(f"  initial_lr(clip) = {current_lr:.8f}")
     logger.info(f"{'='*50}")
     
     best_candidate = None  # (sort_key, lr, best_epoch, score)
     max_iterations = LR_CALIBRATION_MAX_ITERATIONS
 
     # 二分探索の境界 (LR値で管理)
-    lr_low = None   # best_epoch > target になった最大LR（LR低すぎ側）
-    lr_high = None  # best_epoch < target になった最小LR（LR高すぎ側）
+    # lr_high: best_epoch < target_min 側（LR 高すぎ）で観測した最小 current_lr
+    # lr_low : best_epoch > target_max 側（LR 低すぎ）で観測した最大 current_lr
+    # 帯内 [target_min, target_max] は境界を汚さない（旧 else だと遅ピークと混同していた）
+    lr_low = None
+    lr_high = None
 
     for iteration in range(max_iterations):
         best_epoch, score, last_epoch_accu = run_calibration_trial(current_params, current_lr, cal_epochs)
@@ -569,7 +585,9 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         
         logger.info(f"Calibration #{iteration+1}: LR={current_lr:.8f}, BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}, Distance={distance:.0f}")
 
-        should_stop, stop_msg = lr_calibration_should_stop(best_epoch, last_epoch_accu, score)
+        should_stop, stop_msg = lr_calibration_should_stop(
+            best_epoch, last_epoch_accu, score, acceptable_band=acceptable_band
+        )
         if should_stop and stop_msg:
             logger.info(stop_msg)
             break
@@ -579,14 +597,12 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
 
         # 境界更新
         if best_epoch < target_min:
-            # LR高すぎ → 上限を記録
             if lr_high is None or current_lr < lr_high:
                 lr_high = current_lr
-        else:
-            # LR低すぎ → 下限を記録
+        elif best_epoch > target_max:
             if lr_low is None or current_lr > lr_low:
                 lr_low = current_lr
-        
+
         # 次のLR決定
         if lr_low is not None and lr_high is not None:
             # 両境界あり → 幾何平均（log空間の中点）
@@ -613,58 +629,108 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
             logger.info(f"  LR change too small. Stopping.")
             break
         
-        current_lr = new_lr
+        current_lr = clip_learning_rate_for_training(new_lr)
 
+    chosen_best_epoch = None
     if best_candidate is not None:
         _, _, chosen_lr, chosen_epoch, chosen_score = best_candidate
+        chosen_best_epoch = int(chosen_epoch)
         logger.info(
             f"Calibration selected best candidate: LR={chosen_lr:.8f}, "
             f"BestEpoch={chosen_epoch}/{cal_epochs}, Score={chosen_score:.4f}"
         )
         current_lr, score = chosen_lr, chosen_score
 
+    if chosen_best_epoch is None:
+        chosen_best_epoch = int(cal_epochs)
+
     logger.info(f"\nCalibrated Base LR: {current_lr:.8f}, Final Score: {score:.4f}")
     logger.info(f"{'='*50}")
-    return current_lr, score
+    return current_lr, score, chosen_best_epoch
 
 
-def search_ft_lr_by_targets(current_params, initial_lr, targets=(10, 11, 12, 13, 14, 15), cal_epochs=20):
+def search_ft_lr_by_targets(current_params, initial_lr, targets=(12, 13, 14), cal_epochs=20):
     """
-    Step 4.7: FT 用 LR を **一回の** `calibrate_base_lr` で決める。
+    Step 4.7: FT 用 LR を、ベスト epoch ターゲットごとに **`calibrate_base_lr` を連続実行**
+    （一つの Step の中で順に処理）して決める。
 
-    `targets` の最小・最大を帯 ``[lo, hi]`` とみなし、`target_best_epoch=(lo, hi)` として
-    ベスト epoch がその帯に入るように二分＋片側比で LR を探索する（**各 target ごとに
-    `initial_lr` に戻して別キャリブを繰り返さない**）。
+    **既定ターゲット**は epoch **12, 13, 14** の 3 点（`targets` で上書き可）。
 
-    旧: 10..15 を 1 本ずつ `calibrate_base_lr(..., target_best_epoch=t)` で実行し、
-    毎回 `initial_lr` からやり直していた。
+    **一気通貫**: 先頭ターゲットだけ Step 4.7 で解決した ``initial_lr`` から入り、
+    **以降は直前ターゲットのキャリブ採用 LR を次の開始 LR に載せ替え**て探索する（毎回リセットしない）。
+
+    **採用**は各キャリブで返る **検証精度（キャリブ採点）** の最大。`_is_same_score`（差 0.01 未満）
+    で同点なら |`chosen_best_epoch`−t| が小さい結果、さらに同率では **t が大きい結果**を採用する。
+
+    `targets` に重複や `cal_epochs` 超過があればユニーク化・クランプする。
     """
     if targets is None:
-        lo, hi = 10, 15
+        ordered = [12, 13, 14]
     else:
-        tlist = list(targets)
-        if not tlist:
-            lo, hi = 10, 15
-        else:
-            lo, hi = int(min(tlist)), int(max(tlist))
+        ordered = sorted({int(x) for x in targets})
+    tlist = [t for t in ordered if 1 <= t <= int(cal_epochs)]
+    if not tlist:
+        tlist = [t for t in (12, 13, 14) if t <= int(cal_epochs)]
+    if not tlist:
+        raise ValueError(f"search_ft_lr_by_targets: no valid targets in {targets!r} for cal_epochs={cal_epochs}")
+
+    _iclip = clip_learning_rate_for_training(initial_lr)
     logger.info(f"\n{'='*50}")
     logger.info(
-        f"FT LR Search (single pass): target_best_epoch band=[{lo}, {hi}], "
-        f"cal_epochs={cal_epochs}, start_lr={initial_lr:.8f}"
+        f"FT LR Search ({len(tlist)}-way, chained): targets={tlist}, cal_epochs={cal_epochs}, "
+        f"first start_lr(raw)={float(initial_lr):.8g} clip={_iclip:.8f}; "
+        f"each next target seeds from previous calibrated LR"
     )
     logger.info(f"{'='*50}")
-    lr, score = calibrate_base_lr(
-        current_params,
-        initial_lr=initial_lr,
-        cal_epochs=cal_epochs,
-        target_best_epoch=(lo, hi),
+
+    rows = []
+    next_start = clip_learning_rate_for_training(initial_lr)
+    for ti, tgt in enumerate(tlist):
+        logger.info(
+            f"\n>>> Step 4.7 calibration {ti + 1}/{len(tlist)}: target_best_epoch={tgt} "
+            f"(initial_lr={next_start:.8f}) <<<"
+        )
+        lr_t, sc_t, be_t = calibrate_base_lr(
+            current_params,
+            initial_lr=next_start,
+            cal_epochs=cal_epochs,
+            target_best_epoch=int(tgt),
+        )
+        next_start = clip_learning_rate_for_training(lr_t)
+        rows.append(
+            {
+                "target": int(tgt),
+                "lr": float(lr_t),
+                "score": float(sc_t),
+                "chosen_best_epoch": int(be_t),
+            }
+        )
+        logger.info(
+            f"  → target={tgt}: LR={lr_t:.8f}, calib_val={sc_t:.4f}, chosen_best_epoch={be_t} "
+            f"(next initial_lr={next_start:.8f})"
+        )
+
+    best_score = max(r["score"] for r in rows)
+    leaders = [r for r in rows if _is_same_score(r["score"], best_score)]
+    winner = min(
+        leaders,
+        key=lambda r: (abs(r["chosen_best_epoch"] - r["target"]), -r["target"]),
     )
+
     logger.info(f"\n{'='*50}")
+    logger.info("FT LR Search — summary (compare calib scores across targets)")
+    for r in sorted(rows, key=lambda x: x["target"]):
+        mark = "*" if r is winner else " "
+        logger.info(
+            f"  {mark} target={r['target']}: LR={r['lr']:.8f}, val={r['score']:.4f}, "
+            f"chosen_best_epoch={r['chosen_best_epoch']}"
+        )
     logger.info(
-        f"FT LR Search Complete: band=[{lo},{hi}], Selected LR={lr:.8f}, Val={score:.4f}"
+        f"Selected: target={winner['target']}, LR={winner['lr']:.8f}, val={winner['score']:.4f} "
+        f"(chosen_best_epoch={winner['chosen_best_epoch']})"
     )
     logger.info(f"{'='*50}")
-    return lr, score
+    return winner["lr"], winner["score"]
 
 
 def main():
@@ -742,7 +808,7 @@ def main():
         f"(model_name={best_model}, target_best_epoch=13) <<<"
     )
     _il12 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
-    head_lr, _ = calibrate_base_lr(
+    head_lr, _, _ = calibrate_base_lr(
         current_params, initial_lr=_il12,
         cal_epochs=20, target_best_epoch=13
     )
@@ -875,7 +941,7 @@ def main():
             "\n>>> Step 3.5 (A carryover): FT LR Calibration "
             f"(init_weights_path={BEST_HEAD_WEIGHTS_PATH}, warmup skipped) <<<"
         )
-        lr_carry, score_3_5_carry = calibrate_base_lr(
+        lr_carry, score_3_5_carry, _ = calibrate_base_lr(
             p_carry, initial_lr=_il35,
             cal_epochs=20, target_best_epoch=13
         )
@@ -895,7 +961,7 @@ def main():
         "\n>>> Step 3.5 (B warmup): FT LR Calibration "
         f"(no init_weights, warmup_lr={head_lr:.8g}, warmup_epochs=5) <<<"
     )
-    lr_scratch, score_3_5_scratch = calibrate_base_lr(
+    lr_scratch, score_3_5_scratch, _ = calibrate_base_lr(
         p_scratch, initial_lr=_il35,
         cal_epochs=20, target_best_epoch=13
     )
@@ -980,7 +1046,7 @@ def main():
                 f"(unfreeze_layers={best_unfreeze}, 暫定60と異なるため再調整) <<<"
             )
             _il45 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
-            ft_lr2, _ = calibrate_base_lr(
+            ft_lr2, _, _ = calibrate_base_lr(
                 current_params, initial_lr=_il45,
                 cal_epochs=20, target_best_epoch=13
             )
@@ -1041,7 +1107,7 @@ def main():
             )
 
     if head_finish:
-        logger.info("\n>>> Step 4.7: skipped (head-only finish — FT LR 帯探索は不要) <<<")
+        logger.info("\n>>> Step 4.7: skipped (head-only finish — multi-target FT LR search 不要) <<<")
         final_lr = float(head_lr)
         final_report_score = best_bon_score
     else:
@@ -1056,8 +1122,7 @@ def main():
         logger.info("\n>>> Step 4.7: Final FT LR Search (after best-of-N seed) <<<")
         _il47 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
         final_lr, final_ft_score = search_ft_lr_by_targets(
-            current_params, initial_lr=_il47,
-            targets=[10, 11, 12, 13, 14, 15], cal_epochs=20
+            current_params, initial_lr=_il47, cal_epochs=20
         )
         record_calibrate_context(current_params['model_name'], current_params['fine_tune'], final_lr)
         current_params['learning_rate'] = final_lr

@@ -99,13 +99,14 @@
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
    - **手順**:
      1. Epoch 13 に収束するLRを特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**: **`lr_calibration_should_stop`（各 trial 直後）** — **11≤best_epoch≤15 かつ last_epoch_accu≠best**（差≥0.01）。**そのほか** — **`calibrate_base_lr` が `LR_CALIBRATION_MAX_ITERATIONS`（既定10）到達**、または **LR 相対変化 `< 0.02`**（従来どおり）。run_calibration_trial は last_epoch_accu も返す。
+  - **キャリブレーションの打ち切り**: **`lr_calibration_should_stop`（各 trial 直後）**。`target_best_epoch` が **タプル帯 `(lo, hi)`** のときは **`lo≤best_epoch≤hi`**（`cal_epochs` で上限クランプ）かつ **last_epoch_accu≠best**（差≥`LR_LAST_ACCU_EPS`）。**単一ターゲットまたは None** のときは従来どおり **11〜15**（`LR_ACCEPTABLE_*`）。**そのほか** — **`calibrate_base_lr` が `LR_CALIBRATION_MAX_ITERATIONS`（既定10）到達**、または **LR 相対変化 `< 0.02`**。run_calibration_trial は last_epoch_accu も返す。
   - **候補採点ルール**（2026-04-22 修正）: 最終選択は `(distance, -score, ...)` タプルで比較する。すなわち `target_best_epoch` からの距離（`abs(best_epoch - target)`）が最小の iteration を優先採用し、距離同率のときのみ score（`MinClassAcc` など）の大きい方を採用する。
      - 旧仕様（`(-score, distance, ...)` = score 最優先）だと、noisy val 環境で target から離れた iteration が score 偶発で採用されるため、target=13 に寄せるループ自体が無意味化していた問題を修正。
      - `train_sequential.py` では `calibrate_base_lr(score_priority=False)` を全呼び出しで使用（デフォルト）。`score_priority=True` の旧挙動は互換のため残存するが実使用しない。
-  - **探索方式**（2026-04-22 統一）: `optimize_sequential.py` / `train_sequential.py` の `calibrate_base_lr` は、両境界 `lr_low` / `lr_high` を記憶する **log 空間二分探索** で統一。
-     - `best_epoch < target_min` → `lr_high = current_lr`（上限更新）。
-     - `best_epoch >= target_min`（帯内含む） → `lr_low = current_lr`（下限更新）。
+  - **探索方式**（2026-04-22 統一、2026-05-12 帯モード修正）: `optimize_sequential.py` / `train_sequential.py` の `calibrate_base_lr` は **log 空間二分**（両境界あり）と **片側比** で統一。
+     - `best_epoch < target_min` → `lr_high = current_lr`（LR高すぎ側の最小試行）。
+     - `best_epoch > target_max` → `lr_low = current_lr`（LR低すぎ側の最大試行）。
+     - **`target_min ≤ best_epoch ≤ target_max`（帯内含む単一点 target では best_epoch がターゲットと一致する場合）では境界を更新しない**（旧実装では帯内含む試行まで `lr_low` に入り二分が歪む問題があった）。
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
      - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。
      - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
@@ -258,7 +259,7 @@
 - **分岐: FT キャリブが head-only フェーズベスト未満のとき** — **Step 4 / 4.5 / Step 4.7 をスキップ**。`fine_tune=False`・`learning_rate=head_lr`・`init_weights_path=best_head.weights.h5`（無ければ WARNING）で **Best-of-N のみ**（各 run に `--export_model_path=outputs/models/model_seed{seed}.keras`）。採用 seed のモデルを `best_sequential_model.keras` にコピー。`outputs/best_train_params.json` に `finish_mode=head_only`、`score_step_3_9_head` / **`score_step_3_5_ft_calib`**（Step 3.5 勝者） / `score_head_only_phase_best` / **`ft_calib_carryover_selected`** / `score_step_3_5_ft_calib_carry` / `score_step_3_5_ft_calib_warmup` 等を記録。
 - **Step 4 / 4.5** — **上記分岐で head-only 仕上げの場合はスキップ。** それ以外（**FT キャリブが head-only フェーズベスト以上**、すなわち `score_3_5 >= score_head_only_phase_best`）では、従来どおり `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
 - **Best-of-N（先）** — **head-only 仕上げ**のときは複数 seed で **head-only**（上記）。**FT 継続**のときは複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。その時点の `model_seed{best_seed}.keras` を **`best_sequential_model.keras` に仮コピー**（Step 4.7 より前）。
-- **Step 4.7** — **head-only 仕上げのときはスキップ。** **FT 継続**のとき、`seed` 固定のまま `search_ft_lr_by_targets` で **epoch 帯 10〜15** に対し `calibrate_base_lr` を 1 回実行し、**`final_lr`** とキャリブスコア **`final_ft_score`** を確定。**`final_ft_score` > Best-of-N スコア**のとき、`final_lr` で **フル FT を `run_trial` 1 本**（`FINAL_EPOCHS`・同 seed）し、その結果を `model_seed{best_seed}.keras` → **`best_sequential_model.keras` に再コピー**。**`log_result` / 終端ログの「saved model score」はそのフル run のスコア**（キャリブ値とわずかに差があり得る）。**それ以外**は Best-of-N 時のコピーを維持。**実行直前に `outputs/cache/train_opt_cache.json` を削除**。
+- **Step 4.7** — **head-only 仕上げのときはスキップ。** **FT 継続**のとき、`seed` 固定のまま `search_ft_lr_by_targets` が **ターゲット 12 / 13 / 14 の 3 回**だけ **`calibrate_base_lr(..., target_best_epoch=t)` を同一 Step 内で連続実行**。**一気通貫**: 最初だけ Step 4.7 用に解決した `initial_lr` から入り、**2 本目以降は直前ターゲットのキャリブ採用 LR を次の `initial_lr` に載せ替える**。この **3 本の検証スコア**を比べ **最高のものを採用**（`_is_same_score` 同点群内では、|`chosen_best_epoch`−t| が小さい方、さらに同率では **t が大きい方**）。**`final_ft_score` > Best-of-N** のときだけ `final_lr` でフル FT（`FINAL_EPOCHS`・同 seed）の `run_trial` を 1 本走らせ `best_sequential_model.keras` を更新。**`log_result` の終端スコアはそのフル run**（キャリブ値より僅かに異なり得る）。**それ以外**は Best-of-N のコピーを維持。**実行直前に `outputs/cache/train_opt_cache.json` を削除**。
 - **掃除** — `model_seed{42..44}.keras` を削除（4.7 export 実行後も含め、ループ末尾で削除）。
 
 ### Head carryover に使う weights ファイル
