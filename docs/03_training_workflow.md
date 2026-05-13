@@ -304,6 +304,10 @@ d:\tendency\
 
 ## 5. コマンドリファレンス
 
+### エラー分析 (`util/analyze_errors.py`)
+- クラスフォルダ配下は **再帰的に**画像を収集する（例: `train/a/橋本環奈/person_clusters/person_1/*.jpg`）。
+- **人物別精度**（コンソール `Per-Person Accuracy` / `report.json` の `per_person_accuracy`）は、各画像について **クラス名 / クラス直下の最初のパス要素**をキーに集計する（上例では `a/橋本環奈`。`person_clusters` 以下は同一人物にまとまる）。クラス直下にだけ画像がある場合は `a/__class_root__`。
+
 ### 1. データの準備
 ```cmd
 # キャッシュ削除 (データ変更時必須)

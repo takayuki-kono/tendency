@@ -3,6 +3,9 @@
 学習済みモデルの予測ミスを可視化・分析する。
 デフォルト: 前処理前の train と validation の両方で実行（out_dir/train/, out_dir/val/ に出力）。
 単一ディレクトリのみ分析する場合は --data_dir を指定する。
+
+クラス配下がネストした場合（例: train/a/橋本環奈/person_clusters/person_1/*.jpg）も、
+クラス直下を再帰的に走査して読み込む。人物別精度は「クラス名/クラス直下のサブフォルダ名」単位。
 """
 import os
 import shutil
@@ -29,6 +32,8 @@ DEFAULT_VAL_DIR = 'validation'
 OUTPUT_DIR = 'error_analysis'
 CACHE_DIR = 'outputs/cache'
 
+_IMG_EXTS = ('.jpg', '.jpeg', '.png')
+
 # 画像設定
 IMG_SIZE = 224
 BATCH_SIZE = 32
@@ -41,28 +46,41 @@ ALL_TASK_LABELS = []
 TASK_NAMES = []
 
 
-def analyze_data_distribution(image_paths):
-    """検証データのタスクごとのクラス分布を分析"""
-    from collections import defaultdict
-    
-    # フォルダ名からカウントを取得
-    folder_counts = defaultdict(int)
-    for path in image_paths:
-        folder_name = os.path.basename(os.path.dirname(path))
-        folder_counts[folder_name] += 1
-    
+def _iter_image_files_under(root_dir):
+    """root_dir 以下の画像パスを再帰的に列挙"""
+    for dirpath, _dirnames, filenames in os.walk(root_dir):
+        for f in filenames:
+            if f.lower().endswith(_IMG_EXTS):
+                yield os.path.join(dirpath, f)
+
+
+def _person_bucket_key(image_path, class_dir, class_label):
+    """
+    クラスフォルダ class_dir から見た相対パスの先頭要素を「人物バケツ」とする。
+    例: class_dir=.../a, path=.../a/橋本環奈/person_clusters/person_1/x.jpg -> "a/橋本環奈"
+    クラス直下にのみ画像がある場合: "a/__class_root__"
+    """
+    rel = os.path.relpath(image_path, class_dir)
+    rel_norm = rel.replace("\\", "/")
+    parts = rel_norm.split("/")
+    if len(parts) == 1:
+        return f"{class_label}/__class_root__"
+    return f"{class_label}/{parts[0]}"
+
+
+def analyze_data_distribution(image_paths, true_labels):
+    """真ラベルに基づきタスクごとのクラス分布を分析（ネストしたパスでも正しい）"""
     print("\n" + "=" * 60)
     print("検証データのクラス分布 (Data Distribution)")
     print("=" * 60)
     
     for task_idx, (task_labels, task_name) in enumerate(zip(ALL_TASK_LABELS, TASK_NAMES)):
         label_counts = {label: 0 for label in task_labels}
-        
-        for folder_name, count in folder_counts.items():
-            if len(folder_name) > task_idx:
-                char = folder_name[task_idx]
-                if char in label_counts:
-                    label_counts[char] += count
+        for tl in true_labels:
+            if task_idx < len(tl):
+                li = tl[task_idx]
+                if 0 <= li < len(task_labels):
+                    label_counts[task_labels[li]] += 1
         
         task_total = sum(label_counts.values())
         
@@ -74,7 +92,7 @@ def analyze_data_distribution(image_paths):
             print(f"  {label}: {cnt:>5} ({pct:>5.1f}%) {bar}")
 
 def load_validation_data(data_dir):
-    """検証データを読み込み、画像パスとラベルを取得 (シングル/マルチタスク対応)"""
+    """検証データを読み込み、(image_paths, true_labels, person_keys) を返す。"""
     global ALL_TASK_LABELS, TASK_NAMES
     
     image_paths = []
@@ -82,12 +100,12 @@ def load_validation_data(data_dir):
     
     if not os.path.exists(data_dir):
         print(f"Error: Data directory not found: {data_dir}")
-        return [], []
+        return [], [], []
 
     # ディレクトリ構造を解析してタスク定義を更新
     subdirs = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
     if not subdirs:
-        return [], []
+        return [], [], []
         
     first_dir = subdirs[0]
     
@@ -192,27 +210,20 @@ def load_validation_data(data_dir):
     
     for label_name in subdirs:
         label_dir = os.path.join(data_dir, label_name)
-        if not os.path.isdir(label_dir): continue
+        if not os.path.isdir(label_dir):
+            continue
         
         idx = class_to_idx[label_name]
-        
-        # Recursive search or direct
-        # Direct files
-        files = [f for f in os.listdir(label_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        for f in files:
-            image_paths.append(os.path.join(label_dir, f))
-            true_labels.append((idx,)) # Single task tuple
-            
-        # Recursive (person subdirs)
-        for item in os.listdir(label_dir):
-            item_path = os.path.join(label_dir, item)
-            if os.path.isdir(item_path):
-                files = [f for f in os.listdir(item_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                for f in files:
-                    image_paths.append(os.path.join(item_path, f))
-                    true_labels.append((idx,))
+        for path in _iter_image_files_under(label_dir):
+            image_paths.append(path)
+            true_labels.append((idx,))
 
-    return image_paths, true_labels
+    person_keys = [
+        _person_bucket_key(p, os.path.join(data_dir, ALL_TASK_LABELS[0][tl[0]]), ALL_TASK_LABELS[0][tl[0]])
+        for p, tl in zip(image_paths, true_labels)
+    ]
+
+    return image_paths, true_labels, person_keys
 
 
 def predict_batch(model, image_paths):
@@ -377,18 +388,13 @@ def collect_correct(image_paths, true_labels, predictions, task_idx, task_labels
     return correct
 
 
-def analyze_per_combination(image_paths, true_labels, predictions):
-    """マルチラベル組み合わせ単位での精度を分析"""
-    from collections import defaultdict
-    
-    # フォルダ名（組み合わせ）を抽出
+def analyze_per_combination(image_paths, true_labels, predictions, person_keys):
+    """全タスク正解率を、person_keys（例: a/橋本環奈）単位で集計"""
     combination_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
     
     for i, (path, true_label) in enumerate(zip(image_paths, true_labels)):
-        # フォルダ名を取得
-        folder_name = os.path.basename(os.path.dirname(path))
+        bucket = person_keys[i] if i < len(person_keys) else os.path.basename(os.path.dirname(path))
         
-        # 全タスク正解判定
         all_correct = True
         for task_idx in range(len(ALL_TASK_LABELS)):
             if task_idx < len(true_label) and task_idx < len(predictions):
@@ -399,9 +405,9 @@ def analyze_per_combination(image_paths, true_labels, predictions):
                all_correct = False
                break
         
-        combination_stats[folder_name]['total'] += 1
+        combination_stats[bucket]['total'] += 1
         if all_correct:
-            combination_stats[folder_name]['correct'] += 1
+            combination_stats[bucket]['correct'] += 1
     
     # 精度を計算してソート
     results = {}
@@ -551,14 +557,14 @@ def run_analysis_for_dataset(model, data_dir, output_dir, dataset_name="data"):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     print(f"\nLoading data from: {data_dir} ({dataset_name})")
-    image_paths, true_labels = load_validation_data(data_dir)
+    image_paths, true_labels, person_keys = load_validation_data(data_dir)
     print(f"Found {len(image_paths)} images.")
 
     if len(image_paths) == 0:
         print(f"Warning: No images in {data_dir}. Skipping.")
         return
 
-    analyze_data_distribution(image_paths)
+    analyze_data_distribution(image_paths, true_labels)
 
     print("\nRunning predictions...")
     predictions = predict_batch(model, image_paths)
@@ -621,8 +627,9 @@ def run_analysis_for_dataset(model, data_dir, output_dir, dataset_name="data"):
 
         report[task_name]['metrics_comparison'] = {'errors': error_metrics, 'correct': correct_metrics}
 
-    print("\n--- Per-Combination Accuracy (全タスク正解率) ---")
-    combo_results = analyze_per_combination(image_paths, true_labels, predictions)
+    print("\n--- Per-Person Accuracy (クラス/人物サブフォルダ単位・全タスク正解率) ---")
+    combo_results = analyze_per_combination(image_paths, true_labels, predictions, person_keys)
+    report['per_person_accuracy'] = combo_results
     report['combination_accuracy'] = combo_results
     for combo, stats in combo_results.items():
         print(f"  {combo}: {stats['accuracy']*100:.1f}% ({stats['correct']}/{stats['total']})")
@@ -670,7 +677,7 @@ def main():
         run_analysis_for_dataset(model, args.data_dir, base_out, "data")
         print("\n" + "=" * 60)
         print(f"Analysis complete! Results saved to: {base_out}/")
-        print("  - confusion_matrix_*.png, errors/, correct/, report.json")
+        print("  - confusion_matrix_*.png, errors/, correct/, report.json, per_person_accuracy in report")
         print("=" * 60)
     else:
         train_dir = args.train_dir if args.train_dir is not None else DEFAULT_TRAIN_DIR
@@ -683,7 +690,7 @@ def main():
         run_analysis_for_dataset(model, val_dir, os.path.join(base_out, 'val'), "val")
         print("\n" + "=" * 60)
         print(f"Analysis complete! Results: {base_out}/train/ and {base_out}/val/")
-        print("  - confusion_matrix_*.png, errors/, correct/, report.json in each")
+        print("  - confusion_matrix_*.png, errors/, correct/, report.json in each (per_person_accuracy)")
         print("=" * 60)
 
 
