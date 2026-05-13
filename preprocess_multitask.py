@@ -106,6 +106,7 @@ def _manifest_filter_percentile_args(args):
         "mask_percentile": int(args.mask_percentile),
         "glasses_percentile": int(args.glasses_percentile),
         "grayscale": bool(getattr(args, "grayscale", False)),
+        "skip_class_balance": bool(getattr(args, "skip_class_balance", False)),
     }
 
 
@@ -450,6 +451,20 @@ def calculate_thresholds(*args, **kwargs):
     logger.warning("calculate_thresholds is deprecated and does nothing.")
     return 0,0,0,0
 
+
+def _class_key_from_rel_label(label):
+    """
+    process_dataset のグループラベル（src_root からの相対ディレクトリ、'/' 区切り）から
+    「クラス」キーを取る。先頭セグメント = 単一タスクのクラスフォルダ名（例: a, z）。
+    スラッシュが無いときはラベル全体をクラスとみなす（従来バグ: 空文字にまとめない）。
+    """
+    if not label or label == "root":
+        return label if label else "root"
+    if "/" in label:
+        return label.split("/", 1)[0]
+    return label
+
+
 def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     if not os.path.exists(src_root):
         logger.warning(f"Source dir not found: {src_root}")
@@ -735,7 +750,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     if not skip_undersampling:
         class_to_person_labels = defaultdict(list)
         for label in filtered_by_label:
-            class_key = label.split('/', 1)[0] if '/' in label else ''
+            class_key = _class_key_from_rel_label(label)
             class_to_person_labels[class_key].append(label)
 
         for class_key, person_labels in class_to_person_labels.items():
@@ -763,6 +778,41 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                     skipped_count += drop
                     skip_reasons['undersampling_post_filter'] += drop
                 filtered_by_label[pl] = tasks
+
+    # --- Undersampling (3) クラス間: 各クラス（先頭セグメント）の合計枚数を min に揃える ---
+    if not skip_undersampling and not getattr(args, "skip_class_balance", False):
+        label_to_class = {lb: _class_key_from_rel_label(lb) for lb in filtered_by_label}
+        totals = defaultdict(int)
+        for lb, tasks in filtered_by_label.items():
+            totals[label_to_class[lb]] += len(tasks)
+        active_totals = {k: v for k, v in totals.items() if v > 0}
+        if len(active_totals) >= 2:
+            target_bal = min(active_totals.values())
+            logger.info(
+                f"Undersampling (class balance) target total per class={target_bal} "
+                f"(class totals before={dict(sorted(active_totals.items()))})"
+            )
+            for ck, total_ck in list(active_totals.items()):
+                if total_ck <= target_bal:
+                    continue
+                cls_labels = [lb for lb in filtered_by_label if label_to_class[lb] == ck]
+                pooled = []
+                for lb in cls_labels:
+                    for it in filtered_by_label[lb]:
+                        pooled.append((lb, it))
+                random.shuffle(pooled)
+                keep_pairs = pooled[:target_bal]
+                kept_by_label = defaultdict(list)
+                for lb, it in keep_pairs:
+                    kept_by_label[lb].append(it)
+                for lb in cls_labels:
+                    before_n = len(filtered_by_label[lb])
+                    new_tasks = kept_by_label.get(lb, [])
+                    dropped = before_n - len(new_tasks)
+                    if dropped > 0:
+                        skipped_count += dropped
+                        skip_reasons["undersampling_class_balance"] += dropped
+                    filtered_by_label[lb] = new_tasks
 
     for label, label_valid_tasks in filtered_by_label.items():
         for item in label_valid_tasks:
@@ -878,6 +928,11 @@ def main():
         action="store_true",
         help="filter_threshold_manifest.json を書き出さない",
     )
+    parser.add_argument(
+        "--skip_class_balance",
+        action="store_true",
+        help="第3段アンダーサンプリング（クラス間の合計枚数を最少クラスに揃える）をスキップ",
+    )
 
     args = parser.parse_args()
     
@@ -907,6 +962,7 @@ def main():
         logger.info(f"  Mask Pct: {args.mask_percentile}")
         logger.info(f"  Glasses Pct: {args.glasses_percentile}")
         logger.info(f"  Grayscale: {args.grayscale}")
+        logger.info(f"  Skip class balance (undersampling stage 3): {getattr(args, 'skip_class_balance', False)}")
         fmp_raw = (getattr(args, "filter_manifest_path", "") or "").strip()
         write_manifest = not getattr(args, "no_filter_manifest", False)
         manifest_out = ""
@@ -940,7 +996,7 @@ def main():
                     "train / validation / test は各スプリットの valid 顔集合に対して別々にパーセンタイル閾値を算出している。",
                     "推論で学習データと同じ基準に揃える場合は通常 train の global / per_label を参照する。",
                     "眉-目距離はラベル（人物フォルダ等）単位。同一キーで per_label_eyebrow_thresholds を参照すること。",
-                    "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。",
+                    "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。第3段でクラス間（ラベル先頭セグメント）の合計枚数を最少クラスに揃える（--skip_class_balance で無効化）。",
                 ],
                 "splits": split_manifests,
             }
