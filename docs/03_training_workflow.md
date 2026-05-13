@@ -145,9 +145,9 @@
     - **グループ化**: ソースの**ディレクトリパス**（例: `a/森口瑤子`）単位。眉-目距離(Eb-Eye)のパーセンタイルとアンダーサンプリングはこの単位で行うため、個人（1フォルダ＝1人）ごとに「その人の上位○%」が残る。他指標（pitch/symmetry/sharpness等）の閾値は従来どおり全体分布で計算。※ファイル名に個人名が付いていなくても、フォルダ構造で個人が分かれていれば個人単位になる。
 2.  **判定**:
     - 各画像について、全指標が閾値内であれば「採用」。一つでも超えれば「不採用（スキップ）」。
-3.  **アンダーサンプリング**:
-    - **第 1 段**: フィルタ前の全グループ件数で「2 番目に多いグループ」までをグローバル上限とし、判定後に各グループへ適用（詳細は下記 preprocess_multitask の項）。
-    - **第 2 段**（multitask 前処理のみ）: フィルタ＋第 1 段適用後の残件で、**クラス単位**（ラベル先頭セグメント）に「2 番目に多い人」まで再間引き。
+3.  **アンダーサンプリング**（`preprocess_multitask.py` の詳細は下記）:
+    - **第 1 段**: フィルタ直後の残件で **クラス間**の合計枚数を **最少クラスに揃える**（`undersampling_class_balance`）。`--skip_class_balance` で無効化。
+    - **第 2 段**: 第 1 段のあと、**クラス内**でフルラベル（フォルダ）別の **2 番目に多い枚数**まで各バケツを間引く（`undersampling_post_filter`）。
 
 ### preprocess_multitask.py の詳細
 
@@ -159,13 +159,11 @@
 3. **閾値計算**:
    - **グローバル閾値**: 全 valid 画像の指標分布から算出。`pitch_percentile=10` なら「上位10%を落とす」ので `th_pitch = percentile(pitch, 90)`。同様に symmetry, y_diff, mouth_open, sharpness(低/高), face_size(低/高), aspect_ratio(両側), retouching, mask, glasses を計算。
    - **個人閾値**: グループ（ディレクトリパス）ごとに **眉-目距離 (eb_eye_dist)** だけ、そのグループ内の分布で `eyebrow_eye_percentile_low` / `eyebrow_eye_percentile_high` の閾値を計算。
-4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `eb_eye_low_personal`, `undersampling`, `undersampling_post_filter`, `undersampling_class_balance` などでログに集計される。
-5. **アンダーサンプリング（三段）**:
-    - **第 1 段（フィルタ前統計）**: 全グループの**元の**枚数（パーセンタイル判定前）から、**2 番目に多いグループの枚数**を `target_count_pre` とする（降順 `counts[1]`。グループが 1 つなら `counts[0]` で切らない）。各グループについてパーセンタイル等の判定を経た採用リストが `target_count_pre` を超えていれば、シャッフル後に先頭 `target_count_pre` 枚のみ残す（`skip_reasons['undersampling']`）。
-    - **第 2 段（フィルタ後・クラス内）**: 第 1 段まで終わった**残件数**について、**クラスキー** = グループラベル（相対ディレクトリ）の先頭セグメント（`/` より前）。**`/` が無いラベル（例: トップが `a` のみ）はその文字列全体をクラスキー**とする。クラスごとに、そのクラスに属する各人（フルラベル＝1 フォルダ）の残件数を集め、同様に **2 番目に多い人の枚数**を上限として各人を再間引き（シャッフル後に切り詰め）。超過分は `skip_reasons['undersampling_post_filter']`。
-    - **第 3 段（クラス間）**: 第 2 段の**あと**、クラスキーごとの**合計枚数**を算出し、**最も少ないクラスの合計**を `target` とする。`target` より多いクラスは、当該クラスに属する全画像をまとめてシャッフルし、**合計で `target` 枚だけ**残す（元のフルラベル単位に戻して格納）。削った枚数は `skip_reasons['undersampling_class_balance']`。正の枚数を持つクラスが **2 つ以上**のときのみ実行。`--skip_class_balance` で第 3 段のみ無効化できる。
-    - **`skip_undersampling`**: True のとき第 1〜第 3 段とも行わない。train/validation/test は同じ実装（通常 False）。
-    - **旧仕様との差分（第 1 段）**: 以前は `target_count = int(mean(counts))` で平均まで切っていたため、最多 1 人に引きずられて中位以下のグループまで削られる副作用があった。第 1 段では**最多の 1 人だけ**がグローバルな 2 位に合わせて切り詰められ、他のグループは原則そのまま残る（第 2 段でクラス内の偏りを再度抑える）。
+4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `eb_eye_low_personal`, `undersampling_post_filter`, `undersampling_class_balance` などでログに集計される。
+5. **アンダーサンプリング（二段）**:
+    - **第 1 段（クラス間）**: フィルタ直後の残件で、クラスキー（相対パス先頭セグメント）ごとの**合計枚数**を出し、**最少クラスと同じ合計**になるよう多いクラスからランダムに削る（`skip_reasons['undersampling_class_balance']`）。正の枚数のクラスが2つ以上のときのみ。`--skip_class_balance` で無効化。
+    - **第 2 段（クラス内・フォルダバケツ）**: 第 1 段の**あと**、クラスごとにフルラベル（フォルダ単位）別の残件数を集め、**そのクラス内で 2 番目に多いバケツの枚数**を上限として各バケツを切り詰める（`skip_reasons['undersampling_post_filter']`）。
+    - **`skip_undersampling`**: True のとき第 1・第 2 段とも行わない。train/validation/test は同じ実装（通常 False）。
 6. **コピー**: 採用された画像を `out_dir/train/`, `out_dir/validation/`, `out_dir/test/` にコピー。出力ファイル名は `rel = os.path.relpath(src, src_root)` の `parts` の先頭をディレクトリ、`parts[1:]` を `_` で連結した名前（例: `a/森口瑤子/foo.jpg` → `out_dir/train/a/森口瑤子_foo.jpg`）。`--grayscale` 指定時はグレースケール変換してから保存。
 
 **指標の定義（実装準拠）**:
@@ -184,7 +182,7 @@
 | Mask | 上顔/下顔の肌色比率から算出（高いほどマスク疑い） | 値 **>** 閾値 → 除外 |
 | Glasses | 目周辺エッジと額エッジの比（高いほど眼鏡疑い） | 値 **>** 閾値 → 除外 |
 
-**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--skip_class_balance`（第3段クラス間均衡のみスキップ）。  
+**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--skip_class_balance`（第1段クラス間均衡をスキップ）。  
 **出力**: `preprocessed_multitask/train/`, `preprocessed_multitask/validation/`, `preprocessed_multitask/test/`。これが `train_sequential.py` の直接の入力。
 
 ---
