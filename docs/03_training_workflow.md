@@ -99,7 +99,7 @@
   - **ターゲットEpoch**: **13**（LR_TARGET_EPOCH に合わせて train/optimize 共通）。
    - **手順**:
      1. Epoch 13 に収束するLRを特定し、ベースLRとして採用。
-  - **キャリブレーションの打ち切り**: **`lr_calibration_should_stop`（各 trial 直後）**。`target_best_epoch` が **タプル帯 `(lo, hi)`** のときは **`lo≤best_epoch≤hi`**（`cal_epochs` で上限クランプ）かつ **last_epoch_accu≠best**（差≥`LR_LAST_ACCU_EPS`）。**単一ターゲットまたは None** のときは従来どおり **11〜15**（`LR_ACCEPTABLE_*`）。**そのほか** — **`calibrate_base_lr` が `LR_CALIBRATION_MAX_ITERATIONS`（既定10）到達**、または **LR 相対変化 `< 0.02`**。run_calibration_trial は last_epoch_accu も返す。
+  - **キャリブレーションの打ち切り**: **`lr_calibration_should_stop`（各 trial 直後）**。`target_best_epoch` が **タプル帯 `(lo, hi)`** のときは **`lo≤best_epoch≤hi`**（`cal_epochs` で上限クランプ）かつ **last_epoch_accu≠best**（差≥`LR_LAST_ACCU_EPS`）。**単一ターゲットまたは None** のときは従来どおり **11〜15**（`LR_ACCEPTABLE_*`）。**そのほか** — **`calibrate_base_lr` が `LR_CALIBRATION_MAX_ITERATIONS`（既定10）到達**、または **LR 相対変化 `< LR_CALIB_MIN_RELATIVE_CHANGE`（既定 0.05＝5%）**。run_calibration_trial は last_epoch_accu も返す。
   - **候補採点ルール**（2026-04-22 修正）: 最終選択は `(distance, -score, ...)` タプルで比較する。すなわち `target_best_epoch` からの距離（`abs(best_epoch - target)`）が最小の iteration を優先採用し、距離同率のときのみ score（`MinClassAcc` など）の大きい方を採用する。
      - 旧仕様（`(-score, distance, ...)` = score 最優先）だと、noisy val 環境で target から離れた iteration が score 偶発で採用されるため、target=13 に寄せるループ自体が無意味化していた問題を修正。
      - `train_sequential.py` では `calibrate_base_lr(score_priority=False)` を全呼び出しで使用（デフォルト）。`score_priority=True` の旧挙動は互換のため残存するが実使用しない。
@@ -110,7 +110,7 @@
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
      - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。
      - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
-     - 収束判定: `|new_lr - current_lr| / current_lr < 0.02` なら以降の trial を打ち切り、最良候補を採用。
+     - 収束判定: `|new_lr - current_lr| / current_lr < LR_CALIB_MIN_RELATIVE_CHANGE`（`lr_adjustment.py`、既定 **0.05**＝5% 未満）なら以降の trial を打ち切り、最良候補を採用。
   - **LR の一本化（2026-04-25）**: `best_train_params.json` に記録する教師あり LR は **`learning_rate` のみ**（終端フェーズで実際に使う値）。旧キー `learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead` は保存時に削除され、読み込み互換のため `_skip_keys` でサブプロセスに転送しないだけ残す。
   - **JSON のみフィールド**: `finish_mode`・`score_step_3_*`・`lr_step_3_5_ft_calib_*`・`lr_calib_context` 等は **記録・復元用のみ**であり、`train_multitask_trial.py` には渡さない（`components/lr_adjustment.py` の **`TRAIN_MULTITASK_CLI_EXCLUDE_KEYS`** を `train_sequential` / `optimize_sequential` が subprocess 構築時に適用）。
   - **`lr_calib_context` と `calibrate_base_lr` の initial_lr（2026-04-25）**: JSON に **`lr_calib_context`**（`model_name`, `data_file_count`, `mode`=`head`|`ft`, `base_lr`）を保存する。**いずれかが変われば**（モデル・データ枚数・head-only vs FT）次回の `calibrate_base_lr` は **`LR_CALIBRATION_INITIAL`（0.01）から**。**三つとも前回保存と一致**すれば（同一ラン内は「直前のキャリブ結果」、別ランはディスクの `lr_calib_context`）**保存 `base_lr` を initial_lr にして再キャリブ**。`train_sequential` のデータ枚数は **`preprocessed_multitask/train` のファイル数**、`optimize_sequential` の Step 0 は **`train`+`validation` のファイル数**（各スクリプトのキャッシュキーと一致）。**`train_sequential.run_trial` の開始 LR も同じ `resolve_calib_initial_lr` で決める**（`params['learning_rate']` だけではモデル切替時に B0 用 LR が残るため）。

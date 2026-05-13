@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
     LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
+    LR_CALIB_MIN_RELATIVE_CHANGE,
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
@@ -625,8 +626,10 @@ def calibrate_base_lr(current_params, initial_lr, cal_epochs=10, target_best_epo
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
         
         # 収束判定: LR変化が十分小さい
-        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.02:
-            logger.info(f"  LR change too small. Stopping.")
+        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < LR_CALIB_MIN_RELATIVE_CHANGE:
+            logger.info(
+                f"  LR change too small (<{LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% rel). Stopping."
+            )
             break
         
         current_lr = clip_learning_rate_for_training(new_lr)

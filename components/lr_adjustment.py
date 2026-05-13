@@ -8,6 +8,8 @@ LR_MAX_ADJUSTMENTS = 6
 LR_CALIBRATION_MAX_ITERATIONS = 10
 # calibrate_base_lr の「新規」探索開始 LR（モデル・データ数・head/FT のいずれかが前回と異なるとき）
 LR_CALIBRATION_INITIAL = 0.01
+# calibrate_base_lr: 連続試行で LR の相対変化がこれ未満なら打ち止め（二分・ratio 更新後）
+LR_CALIB_MIN_RELATIVE_CHANGE = 0.05
 # best_train_params.json に保存する LR キャリブ文脈のキー（model / data_file_count / mode / base_lr）
 LR_CALIB_CONTEXT_JSON_KEY = "lr_calib_context"
 # JSON のみ／親スクリプト用で train_multitask_trial の argparse に存在しないキー（子プロセスへ渡さない）
@@ -88,14 +90,21 @@ def lr_adjustment_decision(best_epoch, last_epoch_accu, trial_score, training_ep
     return (False, None, need_adjust, effective_epoch if need_adjust else None)
 
 
-def lr_calibration_should_stop(best_epoch, last_epoch_accu, score):
+def lr_calibration_should_stop(best_epoch, last_epoch_accu, score, *, acceptable_band=None):
     """
     calibrate_base_lr の試行ごとの早期終了（満足打ち切り）。
     run_trial の lr_adjustment_decision の should_exit と同一。
+    `acceptable_band` が None のときは `LR_ACCEPTABLE_MIN`〜`LR_ACCEPTABLE_MAX`（既定 11〜15）。
+    `target_best_epoch` が帯タプル `(lo, hi)` のキャリブでは呼び出し側が同じ帯を渡し、
+    Step 4.7 の 10〜15 が 11〜15 固定で打ち切られないようにする。
     戻り値: (should_stop: bool, log_message: str|None)
     """
-    if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - score) >= LR_LAST_ACCU_EPS:
-        return (True, f"BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Stopping calibration.")
+    if acceptable_band is None:
+        lo, hi = LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX
+    else:
+        lo, hi = acceptable_band
+    if lo <= best_epoch <= hi and abs(last_epoch_accu - score) >= LR_LAST_ACCU_EPS:
+        return (True, f"BestEpoch {best_epoch} in [{lo}-{hi}] and last_accu≠best. Stopping calibration.")
     return (False, None)
 
 

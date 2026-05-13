@@ -68,9 +68,11 @@ from components.lr_adjustment import (
     LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
     LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
     LR_CALIBRATION_INITIAL,
+    LR_CALIB_MIN_RELATIVE_CHANGE,
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
+    clip_learning_rate_for_training,
     compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
     parse_lr_calib_context,
     resolve_calib_initial_lr,
@@ -380,6 +382,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     探索方式（train_sequential.py と統一）:
     - best_epoch < target_min → LR高すぎ → lr_high を current_lr で更新
     - best_epoch > target_max → LR低すぎ → lr_low を current_lr で更新
+    - 帯内 target_min〜target_max → 境界は更新しない（片側比のみで微調整／二分は両境界が揃ってから）
     - 両境界が揃ったら log 空間の中点（幾何平均 sqrt(lr_low * lr_high)）で次 LR 決定
       （LR は乗算スケールで効くため、算術平均より幾何平均の方が収束が速い）
     - 片側のみの場合は raw ratio (best_epoch/target) でスケーリング（クランプなし）
@@ -415,8 +418,16 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             )
             return float(cached[0]), float(cached[1])
 
-    current_lr = initial_lr
+    current_lr = clip_learning_rate_for_training(initial_lr)
     target_mid = (target_min + target_max) / 2.0
+
+    if isinstance(target_best_epoch, tuple):
+        acceptable_band = (
+            max(1, int(round(target_min))),
+            min(int(cal_epochs), int(round(target_max))),
+        )
+    else:
+        acceptable_band = None
 
     logger.info(f"\n{'='*50}")
     logger.info(f"LR Calibration Start (bisection, log-space)")
@@ -424,12 +435,13 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch={target_min:.0f}")
     else:
         logger.info(f"  cal_epochs={cal_epochs}, target_best_epoch=[{target_min:.0f}, {target_max:.0f}]")
-    logger.info(f"  initial_lr = {initial_lr:.8f}")
+    logger.info(f"  initial_lr(raw) = {float(initial_lr):.8f}")
+    logger.info(f"  initial_lr(clip) = {current_lr:.8f}")
     logger.info(f"{'='*50}")
 
     best_candidate = None  # (distance, -score, lr, best_epoch, score)
-    lr_low = None   # best_epoch >= target_min になった最大LR（LR低すぎ or 帯内）
-    lr_high = None  # best_epoch <  target_min になった最小LR（LR高すぎ）
+    lr_low = None   # best_epoch > target_max 側（LR 低すぎ）で観測した最大 current_lr
+    lr_high = None  # best_epoch < target_min 側（LR 高すぎ）で観測した最小 current_lr
     max_iterations = LR_CALIBRATION_MAX_ITERATIONS
 
     for iteration in range(max_iterations):
@@ -452,7 +464,9 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             f"BestEpoch={best_epoch}/{cal_epochs}, Score={score:.4f}, Distance={distance:.0f}"
         )
 
-        should_stop, stop_msg = lr_calibration_should_stop(best_epoch, last_epoch_accu, score)
+        should_stop, stop_msg = lr_calibration_should_stop(
+            best_epoch, last_epoch_accu, score, acceptable_band=acceptable_band
+        )
         if should_stop and stop_msg:
             logger.info(stop_msg)
             break
@@ -464,8 +478,7 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         if best_epoch < target_min:
             if lr_high is None or current_lr < lr_high:
                 lr_high = current_lr
-        else:
-            # best_epoch >= target_min（帯内含む） → LR 低すぎ寄り
+        elif best_epoch > target_max:
             if lr_low is None or current_lr > lr_low:
                 lr_low = current_lr
 
@@ -487,11 +500,13 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
         logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
 
         # 収束判定: LR変化が十分小さい
-        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < 0.02:
-            logger.info(f"  LR change too small. Stopping.")
+        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < LR_CALIB_MIN_RELATIVE_CHANGE:
+            logger.info(
+                f"  LR change too small (<{LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% rel). Stopping."
+            )
             break
 
-        current_lr = new_lr
+        current_lr = clip_learning_rate_for_training(new_lr)
 
     if best_candidate is not None:
         _, _, chosen_lr, chosen_epoch, chosen_score = best_candidate
