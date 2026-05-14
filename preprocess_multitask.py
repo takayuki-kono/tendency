@@ -939,7 +939,6 @@ def main():
         logger.info(f"  Mask Pct: {args.mask_percentile}")
         logger.info(f"  Glasses Pct: {args.glasses_percentile}")
         logger.info(f"  Grayscale: {args.grayscale}")
-        logger.info(f"  Skip class balance (undersampling stage 1): {getattr(args, 'skip_class_balance', False)}")
         fmp_raw = (getattr(args, "filter_manifest_path", "") or "").strip()
         write_manifest = not getattr(args, "no_filter_manifest", False)
         manifest_out = ""
