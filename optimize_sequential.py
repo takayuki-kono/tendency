@@ -40,6 +40,10 @@ MIN_VAL_PER_CLASS = 20
 # 係数 10 は "train/val/test 3 split × クラス数 × MIN_VAL_PER_CLASS" のおおよその下限を想定。
 LEGACY_CACHE_MIN_SAVED = MIN_VAL_PER_CLASS * 10
 
+# Phase 1 フィルタパーセンタイル粗探索（昇順）。
+# p>0 の評価で score が p=0 時点の score を下回ったら、それ以降の粗探索点は試さない。
+OPTIMIZE_COARSE_PERCENTILE_POINTS = (0, 5, 10, 20, 40, 50)
+
 # LRキャリブレーション結果（main()で設定される）
 CALIBRATED_BASE_LR = None
 LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
@@ -941,7 +945,14 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         logger.error(f"Error in trial: {e}")
         return (0.0, 0, 0)
 
-def optimize_single_param(target_name, current_params, model_name, baseline_score, baseline_filtered, points=[0, 5, 25, 50, 75]):
+def optimize_single_param(
+    target_name,
+    current_params,
+    model_name,
+    baseline_score,
+    baseline_filtered,
+    points=None,
+):
     """
     1つのパラメータを最適化する。
     
@@ -953,8 +964,14 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
         - filtered_diff: ベースラインからのフィルタリング枚数増加
         - efficiency: 効率 = improvement / (filtered_diff + 1)
     """
+    if points is None:
+        coarse_points = list(OPTIMIZE_COARSE_PERCENTILE_POINTS)
+    else:
+        coarse_points = sorted(set(points))
+
     logger.info(f"\n>>> Optimizing {target_name} [Model: {model_name}] <<<")
     logger.info(f"Baseline: Score={baseline_score:.4f}, Filtered={baseline_filtered}")
+    logger.info(f"Coarse percentile points (ascending): {coarse_points}")
     
     def evaluate_wrapper(val):
         # Independent Optimization: Always start from all-zero params
@@ -985,23 +1002,38 @@ def optimize_single_param(target_name, current_params, model_name, baseline_scor
     
     # 各探索点のスコアを記録（二分探索用）
     scores = {}
-    
-    for p in points:
+    score_at_p0 = None
+
+    for p in coarse_points:
         logger.info(f"Testing {target_name}={p}...")
         raw_score, total_images, filtered_count = evaluate_wrapper(p)
         logger.info(f"  {target_name}={p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
         scores[p] = (raw_score, total_images, filtered_count)
-        
+
+        if p == 0:
+            score_at_p0 = raw_score
+
         if raw_score > best_score:
             best_score = raw_score
             best_val = p
             best_filtered = filtered_count
             logger.info(f"  [NEW BEST] {target_name}={p} (Score: {raw_score:.4f})")
-    
+
+        if (
+            score_at_p0 is not None
+            and p > 0
+            and raw_score < score_at_p0
+        ):
+            logger.info(
+                f"  [Coarse] Stopping early: {target_name}={p} score {raw_score:.4f} "
+                f"< p=0 score {score_at_p0:.4f}"
+            )
+            break
+
     # --- 二分探索 Refinement ---
     # --- 二分探索 Refinement (1%単位まで探索) ---
-    # Initial searchで改善が見られた場合のみ実行
-    if best_score > baseline_score:
+    # Initial searchで改善が見られた場合のみ実行（評価済み点が2つ以上のとき）
+    if best_score > baseline_score and len(scores) >= 2:
         logger.info("  [Refinement] Starting binary search refinement to 1% resolution...")
         
         # 既存のスコア辞書 (scores) を使用して探索を継続
