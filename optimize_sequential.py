@@ -3,7 +3,6 @@ import sys
 import re
 import os
 import logging
-import math
 import time
 import json
 import hashlib
@@ -70,7 +69,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from components.lr_adjustment import (
-    LR_TARGET_EPOCH, LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX,
+    LR_TARGET_EPOCH,
     LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
     LR_CALIBRATION_INITIAL,
     LR_CALIB_MIN_RELATIVE_CHANGE,
@@ -78,7 +77,8 @@ from components.lr_adjustment import (
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
     clip_learning_rate_for_training,
-    compute_lr_adjustment_ratio, lr_adjustment_decision, lr_calibration_should_stop,
+    lr_bisect_update_bounds_and_next_raw,
+    lr_calibration_should_stop,
     parse_lr_calib_context,
     resolve_calib_initial_lr,
     make_lr_calib_context,
@@ -424,7 +424,6 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             return float(cached[0]), float(cached[1])
 
     current_lr = clip_learning_rate_for_training(initial_lr)
-    target_mid = (target_min + target_max) / 2.0
 
     if isinstance(target_best_epoch, tuple):
         acceptable_band = (
@@ -479,39 +478,31 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             logger.info(f"Reached max calibration iterations ({LR_CALIBRATION_MAX_ITERATIONS}). Stopping calibration.")
             break
 
-        # 境界更新
-        if best_epoch < target_min:
-            if lr_high is None or current_lr < lr_high:
-                lr_high = current_lr
-        elif best_epoch > target_max:
-            if lr_low is None or current_lr > lr_low:
-                lr_low = current_lr
-
-        # 次のLR決定
-        if lr_low is not None and lr_high is not None:
-            # 両境界あり → 幾何平均（log空間の中点）
-            new_lr = math.sqrt(lr_low * lr_high)
-            logger.info(f"  Bisection (geom): low={lr_low:.8f}, high={lr_high:.8f}, mid={new_lr:.8f}")
-        else:
-            # 片側のみ → raw ratio scaling（クランプなし）
-            # クランプを外した理由: 二分探索に入ると振動せず単調収束するため、
-            # 片側探索でも大胆に動いた方が早く反対側境界を踏める。
-            scale = compute_lr_adjustment_ratio(best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs)
-            new_lr = current_lr * scale
+        lr_low, lr_high, new_lr_raw, used_geom, scale = lr_bisect_update_bounds_and_next_raw(
+            best_epoch,
+            current_lr,
+            cal_epochs,
+            target_min,
+            target_max,
+            lr_low,
+            lr_high,
+        )
+        if used_geom:
             logger.info(
-                f"  Ratio scale: {scale:.4f}"
+                f"  Bisection (geom): low={lr_low:.8f}, high={lr_high:.8f}, mid={new_lr_raw:.8f}"
             )
+        else:
+            logger.info(f"  Ratio scale: {scale:.4f}")
 
-        logger.info(f"  LR: {current_lr:.8f} -> {new_lr:.8f}")
+        logger.info(f"  LR: {current_lr:.8f} -> {new_lr_raw:.8f}")
 
-        # 収束判定: LR変化が十分小さい
-        if abs(new_lr - current_lr) / max(current_lr, 1e-12) < LR_CALIB_MIN_RELATIVE_CHANGE:
+        if abs(new_lr_raw - current_lr) / max(current_lr, 1e-12) < LR_CALIB_MIN_RELATIVE_CHANGE:
             logger.info(
                 f"  LR change too small (<{LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% rel). Stopping."
             )
             break
 
-        current_lr = clip_learning_rate_for_training(new_lr)
+        current_lr = clip_learning_rate_for_training(new_lr_raw)
 
     if best_candidate is not None:
         _, _, chosen_lr, chosen_epoch, chosen_score = best_candidate
@@ -839,6 +830,10 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         current_training_lr = adjusted_lr
         best_trial_score = 0.0
         best_trial_output = None
+        target_min = target_max = float(LR_TARGET_EPOCH)
+        acceptable_band = None
+        lr_low_rt = None
+        lr_high_rt = None
 
         for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
             if adj_iter > 0:
@@ -895,18 +890,41 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
                 best_trial_output = full_output
 
             logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
-            should_exit, log_msg, need_adjust, effective_epoch = lr_adjustment_decision(
-                best_epoch, last_epoch_accu, trial_score, training_epochs
+            should_stop, stop_msg = lr_calibration_should_stop(
+                best_epoch, last_epoch_accu, trial_score, acceptable_band=acceptable_band
             )
-            if should_exit and log_msg:
-                logger.info(log_msg)
+            if should_stop and stop_msg:
+                logger.info(stop_msg)
                 break
-            if need_adjust and adj_iter < LR_MAX_ADJUSTMENTS and effective_epoch is not None:
-                ratio = compute_lr_adjustment_ratio(effective_epoch, target_epoch=LR_TARGET_EPOCH, total_epochs=training_epochs)
-                current_training_lr *= ratio
-                logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_training_lr:.8f}")
+            if adj_iter >= LR_MAX_ADJUSTMENTS:
+                logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping.")
+                break
+
+            lr_low_rt, lr_high_rt, new_lr_raw, used_geom, scale = lr_bisect_update_bounds_and_next_raw(
+                best_epoch,
+                current_training_lr,
+                training_epochs,
+                target_min,
+                target_max,
+                lr_low_rt,
+                lr_high_rt,
+            )
+            if used_geom:
+                logger.info(
+                    f"  Bisection (geom): low={lr_low_rt:.8f}, high={lr_high_rt:.8f}, mid={new_lr_raw:.8f}"
+                )
             else:
+                logger.info(f"  Ratio scale: {scale:.4f}")
+            logger.info(f"  LR: {current_training_lr:.8f} -> {new_lr_raw:.8f}")
+            if (
+                abs(new_lr_raw - current_training_lr) / max(current_training_lr, 1e-12)
+                < LR_CALIB_MIN_RELATIVE_CHANGE
+            ):
+                logger.info(
+                    f"  LR change too small (<{LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% rel). Stopping."
+                )
                 break
+            current_training_lr = clip_learning_rate_for_training(new_lr_raw)
         
         # ベスト結果を使用
         if best_trial_output is not None:

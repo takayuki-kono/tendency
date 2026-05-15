@@ -56,11 +56,11 @@
     - 採択モデル専用の `CALIBRATED_BASE_LR` を以降の `run_trial`（フィルタ軸最適化）の基準 LR とし、`best_train_params.json` の `model_name` / **`learning_rate`** / **`lr_calib_context`**（head・train+val 枚数・`base_lr`）を更新。Step 0 の各モデルキャリブでは **保存 `lr_calib_context` と（モデル・枚数・head）が一致する候補だけ** 保存 `base_lr` を `initial_lr` に、それ以外は `LR_CALIBRATION_INITIAL`（0.01）。
     - **Step 0 も `filter_opt_cache.json` に記録**（`@calib…`＝各試行 `run_calibration_trial` の結果、`@calfull…`＝モデル単位の `calibrate_base_lr` 完走結果）。データ枚数が変わると既存どおりキャッシュ全消去。`best_train_params` のキャリブ対象ハイパラが変わればダイジェストでミスヒット。アルゴリズム更新時はコード内 `_CALIB_CACHE_VERSION` を上げる。
 - **LR自動調整リトライ** (全スクリプト共通: `optimize_sequential.py`, `train_sequential.py`。両者で条件・定数を同一にしている):
-    - 各トレーニング実行後に `BEST_EPOCH` を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
-    - **終了条件**（`components/lr_adjustment.py` で共通化）: (1) best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 調整終了 (2) `for adj_iter in range(LR_MAX_ADJUSTMENTS+1)` の試行回数上限（最大 7 試行）でループ終了
-    - **再調整条件**: best_epoch <= 10、best_epoch == 最終epoch、または last_accu ≈ best_accu（差 < 0.01、plateau）
-    - **調整計算（時間軸）**: `ratio = best_epoch / target_epoch`（**比の上下限なし**）で `new_lr = current_lr * ratio`（実 LR は `clip_learning_rate_for_training` の絶対域。auto_lr の sqrt スケールは別）
-    - 全試行中の最高スコアの結果を採用する。
+    - 各トレーニング実行後に `BEST_EPOCH`（FT 時は `FT_BEST_EPOCH`）を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
+    - **早期終了**（`lr_calibration_should_stop`）: best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 以降の LR 探索を打ち切り。
+    - **試行回数上限**: `for adj_iter in range(LR_MAX_ADJUSTMENTS+1)` で、最後の試行の直後は次 LR を計算せず終了（最大 7 試行）。
+    - **次 LR の決定**（`calibrate_base_lr` と同一の `lr_bisect_update_bounds_and_next_raw`）: `target_min = target_max = LR_TARGET_EPOCH`（既定 13）。`best_epoch` がターゲットより早い試行で `lr_high`、遅い試行で `lr_low` を更新。**両境界が揃えば** 次 LR = `sqrt(lr_low * lr_high)`（ログ `Bisection (geom)`）。**片側のみ**は `new_lr = current_lr × (best_epoch / target_mid)`（比の上下限なし）。**相対変化判定**: clip 前の `new_lr` と現在 LR との相対差が `LR_CALIB_MIN_RELATIVE_CHANGE`（既定 5%）未満なら打ち止め。実際に optimizer に載せる値は `clip_learning_rate_for_training`。
+    - 全試行中の **最高検証スコア**の出力（ログ・キャッシュ・staging keras）を採用する。
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
     - 該当キャッシュを削除して再評価し、勝者を決定。
@@ -109,8 +109,8 @@
      - `best_epoch > target_max` → `lr_low = current_lr`（LR低すぎ側の最大試行）。
      - **`target_min ≤ best_epoch ≤ target_max`（帯内含む単一点 target では best_epoch がターゲットと一致する場合）では境界を更新しない**（旧実装では帯内含む試行まで `lr_low` に入り二分が歪む問題があった）。
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
-     - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。
-     - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は従来どおり `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
+     - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。実装は **`lr_bisect_update_bounds_and_next_raw`** に集約。
+     - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は **同じ境界・幾何／ratio ロジック**だが試行上限のみ `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
      - 収束判定: `|new_lr - current_lr| / current_lr < LR_CALIB_MIN_RELATIVE_CHANGE`（`lr_adjustment.py`、既定 **0.05**＝5% 未満）なら以降の trial を打ち切り、最良候補を採用。
   - **LR の一本化（2026-04-25）**: `best_train_params.json` に記録する教師あり LR は **`learning_rate` のみ**（終端フェーズで実際に使う値）。旧キー `learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead` は保存時に削除され、読み込み互換のため `_skip_keys` でサブプロセスに転送しないだけ残す。
   - **JSON のみフィールド**: `finish_mode`・`score_step_3_*`・`lr_step_3_5_ft_calib_*`・`lr_calib_context` 等は **記録・復元用のみ**であり、`train_multitask_trial.py` には渡さない（`components/lr_adjustment.py` の **`TRAIN_MULTITASK_CLI_EXCLUDE_KEYS`** を `train_sequential` / `optimize_sequential` が subprocess 構築時に適用）。

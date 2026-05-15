@@ -1,5 +1,7 @@
 # LR再調整・キャリブレーション共通定数と判定ロジック（train_sequential / optimize_sequential で共用）
 
+import math
+
 LR_TARGET_EPOCH = 13
 LR_ACCEPTABLE_MIN = 11
 LR_ACCEPTABLE_MAX = 15  # early-stop 帯の上限（lr_calibration_should_stop / should_exit）
@@ -69,9 +71,45 @@ def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20):
     return best_epoch / target_epoch
 
 
+def lr_bisect_update_bounds_and_next_raw(
+    best_epoch: int,
+    current_lr: float,
+    cal_epochs: int,
+    target_min: float,
+    target_max: float,
+    lr_low: float | None,
+    lr_high: float | None,
+) -> tuple[float | None, float | None, float, bool, float | None]:
+    """
+    `calibrate_base_lr` と `run_trial` の LR 再調整で共通。
+    試行の `best_epoch` で lr_low / lr_high を更新し、clip 適用前の次試行 LR を返す。
+
+    Returns:
+        (lr_low, lr_high, new_lr_raw, used_geom_bisection, ratio_scale_or_none)
+    """
+    lo, hi = lr_low, lr_high
+    if best_epoch < target_min:
+        if hi is None or current_lr < hi:
+            hi = current_lr
+    elif best_epoch > target_max:
+        if lo is None or current_lr > lo:
+            lo = current_lr
+
+    target_mid = (target_min + target_max) / 2.0
+    if lo is not None and hi is not None:
+        new_lr_raw = math.sqrt(lo * hi)
+        return lo, hi, new_lr_raw, True, None
+
+    scale = compute_lr_adjustment_ratio(
+        best_epoch, target_epoch=int(target_mid), total_epochs=cal_epochs
+    )
+    new_lr_raw = current_lr * scale
+    return lo, hi, new_lr_raw, False, scale
+
+
 def lr_adjustment_decision(best_epoch, last_epoch_accu, trial_score, training_epochs):
     """
-    run_trial 内のLR再調整ループで使う判定。
+    互換用の判定（現行の `run_trial` は `lr_calibration_should_stop` + `lr_bisect_update_bounds_and_next_raw` を直接使用）。
     戻り値: (should_exit: bool, log_message: str|None, need_adjust: bool, effective_epoch: int|None)
     """
     # 許容帯内かつ last≠best なら再調整ループ終了（lr_calibration_should_stop と同一）
