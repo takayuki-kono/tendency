@@ -41,8 +41,9 @@ MIN_VAL_PER_CLASS = 20
 LEGACY_CACHE_MIN_SAVED = MIN_VAL_PER_CLASS * 10
 
 # Phase 1 フィルタパーセンタイル粗探索（昇順）。
-# p>0 の評価で score が p=0 時点の score を下回ったら、それ以降の粗探索点は試さない。
+# p>0 の評価で score が p=0 の score を下回るのが **連続 N 回**になったら、それ以降の粗探索点は試さない。
 OPTIMIZE_COARSE_PERCENTILE_POINTS = (0, 5, 10, 20, 40, 50)
+OPTIMIZE_COARSE_CONSECUTIVE_BELOW_P0_TO_STOP = 2
 
 # LRキャリブレーション結果（main()で設定される）
 CALIBRATED_BASE_LR = None
@@ -1010,6 +1011,7 @@ def optimize_single_param(
     # 各探索点のスコアを記録（二分探索用）
     scores = {}
     score_at_p0 = None
+    consecutive_below_p0 = 0
 
     for p in coarse_points:
         logger.info(f"Testing {target_name}={p}...")
@@ -1026,16 +1028,17 @@ def optimize_single_param(
             best_filtered = filtered_count
             logger.info(f"  [NEW BEST] {target_name}={p} (Score: {raw_score:.4f})")
 
-        if (
-            score_at_p0 is not None
-            and p > 0
-            and raw_score < score_at_p0
-        ):
-            logger.info(
-                f"  [Coarse] Stopping early: {target_name}={p} score {raw_score:.4f} "
-                f"< p=0 score {score_at_p0:.4f}"
-            )
-            break
+        if score_at_p0 is not None and p > 0:
+            if raw_score < score_at_p0:
+                consecutive_below_p0 += 1
+            else:
+                consecutive_below_p0 = 0
+            if consecutive_below_p0 >= OPTIMIZE_COARSE_CONSECUTIVE_BELOW_P0_TO_STOP:
+                logger.info(
+                    f"  [Coarse] Stopping early: {consecutive_below_p0} consecutive p>0 scores "
+                    f"< p=0 score {score_at_p0:.4f} (last {target_name}={p} -> {raw_score:.4f})"
+                )
+                break
 
     # --- 二分探索 Refinement ---
     # --- 二分探索 Refinement (1%単位まで探索) ---
