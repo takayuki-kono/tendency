@@ -44,6 +44,7 @@
 - **探索設定**:
     - **探索点**: `[0, 5, 10, 20, 40, 50]`（昇順の粗探索）。**`p>0` の試行で score が `p=0` の score を下回ったら、それより大きいパーセンタイルは粗探索しない**（早期終了）。粗探索後、ベースライン超の改善があり **評価済み点が2点以上** あれば、従来どおり Score/Efficiency 各 Top2 間の中間点を 1% 刻みで追う Refinement。
     - **眉-目パーセンタイル**（`--eyebrow_eye_percentile_*`）: **探索対象外**（試行では常に 0）。`preprocess_multitask.py` 単体実行時のみ手動で指定可能。
+    - **平均明度**（`--mean_brightness_percentile_low`）: グローバル分布で **暗い順の下位 X%** を除外。Phase 1 で `mean_brightness_low` として他軸と同様に粗探索＋Refinement。
 - **Phase 1 結果サマリー**: 全パラメータの独立探索完了後に「精度上昇効率一覧」をログ出力。各パラメータの Best Score 候補と Best Efficiency 候補をテーブル形式で表示し、全体の Overall Best Score / Best Efficiency も出力する。
 - **出力アーティファクト**:
     - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。
@@ -136,13 +137,14 @@
 | **Eb-Eye Dist** | `--eyebrow_eye_...` | `(R_brow_eye + L_brow_eye) / 2` | 眉と目の距離。表情（驚き・険しさ）や骨格特徴。 |
 | **Sharpness(L)**| `--sharpness_percentile_low` | `Laplacian(gray).var()` | 画像の鮮明度（下位カット）。ピンボケ画像を除外。 |
 | **Sharpness(H)**| `--sharpness_percentile_high`| `Laplacian(gray).var()` | 画像の鮮明度（上位カット）。高周波ノイズの強い画像を除外。 |
+| **Mean brightness (L)** | `--mean_brightness_percentile_low` | 全画像 `mean(cv2.cvtColor(BGR2GRAY))`（0–255） | 平均輝度の下位から除外（暗い画像を落とす）。sharpness と同じ全画素グレー平均。 |
 | **Aspect Ratio** | `--aspect_ratio_cutoff` | `box_height / box_width` | 顔検出枠の縦横比。極端に細長い/潰れた誤検出を排除。 |
 
 ### フィルタリングロジック
 1.  **パーセンタイル計算**:
     - 全画像（Validなもの）の指標分布を計算。
     - 指定されたパーセンタイル（例: 10%）に基づき、閾値を決定（例: 上位10%をカットする閾値）。
-    - **グループ化**: ソースの**ディレクトリパス**（例: `a/森口瑤子`）単位。眉-目距離(Eb-Eye)のパーセンタイルとアンダーサンプリングはこの単位で行うため、個人（1フォルダ＝1人）ごとに「その人の上位○%」が残る。他指標（pitch/symmetry/sharpness等）の閾値は従来どおり全体分布で計算。※ファイル名に個人名が付いていなくても、フォルダ構造で個人が分かれていれば個人単位になる。
+    - **グループ化**: ソースの**ディレクトリパス**（例: `a/森口瑤子`）単位。眉-目距離(Eb-Eye)のパーセンタイルとアンダーサンプリングはこの単位で行うため、個人（1フォルダ＝1人）ごとに「その人の上位○%」が残る。他指標（pitch/symmetry/sharpness/mean_brightness 等）の閾値は従来どおり全体分布で計算。※ファイル名に個人名が付いていなくても、フォルダ構造で個人が分かれていれば個人単位になる。
 2.  **判定**:
     - 各画像について、全指標が閾値内であれば「採用」。一つでも超えれば「不採用（スキップ）」。
 3.  **アンダーサンプリング**（`preprocess_multitask.py` の詳細は下記）:
@@ -157,9 +159,9 @@
 1. **スキャン**: 各ソースを `os.walk` で走査。画像拡張子 `.jpg/.png/.jpeg/.bmp` のファイルを列挙。各ファイルの「グループキー」= そのファイルがあるディレクトリの相対パス（例: `a/森口瑤子`）。
 2. **顔分析（キャッシュあり）**: `outputs/cache/metrics_<hash>.pkl` をキー（ソース名+ファイル数）で参照。キャッシュがなければ InsightFace で全画像を解析し、顔検出・106ランドマークを取得。検出失敗・読込失敗は `valid=False` で除外。
 3. **閾値計算**:
-   - **グローバル閾値**: 全 valid 画像の指標分布から算出。`pitch_percentile=10` なら「上位10%を落とす」ので `th_pitch = percentile(pitch, 90)`。同様に symmetry, y_diff, mouth_open, sharpness(低/高), face_size(低/高), aspect_ratio(両側), retouching, mask, glasses を計算。
+   - **グローバル閾値**: 全 valid 画像の指標分布から算出。`pitch_percentile=10` なら「上位10%を落とす」ので `th_pitch = percentile(pitch, 90)`。同様に symmetry, y_diff, mouth_open, sharpness(低/高), mean_brightness(低、暗い順に下位カット), face_size(低/高), aspect_ratio(両側), retouching, mask, glasses を計算。
    - **個人閾値**: グループ（ディレクトリパス）ごとに **眉-目距離 (eb_eye_dist)** だけ、そのグループ内の分布で `eyebrow_eye_percentile_low` / `eyebrow_eye_percentile_high` の閾値を計算。
-4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `eb_eye_low_personal`, `undersampling_post_filter`, `undersampling_class_balance` などでログに集計される。
+4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `mean_brightness_low_global`, `eb_eye_low_personal`, `undersampling_post_filter`, `undersampling_class_balance` などでログに集計される。
 5. **アンダーサンプリング（二段）**:
     - **第 1 段（クラス間）**: フィルタ直後の残件で、クラスキー（相対パス先頭セグメント）ごとの**合計枚数**を出し、**最少クラスと同じ合計**になるよう多いクラスからランダムに削る（`skip_reasons['undersampling_class_balance']`）。正の枚数のクラスが2つ以上のときのみ。`--skip_class_balance` で無効化。
     - **第 2 段（クラス内・フォルダバケツ）**: 第 1 段の**あと**、クラスごとにフルラベル（フォルダ単位）別の残件数を集め、**そのクラス内で 2 番目に多いバケツの枚数**を上限として各バケツを切り詰める（`skip_reasons['undersampling_post_filter']`）。
@@ -176,13 +178,14 @@
 | Mouth Open | `abs(lower_lip_y - upper_lip_y)`（ランドマーク） | 値 **>** 閾値 → 除外（口開きすぎ） |
 | Eb-Eye Dist | 左右の (眉Y−目Y) の平均（ピクセル） | **個人内**で 値 **>** th_high または 値 **<** th_low → 除外 |
 | Sharpness | `cv2.Laplacian(gray).var()` | 値 **<** th_low → 除外（ボケ）、値 **>** th_high → 除外（ノイズ/過シャープ） |
+| Mean brightness | 全画像グレースケールの画素平均（0–255） | 値 **<** th_low → 除外（`mean_brightness_percentile_low`：暗い順の下位%） |
 | Face Size | ファイル名の `_sz(\d+)` から取得（0 の場合は対象外） | 値 **<** th_low または **>** th_high → 除外 |
 | Aspect Ratio | 顔検出枠の `height/width` | 値 **<** th_low または **>** th_high → 除外 |
 | Retouching | 肌領域の Sobel 高周波成分の平均（低いほど加工疑い） | 値 **<** 閾値 → 除外 |
 | Mask | 上顔/下顔の肌色比率から算出（高いほどマスク疑い） | 値 **>** 閾値 → 除外 |
 | Glasses | 目周辺エッジと額エッジの比（高いほど眼鏡疑い） | 値 **>** 閾値 → 除外 |
 
-**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--skip_class_balance`（第1段クラス間均衡をスキップ）。  
+**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--mean_brightness_percentile_low`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--skip_class_balance`（第1段クラス間均衡をスキップ）。  
 **出力**: `preprocessed_multitask/train/`, `preprocessed_multitask/validation/`, `preprocessed_multitask/test/`。これが `train_sequential.py` の直接の入力。
 
 ---

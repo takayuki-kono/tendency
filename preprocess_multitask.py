@@ -49,6 +49,7 @@ EYEBROW_EYE_PERCENTILE_HIGH = 0
 EYEBROW_EYE_PERCENTILE_LOW = 0  
 SHARPNESS_PERCENTILE_LOW = 0  # Filter bottom X% by sharpness (Laplacian variance)
 SHARPNESS_PERCENTILE_HIGH = 0  # Filter top X% by sharpness
+MEAN_BRIGHTNESS_PERCENTILE_LOW = 0  # Filter bottom X% by mean grayscale luminance (dark images)
 FACE_SIZE_PERCENTILE_LOW = 0   # Filter bottom X% by face size (small images)
 FACE_SIZE_PERCENTILE_HIGH = 0  # Filter top X% by face size (large images)
 # 元画像に対する in-plane 傾き補正量（絶対度数）。ファイル名 `_rz` のみ。無ければ 0。
@@ -98,6 +99,7 @@ def _manifest_filter_percentile_args(args):
         "eyebrow_eye_percentile_low": int(args.eyebrow_eye_percentile_low),
         "sharpness_percentile_low": int(args.sharpness_percentile_low),
         "sharpness_percentile_high": int(args.sharpness_percentile_high),
+        "mean_brightness_percentile_low": int(getattr(args, "mean_brightness_percentile_low", 0)),
         "face_size_percentile_low": int(args.face_size_percentile_low),
         "face_size_percentile_high": int(args.face_size_percentile_high),
         "rotation_percentile": int(getattr(args, "rotation_percentile", 0)),
@@ -125,6 +127,7 @@ def _build_split_filter_manifest(
     th_mouth,
     th_sharpness_low,
     th_sharpness_high,
+    th_mean_brightness_low,
     th_face_size_low,
     th_face_size_high,
     th_ar_low,
@@ -147,6 +150,9 @@ def _build_split_filter_manifest(
         "mouth_open_upper_reject_if_strictly_greater": float(th_mouth) if args.mouth_open_percentile > 0 else None,
         "sharpness_lower_reject_if_strictly_less": float(th_sharpness_low) if args.sharpness_percentile_low > 0 else None,
         "sharpness_upper_reject_if_strictly_greater": float(th_sharpness_high) if args.sharpness_percentile_high > 0 else None,
+        "mean_brightness_lower_reject_if_strictly_less": float(th_mean_brightness_low)
+        if getattr(args, "mean_brightness_percentile_low", 0) > 0
+        else None,
         "face_size_lower_reject_if_strictly_less": float(th_face_size_low) if args.face_size_percentile_low > 0 else None,
         "face_size_upper_reject_if_strictly_greater": float(th_face_size_high) if args.face_size_percentile_high > 0 else None,
         "face_roll_abs_deg_upper_reject_if_strictly_greater": float(th_rotation)
@@ -380,6 +386,7 @@ def analyze_single_image(args):
     
     # Sharpness (Laplacian Variance) - higher = sharper
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(np.mean(gray))
     sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
 
     # Skin Smoothness for Retouching Detection
@@ -414,6 +421,7 @@ def analyze_single_image(args):
         'mouth_open': mouth_open,
         'eb_eye_dist': eb_eye_dist,
         'sharpness': sharpness,
+        'mean_brightness': mean_brightness,
         'skin_smoothness': skin_smoothness,
         'aspect_ratio': aspect_ratio,
         'face_size': face_size,
@@ -496,7 +504,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     os.makedirs(cache_dir, exist_ok=True)
     
     # Include face_pos_filter arg in cache key because it affects analysis result (valid bit)
-    cache_key = f"{os.path.basename(src_root)}_{total}_rz2"
+    cache_key = f"{os.path.basename(src_root)}_{total}_rz2_mb"
     cache_file = os.path.join(cache_dir, f"metrics_{hashlib.md5(cache_key.encode()).hexdigest()}.pkl")
     
     results = []
@@ -591,6 +599,12 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         if 'sharp_vals' not in locals():
             sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
         th_sharpness_high = np.percentile(sharp_vals, 100 - args.sharpness_percentile_high)
+
+    th_mean_brightness_low = 0.0
+    mb_pct = int(getattr(args, "mean_brightness_percentile_low", 0) or 0)
+    if mb_pct > 0:
+        mb_vals = [r["metrics"]["mean_brightness"] for r in valid_items]
+        th_mean_brightness_low = float(np.percentile(mb_vals, mb_pct))
     
     # Face Size threshold (from filename sz)
     th_face_size_low = 0
@@ -621,9 +635,14 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             th_retouching = np.percentile(retouch_vals, args.retouching_percentile)
     
     roll_log = f", RollAbsDeg>{th_rotation:.4f}" if getattr(args, "rotation_percentile", 0) > 0 else ""
+    mb_log = (
+        f", MeanBright>={th_mean_brightness_low:.1f}"
+        if mb_pct > 0
+        else ""
+    )
     logger.info(
         f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, "
-        f"Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}, "
+        f"Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}{mb_log}, "
         f"AR<={th_ar_low:.3f}|>={th_ar_high:.3f}, Retouch>={th_retouching:.1f}"
         f"{roll_log}"
     )
@@ -695,6 +714,8 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                 reason = 'sharpness_low_global'
             elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high:
                 reason = 'sharpness_high_global'
+            elif mb_pct > 0 and m["mean_brightness"] < th_mean_brightness_low:
+                reason = "mean_brightness_low_global"
             elif args.face_size_percentile_low > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) < th_face_size_low:
                 reason = 'face_size_low_global'
             elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high:
@@ -836,6 +857,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         th_mouth,
         th_sharpness_low,
         th_sharpness_high,
+        th_mean_brightness_low,
         th_face_size_low,
         th_face_size_high,
         th_ar_low,
@@ -867,6 +889,12 @@ def main():
     parser.add_argument("--eyebrow_eye_percentile_low", type=int, default=EYEBROW_EYE_PERCENTILE_LOW, help="Filter bottom X% of eyebrow-eye distance")
     parser.add_argument("--sharpness_percentile_low", type=int, default=SHARPNESS_PERCENTILE_LOW, help="Filter bottom X% by sharpness (blurry images)")
     parser.add_argument("--sharpness_percentile_high", type=int, default=SHARPNESS_PERCENTILE_HIGH, help="Filter top X% by sharpness")
+    parser.add_argument(
+        "--mean_brightness_percentile_low",
+        type=int,
+        default=MEAN_BRIGHTNESS_PERCENTILE_LOW,
+        help="Filter bottom X% by mean grayscale brightness (dark images)",
+    )
     parser.add_argument("--face_size_percentile_low", type=int, default=FACE_SIZE_PERCENTILE_LOW, help="Filter bottom X% by face size (small images)")
     parser.add_argument("--face_size_percentile_high", type=int, default=FACE_SIZE_PERCENTILE_HIGH, help="Filter top X% by face size (large images)")
     parser.add_argument(
@@ -932,6 +960,7 @@ def main():
         logger.info(f"  Mouth Pct: {args.mouth_open_percentile}")
         logger.info(f"  Eb-Eye Pct (High/Low): {args.eyebrow_eye_percentile_high} / {args.eyebrow_eye_percentile_low} (PER PERSON)")
         logger.info(f"  Sharpness Pct Low/High: {args.sharpness_percentile_low} / {args.sharpness_percentile_high}")
+        logger.info(f"  Mean brightness Pct Low: {args.mean_brightness_percentile_low}")
         logger.info(f"  Face Size Pct Low/High: {args.face_size_percentile_low} / {args.face_size_percentile_high}")
         logger.info(f"  Rotation (roll abs deg) Pct: {getattr(args, 'rotation_percentile', 0)}")
         logger.info(f"  Aspect Ratio Cutoff: {args.aspect_ratio_cutoff}")
