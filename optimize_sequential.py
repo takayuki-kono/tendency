@@ -42,7 +42,7 @@ LEGACY_CACHE_MIN_SAVED = MIN_VAL_PER_CLASS * 10
 
 # Phase 1 フィルタパーセンタイル粗探索（昇順）。
 # p>0 の評価で score が p=0 の score を下回るのが **連続 N 回**になったら、それ以降の粗探索点は試さない。
-OPTIMIZE_COARSE_PERCENTILE_POINTS = (0, 5, 10, 20, 40, 50)
+OPTIMIZE_COARSE_PERCENTILE_POINTS = (0, 5, 25, 50)
 OPTIMIZE_COARSE_CONSECUTIVE_BELOW_P0_TO_STOP = 2
 
 # LRキャリブレーション結果（main()で設定される）
