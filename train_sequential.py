@@ -29,6 +29,7 @@ BEST_HEAD_WEIGHTS_DIR = "outputs/best_head_weights"
 BEST_HEAD_WEIGHTS_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head.weights.h5")
 # Step 3.9: head-only の完全モデル（FT 用 .h5 とは別ファイル。推論・検証用）
 BEST_HEAD_MODEL_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head_only.keras")
+BEST_SEQUENTIAL_MODEL_PATH = os.path.join(MODEL_DIR, "best_sequential_model.keras")
 os.makedirs(BEST_HEAD_WEIGHTS_DIR, exist_ok=True)
 
 if not os.path.exists(PYTHON_EXEC): PYTHON_EXEC = "python"
@@ -68,6 +69,38 @@ _LR_CALIB_STATE: dict = {'persisted_ctx': None, 'last_ctx': None}
 
 # FT 以前の head-only 試行（run_trial / head キャリブ / Step3.9）で観測した FINAL_VAL の最大値
 _HEAD_ONLY_PHASE_BEST: dict = {'score': -1.0}
+# 同一 train_sequential main() 内で観測した FINAL_VAL の最大（best_sequential_model.keras に反映）
+_PIPELINE_BEST_SCORE: float = -1.0
+
+
+def _reset_pipeline_best_model_tracking() -> None:
+    global _PIPELINE_BEST_SCORE
+    _PIPELINE_BEST_SCORE = -1.0
+
+
+def _promote_best_sequential_model(score: float, src_keras_path: str, reason: str = "") -> None:
+    """
+    FINAL_VAL がパイプライン全体で更新されたとき、best_sequential_model.keras を上書きする。
+    """
+    global _PIPELINE_BEST_SCORE
+    if not src_keras_path or not os.path.isfile(src_keras_path):
+        return
+    try:
+        sc = float(score)
+    except (TypeError, ValueError):
+        return
+    if sc <= _PIPELINE_BEST_SCORE:
+        return
+    prev = _PIPELINE_BEST_SCORE
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    shutil.copy2(src_keras_path, BEST_SEQUENTIAL_MODEL_PATH)
+    copy_filter_manifest_beside_model(BEST_SEQUENTIAL_MODEL_PATH)
+    _PIPELINE_BEST_SCORE = sc
+    tag = f" ({reason})" if reason else ""
+    logger.info(
+        f"\n>>> Pipeline best model updated{tag}: score={sc:.4f} (prev={prev:.4f}) "
+        f"-> {BEST_SEQUENTIAL_MODEL_PATH} <<<"
+    )
 
 
 def _reset_head_only_phase_best() -> None:
@@ -203,15 +236,21 @@ def run_trial(params):
         current_lr = start_lr
         best_trial_score = -1.0
         best_trial_output = None
+        best_keras_staging = None
         training_epochs = int(params.get('epochs', 20))
-        
+        caller_export = str(params.get('export_model_path') or '').strip()
+        seed_run = int(params.get('seed', 42))
+        is_ft_run = str(params.get('fine_tune', 'False')).lower() == 'true'
+
         for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
             trial_params = params.copy()
             trial_params['learning_rate'] = current_lr
-            
+            staging_path = os.path.join(MODEL_DIR, f"_run_trial_adj{adj_iter}.keras")
+            trial_params['export_model_path'] = staging_path
+
             if adj_iter > 0:
                 logger.info(f"  [LR Adjust #{adj_iter}] LR={current_lr:.8f}...")
-            
+
             cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
             # best_train_params 由来のメタ・旧 LR フィールドは子 CLI に存在しない
             _skip_keys = set(TRAIN_MULTITASK_CLI_EXCLUDE_KEYS)
@@ -257,10 +296,11 @@ def run_trial(params):
             epoch_scores = re.findall(r"MinClassAcc=([\d.]+)", full_output)
             last_epoch_accu = float(epoch_scores[-1]) if epoch_scores else 0.0
             
-            # ベストスコア更新
+            # ベストスコア更新（この LR 試行が吐いた staging keras が精度対応）
             if trial_score > best_trial_score:
                 best_trial_score = trial_score
                 best_trial_output = full_output
+                best_keras_staging = staging_path
             
             logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
             should_exit, log_msg, need_adjust, effective_epoch = lr_adjustment_decision(
@@ -275,7 +315,25 @@ def run_trial(params):
                 logger.info(f"  [LR Adjust] effective_epoch={effective_epoch} -> ratio={ratio:.4f} -> LR={current_lr:.8f}")
             else:
                 break
-        
+
+        # 最良 LR 試行に対応する keras だけ残し、呼び出し元が期待するパスへ複製
+        for _ai in range(LR_MAX_ADJUSTMENTS + 1):
+            _sp = os.path.join(MODEL_DIR, f"_run_trial_adj{_ai}.keras")
+            if best_keras_staging and _sp != best_keras_staging and os.path.isfile(_sp):
+                try:
+                    os.remove(_sp)
+                except OSError:
+                    pass
+        if best_keras_staging and os.path.isfile(best_keras_staging):
+            if caller_export:
+                _de = os.path.dirname(caller_export)
+                if _de:
+                    os.makedirs(_de, exist_ok=True)
+                shutil.copy2(best_keras_staging, caller_export)
+            elif is_ft_run:
+                _ft_dest = os.path.join(MODEL_DIR, f"model_seed{seed_run}.keras")
+                shutil.copy2(best_keras_staging, _ft_dest)
+
         # ベスト結果を使用
         full_output = best_trial_output if best_trial_output else "\n".join(output_lines)
         score = best_trial_score
@@ -306,6 +364,8 @@ def run_trial(params):
             save_cache(cache)
 
             _maybe_record_head_only_phase_best(params, score)
+            if best_keras_staging and os.path.isfile(best_keras_staging):
+                _promote_best_sequential_model(score, best_keras_staging, reason="run_trial")
             return score
         else:
             logger.error("Score not found in output.")
@@ -450,6 +510,7 @@ def train_and_save_best_head_weights(current_params, weights_path):
         logger.warning(f"Best head weights file was NOT created: {weights_path}")
     if os.path.exists(BEST_HEAD_MODEL_PATH):
         logger.info(f"Best head-only model saved: {BEST_HEAD_MODEL_PATH}")
+        _promote_best_sequential_model(score, BEST_HEAD_MODEL_PATH, reason="Step3.9 head-only keras")
     else:
         logger.warning(f"Best head-only model was NOT created: {BEST_HEAD_MODEL_PATH}")
     return score
@@ -751,6 +812,7 @@ def main():
     _LR_CALIB_STATE['persisted_ctx'] = persisted_calib_ctx
     _LR_CALIB_STATE['last_ctx'] = None
     _reset_head_only_phase_best()
+    _reset_pipeline_best_model_tracking()
 
     def initial_lr_for_calibrate(model_name: str, fine_tune_val) -> float:
         n = train_sequential_data_file_count()

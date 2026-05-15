@@ -1278,8 +1278,11 @@ def main():
 
     # モデル保存 (Fine-tuning時のみ、seed付きファイル名で保存)
     if args.fine_tune.lower() == 'true':
-        save_path = f'outputs/models/model_seed{args.seed}.keras'
         os.makedirs('outputs/models', exist_ok=True)
+        if getattr(args, 'export_model_path', None) and str(args.export_model_path).strip():
+            save_path = str(args.export_model_path).strip()
+        else:
+            save_path = f'outputs/models/model_seed{args.seed}.keras'
         model.save(save_path)
         logger.info(f"Fine-tuned model saved to {save_path}")
         copy_filter_manifest_beside_model(save_path)

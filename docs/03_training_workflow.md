@@ -194,6 +194,8 @@
 
 前処理済みデータを用いて、最終的なマルチタスクモデルを学習します。
 
+- **パイプライン最高精度のモデルファイル**: `run_trial`（逐次最適化の各試行・Best-of-N・Step 4.7 含む）および Step 3.9 の head 保存で、**FINAL_VAL_ACCURACY がその時点までの最大を更新したとき**、対応する `.keras` を `outputs/models/best_sequential_model.keras` にコピーし、`filter_threshold_manifest.json` を同ディレクトリへ付与する。短い LR キャリブ用 `run_calibration_trial` は従来どおり本コピー対象外（モデル未エクスポート）。
+
 ### 学習フェーズ (`train_multitask_trial.py` 内部)
 0.  **Head Carryover (Phase 0 ベスト重みロード)**
     - `--init_weights_path <path>` が指定され、該当ファイルが存在する場合、`create_model` 直後に `model.load_weights(path, by_name=True, skip_mismatch=True)` で重みをロードする。
