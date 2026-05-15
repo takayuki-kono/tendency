@@ -473,6 +473,46 @@ def _class_key_from_rel_label(label):
     return label
 
 
+def _apply_class_internal_second_place_cap(filtered_by_label, skip_reasons, *, round_name):
+    """
+    クラス内で各人物（フルラベル＝フォルダ）バケツの枚数を、そのクラス内の 2 番目に多い枚数まで切り詰める。
+    filtered_by_label を in-place 更新し、skip_reasons['undersampling_post_filter'] に落とした枚数を加算する。
+    戻り値: 落とした枚数の合計（skipped_count 用）。
+    """
+    dropped_total = 0
+    class_to_person_labels = defaultdict(list)
+    for lb in filtered_by_label:
+        class_key = _class_key_from_rel_label(lb)
+        class_to_person_labels[class_key].append(lb)
+
+    for class_key, person_labels in class_to_person_labels.items():
+        post_counts = sorted(
+            (len(filtered_by_label[pl]) for pl in person_labels),
+            reverse=True,
+        )
+        if len(post_counts) >= 2:
+            target_post = post_counts[1]
+        elif len(post_counts) == 1:
+            target_post = post_counts[0]
+        else:
+            target_post = 0
+        logger.info(
+            f"Undersampling (post-filter round {round_name}, per-class) class={class_key!r}: "
+            f"2nd-largest person count={target_post}, persons={len(person_labels)}"
+        )
+        for pl in person_labels:
+            tasks = filtered_by_label[pl]
+            random.shuffle(tasks)
+            n0 = len(tasks)
+            if n0 > target_post:
+                drop = n0 - target_post
+                tasks = tasks[:target_post]
+                dropped_total += drop
+                skip_reasons["undersampling_post_filter"] += drop
+            filtered_by_label[pl] = tasks
+    return dropped_total
+
+
 def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     if not os.path.exists(src_root):
         logger.warning(f"Source dir not found: {src_root}")
@@ -743,41 +783,12 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
 
         filtered_by_label[label] = label_valid_tasks
 
-    # --- Undersampling (1) フィルタ後: クラス内で「2 番目に多い人物バケツ」まで ---
-    # クラスキー = ラベル先頭セグメント（例: multitask では合成クラス名/単一タスクでは上位フォルダ）
+    # --- Undersampling: (1) クラス内2位上限 → (2) クラス間均衡 → (3) 再度クラス内2位上限 ---
     if not skip_undersampling:
-        class_to_person_labels = defaultdict(list)
-        for label in filtered_by_label:
-            class_key = _class_key_from_rel_label(label)
-            class_to_person_labels[class_key].append(label)
+        skipped_count += _apply_class_internal_second_place_cap(
+            filtered_by_label, skip_reasons, round_name="1"
+        )
 
-        for class_key, person_labels in class_to_person_labels.items():
-            post_counts = sorted(
-                (len(filtered_by_label[pl]) for pl in person_labels),
-                reverse=True,
-            )
-            if len(post_counts) >= 2:
-                target_post = post_counts[1]
-            elif len(post_counts) == 1:
-                target_post = post_counts[0]
-            else:
-                target_post = 0
-            logger.info(
-                f"Undersampling (post-filter, per-class) class={class_key!r}: "
-                f"2nd-largest person count={target_post}, persons={len(person_labels)}"
-            )
-            for pl in person_labels:
-                tasks = filtered_by_label[pl]
-                random.shuffle(tasks)
-                n0 = len(tasks)
-                if n0 > target_post:
-                    drop = n0 - target_post
-                    tasks = tasks[:target_post]
-                    skipped_count += drop
-                    skip_reasons['undersampling_post_filter'] += drop
-                filtered_by_label[pl] = tasks
-
-    # --- Undersampling (2) クラス間: 各クラス（先頭セグメント）の合計枚数を min に揃える ---
     if not skip_undersampling and not getattr(args, "skip_class_balance", False):
         label_to_class = {lb: _class_key_from_rel_label(lb) for lb in filtered_by_label}
         totals = defaultdict(int)
@@ -811,6 +822,11 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                         skipped_count += dropped
                         skip_reasons["undersampling_class_balance"] += dropped
                     filtered_by_label[lb] = new_tasks
+
+    if not skip_undersampling:
+        skipped_count += _apply_class_internal_second_place_cap(
+            filtered_by_label, skip_reasons, round_name="2"
+        )
 
     for label, label_valid_tasks in filtered_by_label.items():
         for item in label_valid_tasks:
@@ -936,7 +952,10 @@ def main():
     parser.add_argument(
         "--skip_class_balance",
         action="store_true",
-        help="第2段アンダーサンプリング（クラス間・各クラス合計を最少クラスに揃える）をスキップ。第1段のクラス内2位上限は従来どおり実行",
+        help=(
+            "中段アンダーサンプリング（クラス間・各クラス合計を最少クラスに揃える）をスキップ。"
+            "前後のクラス内2位上限（第1・第3段）は従来どおり実行"
+        ),
     )
 
     args = parser.parse_args()
@@ -1001,7 +1020,8 @@ def main():
                     "train / validation / test は各スプリットの valid 顔集合に対して別々にパーセンタイル閾値を算出している。",
                     "推論で学習データと同じ基準に揃える場合は通常 train の global / per_label を参照する。",
                     "眉-目距離はラベル（人物フォルダ等）単位。同一キーで per_label_eyebrow_thresholds を参照すること。",
-                    "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。第1段でクラス内バケツの2位上限、第2段でクラス間均衡（--skip_class_balance で第2段のみ無効化）。",
+                    "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。"
+                    "第1段＝クラス内バケツの2位上限、第2段＝クラス間均衡、第3段＝再度クラス内2位上限（--skip_class_balance で第2段のみ無効化）。",
                 ],
                 "splits": split_manifests,
             }
