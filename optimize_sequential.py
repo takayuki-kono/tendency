@@ -523,14 +523,40 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
     return current_lr, score
 
 
-def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness_low, sharpness_high, mean_brightness_low=0, face_size_low=0, face_size_high=0, retouching=0, mask=0, glasses=0, rotation=0, grayscale=False, model_name='EfficientNetV2B0', active_param_name=None):
+def run_trial(
+    pitch,
+    sym,
+    y_diff,
+    mouth_open,
+    eb_eye_high,
+    eb_eye_low,
+    sharpness_low,
+    sharpness_high,
+    mean_brightness_low=0,
+    face_size_low=0,
+    face_size_high=0,
+    retouching=0,
+    mask=0,
+    glasses=0,
+    rotation=0,
+    grayscale=False,
+    model_name="EfficientNetV2B0",
+    active_param_name=None,
+    *,
+    trial_context=None,
+):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
-    
+
+    trial_context:
+        ログで本試行の目的を短く示す文字列（filter_opt / Phase2 など）。
+
     Returns:
         tuple: (raw_score, total_images, filtered_count)
     """
     logger.info(f"\n{'='*50}")
+    if trial_context:
+        logger.info(f"run_trial 文脈: {trial_context}")
     logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, MeanBright-L={mean_brightness_low}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Rotation={rotation}%, Grayscale={grayscale}")
     
     file_count = count_files("train") + count_files("validation")
@@ -830,14 +856,17 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
         current_training_lr = adjusted_lr
         best_trial_score = 0.0
         best_trial_output = None
+        best_trial_lr = None
         target_min = target_max = float(LR_TARGET_EPOCH)
         acceptable_band = None
         lr_low_rt = None
         lr_high_rt = None
 
         for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
-            if adj_iter > 0:
-                logger.info(f"  [LR Adjust #{adj_iter}] LR={current_training_lr:.8f}...")
+            logger.info(
+                f"  [LR sweep] sub-run {adj_iter + 1}/{LR_MAX_ADJUSTMENTS + 1} "
+                f"train_lr={current_training_lr:.8g}"
+            )
 
             # LR更新: cmd_trainの--learning_rateを差し替え
             retry_cmd = []
@@ -888,15 +917,23 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             if trial_score > best_trial_score:
                 best_trial_score = trial_score
                 best_trial_output = full_output
+                best_trial_lr = current_training_lr
 
-            logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
+            logger.info(
+                f"  [LR sweep] 上記 sub-run 結果: best_epoch={best_epoch}/{training_epochs}, "
+                f"val={trial_score:.6f}, last_minclass≈{last_epoch_accu:.6f} "
+                f"(train_lr={current_training_lr:.8g})"
+            )
             should_stop, stop_msg = lr_calibration_should_stop(
                 best_epoch, last_epoch_accu, trial_score, acceptable_band=acceptable_band
             )
             if should_stop and stop_msg:
-                logger.info(stop_msg)
+                logger.info(f"  [LR sweep] 終了理由: 満足条件 — {stop_msg.strip()}")
                 break
             if adj_iter >= LR_MAX_ADJUSTMENTS:
+                logger.info(
+                    f"  [LR sweep] 終了理由: 試行上限 (LR_MAX_ADJUSTMENTS={LR_MAX_ADJUSTMENTS})"
+                )
                 logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping.")
                 break
 
@@ -911,21 +948,33 @@ def run_trial(pitch, sym, y_diff, mouth_open, eb_eye_high, eb_eye_low, sharpness
             )
             if used_geom:
                 logger.info(
-                    f"  Bisection (geom): low={lr_low_rt:.8f}, high={lr_high_rt:.8f}, mid={new_lr_raw:.8f}"
+                    f"  [LR sweep] 次 lr 案: 幾何平均 mid={new_lr_raw:.8g} "
+                    f"(low={lr_low_rt:.8g}, high={lr_high_rt:.8g})"
                 )
             else:
-                logger.info(f"  Ratio scale: {scale:.4f}")
+                logger.info(
+                    f"  [LR sweep] 次 lr 案: ratio={scale:.6f} → raw={new_lr_raw:.8g} "
+                    f"(best_epoch={best_epoch} vs target={int(target_min)})"
+                )
             logger.info(f"  LR: {current_training_lr:.8f} -> {new_lr_raw:.8f}")
             if (
                 abs(new_lr_raw - current_training_lr) / max(current_training_lr, 1e-12)
                 < LR_CALIB_MIN_RELATIVE_CHANGE
             ):
                 logger.info(
+                    f"  [LR sweep] 終了理由: 相対変化 < {LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% "
+                    f"(clip 前 next vs 現在 lr)"
+                )
+                logger.info(
                     f"  LR change too small (<{LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% rel). Stopping."
                 )
                 break
             current_training_lr = clip_learning_rate_for_training(new_lr_raw)
-        
+
+        logger.info(
+            f"  [LR sweep] まとめ: {adj_iter + 1} 本学習 | 採用 Val={best_trial_score:.6f} | "
+            f"その試行の lr={best_trial_lr!r} | 境界 lr_low={lr_low_rt!r} lr_high={lr_high_rt!r}"
+        )
         # ベスト結果を使用
         if best_trial_output is not None:
             full_output = best_trial_output
@@ -1018,7 +1067,8 @@ def optimize_single_param(
             test_params['retouching'], test_params['mask'], test_params['glasses'],
             rotation=test_params['rotation'],
             model_name=model_name,
-            active_param_name=target_name
+            active_param_name=target_name,
+            trial_context=f"filter_opt axis={target_name!r} value={val!r}",
         )
         return result  # (raw_score, total_images, filtered_count)
 
@@ -1406,7 +1456,8 @@ def main():
                 eval_params['face_size_low'], eval_params['face_size_high'],
                 eval_params['retouching'], eval_params['mask'], eval_params['glasses'],
                 rotation=eval_params['rotation'],
-                grayscale=False, model_name=best_model, active_param_name=param_name
+                grayscale=False, model_name=best_model, active_param_name=param_name,
+                trial_context=f"Phase1 tie_retry axis={param_name!r} value={tv!r}",
             )
             retry_score = res[0]
             logger.info(f"    {param_name}={tv} -> Score: {retry_score:.4f}")
@@ -1497,7 +1548,8 @@ def main():
     # ベースライン（Grayscale=False）のスコア計測
     base_res = run_trial(
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, rotation=0,
-        grayscale=False, model_name=best_model
+        grayscale=False, model_name=best_model,
+        trial_context="Phase2 greedy baseline (no filters)",
     )
     current_best_score = base_res[0]
     logger.info(f"Base Score (No filters): {current_best_score:.4f}")
@@ -1531,7 +1583,8 @@ def main():
             temp_params['face_size_low'], temp_params['face_size_high'],
             temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
             rotation=temp_params['rotation'],
-            grayscale=False, model_name=best_model
+            grayscale=False, model_name=best_model,
+            trial_context=f"Phase2 greedy integrate axis={p_name!r} value={p_val!r}",
         )
         score, total, filtered = res
         
@@ -1560,7 +1613,8 @@ def main():
         current_params['face_size_low'], current_params['face_size_high'],
         current_params['retouching'], current_params['mask'], current_params['glasses'],
         rotation=current_params['rotation'],
-        grayscale=False, model_name=best_model
+        grayscale=False, model_name=best_model,
+        trial_context="Final compare: original Phase1 params (no grayscale)",
     )
     original_score, original_total, original_filtered = original_result
 
@@ -1591,7 +1645,8 @@ def main():
         global_best_params['face_size_low'], global_best_params['face_size_high'],
         global_best_params['retouching'], global_best_params['mask'], global_best_params['glasses'],
         rotation=global_best_params['rotation'],
-        grayscale=False, model_name=best_model
+        grayscale=False, model_name=best_model,
+        trial_context=f"Final selection: single best ({global_best_desc})",
     )
     sb_score = sb_res[0]
     candidates.append({
@@ -1620,7 +1675,8 @@ def main():
         final_params['face_size_low'], final_params['face_size_high'],
         final_params['retouching'], final_params['mask'], final_params['glasses'],
         rotation=final_params.get('rotation', 0),
-        grayscale=False, model_name=best_model
+        grayscale=False, model_name=best_model,
+        trial_context="Grayscale A/B: color",
     )
     res_gray = run_trial(
         final_params['pitch'], final_params['sym'], final_params['y_diff'], final_params['mouth_open'],
@@ -1630,7 +1686,8 @@ def main():
         final_params['face_size_low'], final_params['face_size_high'],
         final_params['retouching'], final_params['mask'], final_params['glasses'],
         rotation=final_params.get('rotation', 0),
-        grayscale=True, model_name=best_model
+        grayscale=True, model_name=best_model,
+        trial_context="Grayscale A/B: grayscale",
     )
     
     score_color, score_gray = res_color[0], res_gray[0]

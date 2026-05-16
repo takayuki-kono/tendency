@@ -59,8 +59,9 @@
     - 各トレーニング実行後に `BEST_EPOCH`（FT 時は `FT_BEST_EPOCH`）を確認し、終了条件を満たさなければ再調整（`LR_MAX_ADJUSTMENTS=6` まで。合計試行は `range(LR_MAX_ADJUSTMENTS+1)` により **最大 7 回**）。
     - **早期終了**（`lr_calibration_should_stop`）: best_epoch が LR_ACCEPTABLE_MIN～LR_ACCEPTABLE_MAX(11～15) **かつ** last_epoch_accu≠best（差≥0.01）→ 以降の LR 探索を打ち切り。
     - **試行回数上限**: `for adj_iter in range(LR_MAX_ADJUSTMENTS+1)` で、最後の試行の直後は次 LR を計算せず終了（最大 7 試行）。
-    - **次 LR の決定**（`calibrate_base_lr` と同一の `lr_bisect_update_bounds_and_next_raw`）: `target_min = target_max = LR_TARGET_EPOCH`（既定 13）。`best_epoch` がターゲットより早い試行で `lr_high`、遅い試行で `lr_low` を更新。**両境界が揃えば** 次 LR = `sqrt(lr_low * lr_high)`（ログ `Bisection (geom)`）。**片側のみ**は `new_lr = current_lr × (best_epoch / target_mid)`（比の上下限なし）。**相対変化判定**: clip 前の `new_lr` と現在 LR との相対差が `LR_CALIB_MIN_RELATIVE_CHANGE`（既定 5%）未満なら打ち止め。実際に optimizer に載せる値は `clip_learning_rate_for_training`。
+    - **次 LR の決定**（`calibrate_base_lr` と同一の `lr_bisect_update_bounds_and_next_raw`）: `target_min = target_max = LR_TARGET_EPOCH`（既定 13）。`best_epoch` がターゲットより早い試行で `lr_high`、遅い試行で `lr_low` を更新。**両境界が揃えば** 次 LR = `sqrt(lr_low * lr_high)`（ログでは **`[LR sweep] 次 lr 案: 幾何平均`**）。**片側のみ**は `new_lr = current_lr × (best_epoch / target_mid)`（比の上下限なし）。**相対変化判定**: clip 前の `new_lr` と現在 LR との相対差が `LR_CALIB_MIN_RELATIVE_CHANGE`（既定 5%）未満なら打ち止め。実際に optimizer に載せる値は `clip_learning_rate_for_training`。
     - 全試行中の **最高検証スコア**の出力（ログ・キャッシュ・staging keras）を採用する。
+    - **ログの読み方（`train_sequential` / `optimize_sequential` の `run_trial`）**: ブロック先頭の **`run_trial 文脈:`** が当該 1 本の目的（例: `optimize_param axis='mask' value=37`、Phase2 greedy 等）。LR 再調整付き試行では **`[LR sweep]`** が sub-run ごとの `train_lr`・直後の val/best_epoch・**終了理由**（満足条件 / 試行上限 / 相対変化）、最後に **まとめ**（採用 Val・最良試行の lr・二分境界）を出す。キャッシュヒット時は学習をスキップするため `[LR sweep]` は出ない。
 - **Phase 1 タイブレーカー**:
     - Phase 1完了後、同じベストスコアを出した複数の候補値があるパラメータを検出。
     - 該当キャッシュを削除して再評価し、勝者を決定。
@@ -250,6 +251,7 @@
     - 実際に `train_multitask_trial.py` に渡すLRは、いずれの呼び出し側でも明示的に `--learning_rate <value>` として付与する。
 
 ### `train_sequential.py` の主要ステップ
+- **このスクリプトの `run_trial` ログ**: 試行開始直後に **`run_trial 文脈:`**（例: `optimize_param axis='model_name' value='ResNet101V2'`）。LR 自動調整が動くと **`[LR sweep]`** で sub-run・終了理由・**まとめ**が出る。**条件・ログ形式は `optimize_sequential.py` と同一**で、上記 §1 手法B の **LR自動調整リトライ** → **ログの読み方**に準ずる。
 - **`model_name` の扱い（2026-04-28 更新）**: `outputs/best_train_params.json` に `model_name` があっても `train_sequential` は **Step 1.1（バックボーン比較）をスキップしない**（**現在の前処理データ**で毎回確定）。**`optimize_sequential.py` Step 0** は `MODEL_NAME_CANDIDATES` ごとに **LR キャリブ**してから最高スコアの `best_model` を選び、同 JSON に `model_name` / **`learning_rate`** を書き戻す。`train_sequential` では 1.1 を再確定する想定。
 - **Step 1.1: Model Architecture** — 毎回: `MODEL_NAME_CANDIDATES`（`model_architecture.py`、例: EfficientNet B0/S、ResNet50/101V2、MobileNetV3Large）から `model_name` を比較確定。**MobileNetV4** 相当は **MobileNetV3Large** を代用。`optimize_param` に **`head_only_tie_log` を渡す**。各候補の `run_trial` は `(model, data_file_count, head|ft)` に応じた開始 LR を `resolve_calib_initial_lr` で決める。
 - **Step 1.2: Head LR Calibration** — **1.1 で確定した `model_name` に対し必ず** `calibrate_base_lr`（`target_best_epoch=13`）。旧 **Step 1（`LRCALIB_BASE_BACKBONE` 固定の先行キャリブ）は廃止**。**`initial_lr`** は `lr_calib_context` / 同一ラン直前キャリブとの一致で決定（不一致なら 0.01）。
