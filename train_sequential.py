@@ -188,11 +188,16 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=4)
 
-def run_trial(params):
+def run_trial(params, *, trial_context=None):
     """
     指定されたパラメータで学習を実行し、検証精度を返す
+
+    trial_context:
+        ログで「何の試行か」を識別する短い文字列（例: optimize_param axis=...）。
     """
     logger.info(f"\n{'='*50}")
+    if trial_context:
+        logger.info(f"run_trial 文脈: {trial_context}")
     logger.info(f"Evaluating Params: {params}")
     
     # キャッシュ確認
@@ -208,8 +213,7 @@ def run_trial(params):
     if cache_key in cache:
         sc = cache[cache_key]
         _maybe_record_head_only_phase_best(params, sc)
-        logger.info(f"Cache Hit! Skipping execution. Val Accuracy: {sc}")
-        logger.info(f"Original Params: {params}")
+        logger.info(f"Cache Hit! Skipping execution (LR sweep なし). Val Accuracy: {sc}")
         logger.info(f"{'='*50}")
         return sc
 
@@ -235,6 +239,7 @@ def run_trial(params):
         current_lr = start_lr
         best_trial_score = -1.0
         best_trial_output = None
+        best_trial_lr = None
         best_keras_staging = None
         training_epochs = int(params.get('epochs', 20))
         target_min = target_max = float(LR_TARGET_EPOCH)
@@ -251,8 +256,10 @@ def run_trial(params):
             staging_path = os.path.join(MODEL_DIR, f"_run_trial_adj{adj_iter}.keras")
             trial_params['export_model_path'] = staging_path
 
-            if adj_iter > 0:
-                logger.info(f"  [LR Adjust #{adj_iter}] LR={current_lr:.8f}...")
+            logger.info(
+                f"  [LR sweep] sub-run {adj_iter + 1}/{LR_MAX_ADJUSTMENTS + 1} "
+                f"train_lr={current_lr:.8g}"
+            )
 
             cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
             # best_train_params 由来のメタ・旧 LR フィールドは子 CLI に存在しない
@@ -303,16 +310,23 @@ def run_trial(params):
             if trial_score > best_trial_score:
                 best_trial_score = trial_score
                 best_trial_output = full_output
+                best_trial_lr = current_lr
                 best_keras_staging = staging_path
-            
-            logger.info(f"  BestEpoch={best_epoch}/{training_epochs}, Score={trial_score:.4f}, LastEpochAccu={last_epoch_accu:.4f}")
+
+            logger.info(
+                f"  [LR sweep] 上記 sub-run 結果: best_epoch={best_epoch}/{training_epochs}, "
+                f"val={trial_score:.6f}, last_minclass≈{last_epoch_accu:.6f} (train_lr={current_lr:.8g})"
+            )
             should_stop, stop_msg = lr_calibration_should_stop(
                 best_epoch, last_epoch_accu, trial_score, acceptable_band=acceptable_band
             )
             if should_stop and stop_msg:
-                logger.info(stop_msg)
+                logger.info(f"  [LR sweep] 終了理由: 満足条件 — {stop_msg.strip()}")
                 break
             if adj_iter >= LR_MAX_ADJUSTMENTS:
+                logger.info(
+                    f"  [LR sweep] 終了理由: 試行上限 (LR_MAX_ADJUSTMENTS={LR_MAX_ADJUSTMENTS})"
+                )
                 logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping.")
                 break
 
@@ -327,21 +341,33 @@ def run_trial(params):
             )
             if used_geom:
                 logger.info(
-                    f"  Bisection (geom): low={lr_low_rt:.8f}, high={lr_high_rt:.8f}, mid={new_lr_raw:.8f}"
+                    f"  [LR sweep] 次 lr 案: 幾何平均 mid={new_lr_raw:.8g} "
+                    f"(low={lr_low_rt:.8g}, high={lr_high_rt:.8g})"
                 )
             else:
-                logger.info(f"  Ratio scale: {scale:.4f}")
+                logger.info(
+                    f"  [LR sweep] 次 lr 案: ratio={scale:.6f} → raw={new_lr_raw:.8g} "
+                    f"(best_epoch={best_epoch} vs target={int(target_min)})"
+                )
             logger.info(f"  LR: {current_lr:.8f} -> {new_lr_raw:.8f}")
             if (
                 abs(new_lr_raw - current_lr) / max(current_lr, 1e-12)
                 < LR_CALIB_MIN_RELATIVE_CHANGE
             ):
                 logger.info(
+                    f"  [LR sweep] 終了理由: 相対変化 < {LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% "
+                    f"(clip 前 next vs 現在 lr)"
+                )
+                logger.info(
                     f"  LR change too small (<{LR_CALIB_MIN_RELATIVE_CHANGE * 100:.0f}% rel). Stopping."
                 )
                 break
             current_lr = clip_learning_rate_for_training(new_lr_raw)
 
+        logger.info(
+            f"  [LR sweep] まとめ: {adj_iter + 1} 本学習 | 採用 Val={best_trial_score:.6f} | "
+            f"その試行の lr={best_trial_lr!r} | 境界 lr_low={lr_low_rt!r} lr_high={lr_high_rt!r}"
+        )
         # 最良 LR 試行に対応する keras だけ残し、呼び出し元が期待するパスへ複製
         for _ai in range(LR_MAX_ADJUSTMENTS + 1):
             _sp = os.path.join(MODEL_DIR, f"_run_trial_adj{_ai}.keras")
@@ -439,7 +465,10 @@ def resolve_tie_breaks(current_params: dict, tie_log: list) -> dict:
                 trial["height_shift_range"] = v
             else:
                 trial[item[0]] = v
-            sub[v] = run_trial(trial)
+            sub[v] = run_trial(
+                trial,
+                trial_context=f"resolve_tie_breaks {label}={v!r}",
+            )
         m = max(sub.values()) if sub else -1.0
         at_max = [v for v in tied if _is_same_score(sub.get(v, -1.0), m)]
         best_v = at_max[0] if at_max else tied[0]
@@ -463,7 +492,10 @@ def optimize_param(target_name, candidates, current_params, tie_log=None):
     for val in candidates:
         params = current_params.copy()
         params[target_name] = val
-        score = run_trial(params)
+        score = run_trial(
+            params,
+            trial_context=f"optimize_param axis={target_name!r} value={val!r}",
+        )
         scores[val] = score
 
     m = max(scores.values()) if scores else -1.0
@@ -948,7 +980,10 @@ def main():
         params = current_params.copy()
         params['width_shift_range'] = val
         params['height_shift_range'] = val
-        shift_scores[val] = run_trial(params)
+        shift_scores[val] = run_trial(
+            params,
+            trial_context=f"optimize_param axis=shift(w/h) value={val!r}",
+        )
     m_sh = max(shift_scores.values()) if shift_scores else -1.0
     shift_tied = [c for c in shift_candidates if _is_same_score(shift_scores[c], m_sh)]
     if len(shift_tied) > 1:
@@ -1160,7 +1195,10 @@ def main():
         if head_finish:
             os.makedirs(MODEL_DIR, exist_ok=True)
             bon_params['export_model_path'] = os.path.join(MODEL_DIR, f"model_seed{seed}.keras")
-        score = run_trial(bon_params)
+        score = run_trial(
+            bon_params,
+            trial_context=f"Best-of-N {run_idx + 1}/{N_FINAL_RUNS} seed={seed}",
+        )
         logger.info(f"  Best-of-N #{run_idx+1} (seed={seed}): Score={score:.4f}")
         if score > best_bon_score:
             best_bon_score = score
@@ -1216,7 +1254,10 @@ def main():
             export_params['seed'] = best_seed
             export_params['epochs'] = FINAL_EPOCHS
             export_params.pop('export_model_path', None)
-            export_score = run_trial(export_params)
+            export_score = run_trial(
+                export_params,
+                trial_context="Step 4.7 full FT export (final_lr)",
+            )
             logger.info(f"  Full FT at Step 4.7 LR: reported score={export_score:.4f}")
             _src47 = os.path.join(MODEL_DIR, f"model_seed{best_seed}.keras")
             _dst47 = os.path.join(MODEL_DIR, "best_sequential_model.keras")
