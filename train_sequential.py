@@ -645,6 +645,11 @@ def run_calibration_trial(current_params, lr, cal_epochs=5):
     params = current_params.copy()
     params['learning_rate'] = lr
     params['epochs'] = cal_epochs
+    # FT キャリブでは learning_rate だけ試行用に下げても、warmup_lr が JSON のままだと
+    # ウォームアップが ~1e-4 帯・本番が 1e-7 帯となりログと意図が食い違う。キャリブは「当該 lr のみ」に揃える。
+    if str(params.get('fine_tune', 'False')).lower() == 'true':
+        params['warmup_lr'] = 0.0
+        logger.info("[Calibration] FT: warmup_lr=0（試行ごとの learning_rate のみで観測）")
 
     cmd = [PYTHON_EXEC, "components/train_multitask_trial.py"]
     # キャリブは LR/epochs を上書きするため auto_lr_target_epoch も渡さない（他は JSON メタ除外）
