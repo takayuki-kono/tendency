@@ -27,6 +27,10 @@ BEST_HEAD_WEIGHTS_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head.weights.
 # Step 3.9: head-only の完全モデル（FT 用 .h5 とは別ファイル。推論・検証用）
 BEST_HEAD_MODEL_PATH = os.path.join(BEST_HEAD_WEIGHTS_DIR, "best_head_only.keras")
 BEST_SEQUENTIAL_MODEL_PATH = os.path.join(MODEL_DIR, "best_sequential_model.keras")
+# 逐次最適化・BoN 試行中など: FINAL_VAL のパイプライン横断最大が更新されたときだけコピー（ハイパラは試行ごとに異なり得る）
+BEST_SEQUENTIAL_PIPELINE_BEST_PATH = os.path.join(
+    MODEL_DIR, "best_sequential_pipeline_best.keras"
+)
 os.makedirs(BEST_HEAD_WEIGHTS_DIR, exist_ok=True)
 
 if not os.path.exists(PYTHON_EXEC): PYTHON_EXEC = "python"
@@ -68,7 +72,7 @@ _LR_CALIB_STATE: dict = {'persisted_ctx': None, 'last_ctx': None}
 
 # FT 以前の head-only 試行（run_trial / head キャリブ / Step3.9）で観測した FINAL_VAL の最大値
 _HEAD_ONLY_PHASE_BEST: dict = {'score': -1.0}
-# 同一 train_sequential main() 内で観測した FINAL_VAL の最大（best_sequential_model.keras に反映）
+# 同一 train_sequential main() 内で観測した FINAL_VAL の最大（best_sequential_pipeline_best.keras に反映）
 _PIPELINE_BEST_SCORE: float = -1.0
 
 
@@ -79,7 +83,8 @@ def _reset_pipeline_best_model_tracking() -> None:
 
 def _promote_best_sequential_model(score: float, src_keras_path: str, reason: str = "") -> None:
     """
-    FINAL_VAL がパイプライン全体で更新されたとき、best_sequential_model.keras を上書きする。
+    FINAL_VAL がパイプライン全体（試行横断）で更新されたとき、
+    best_sequential_pipeline_best.keras を上書きする（最終ステップ成果物とは別ファイル）。
     """
     global _PIPELINE_BEST_SCORE
     if not src_keras_path or not os.path.isfile(src_keras_path):
@@ -92,13 +97,13 @@ def _promote_best_sequential_model(score: float, src_keras_path: str, reason: st
         return
     prev = _PIPELINE_BEST_SCORE
     os.makedirs(MODEL_DIR, exist_ok=True)
-    shutil.copy2(src_keras_path, BEST_SEQUENTIAL_MODEL_PATH)
-    copy_filter_manifest_beside_model(BEST_SEQUENTIAL_MODEL_PATH)
+    shutil.copy2(src_keras_path, BEST_SEQUENTIAL_PIPELINE_BEST_PATH)
+    copy_filter_manifest_beside_model(BEST_SEQUENTIAL_PIPELINE_BEST_PATH)
     _PIPELINE_BEST_SCORE = sc
     tag = f" ({reason})" if reason else ""
     logger.info(
-        f"\n>>> Pipeline best model updated{tag}: score={sc:.4f} (prev={prev:.4f}) "
-        f"-> {BEST_SEQUENTIAL_MODEL_PATH} <<<"
+        f"\n>>> Pipeline best (cross-trial) updated{tag}: score={sc:.4f} (prev={prev:.4f}) "
+        f"-> {BEST_SEQUENTIAL_PIPELINE_BEST_PATH} <<<"
     )
 
 
@@ -190,10 +195,15 @@ def save_cache(cache):
 
 def run_trial(params, *, trial_context=None):
     """
-    指定されたパラメータで学習を実行し、検証精度を返す
+    指定されたパラメータで学習を実行し、検証精度と LR sweep で最良だった学習率を返す。
 
     trial_context:
         ログで「何の試行か」を識別する短い文字列（例: optimize_param axis=...）。
+
+    Returns:
+        tuple: (val_score, memorized_best_lr)
+            memorized_best_lr: 本試行内で最良 Val だった sub-run の train_lr。キャッシュヒットや
+            失敗時は None（旧キャッシュ形式の数値のみのときも None）。
     """
     logger.info(f"\n{'='*50}")
     if trial_context:
@@ -211,11 +221,20 @@ def run_trial(params, *, trial_context=None):
     
     cache = load_cache()
     if cache_key in cache:
-        sc = cache[cache_key]
+        ent = cache[cache_key]
+        lr_hit = None
+        if isinstance(ent, (list, tuple)) and len(ent) >= 2:
+            sc = float(ent[0])
+            if ent[1] is not None:
+                lr_hit = float(ent[1])
+        else:
+            sc = float(ent)
         _maybe_record_head_only_phase_best(params, sc)
         logger.info(f"Cache Hit! Skipping execution (LR sweep なし). Val Accuracy: {sc}")
+        if lr_hit is not None:
+            logger.info(f"  (cache includes memorized_best_lr={lr_hit:.8g})")
         logger.info(f"{'='*50}")
-        return sc
+        return sc, lr_hit
 
     logger.info(f"Cache Miss. Running process... (File Count: {file_count})")
     logger.info(f"{'='*50}")
@@ -286,7 +305,7 @@ def run_trial(params, *, trial_context=None):
             
             if process.returncode != 0:
                 _log_subprocess_fail("train_multitask_trial", process.returncode, output_lines)
-                return 0.0
+                return 0.0, None
 
             full_output = "\n".join(output_lines)
             
@@ -409,23 +428,23 @@ def run_trial(params, *, trial_context=None):
         if match_a:
             score = max(score, float(match_a.group(1)))
             logger.info(f"Result: Val Accuracy = {score}")
-            
-            # キャッシュ保存
+
+            mem_lr = float(best_trial_lr) if best_trial_lr is not None else None
             cache = load_cache()
-            cache[cache_key] = score
+            cache[cache_key] = [float(score), mem_lr]
             save_cache(cache)
 
             _maybe_record_head_only_phase_best(params, score)
             if best_keras_staging and os.path.isfile(best_keras_staging):
                 _promote_best_sequential_model(score, best_keras_staging, reason="run_trial")
-            return score
+            return float(score), mem_lr
         else:
             logger.error("Score not found in output.")
-            return 0.0
+            return 0.0, None
 
     except Exception as e:
         logger.error(f"Error in trial: {e}")
-        return 0.0
+        return 0.0, None
 
 
 def _is_same_score(a: float, b: float, eps: float = 0.01) -> bool:
@@ -457,7 +476,8 @@ def resolve_tie_breaks(current_params: dict, tie_log: list) -> dict:
                 continue
             label = target_name
         logger.info(f"\n>>> Tie-break: {label} (candidates: {tied}) <<<")
-        sub = {}
+        sub_sc = {}
+        sub_lr = {}
         for v in tied:
             trial = p.copy()
             if item[0] == "_shift_coupled":
@@ -465,19 +485,26 @@ def resolve_tie_breaks(current_params: dict, tie_log: list) -> dict:
                 trial["height_shift_range"] = v
             else:
                 trial[item[0]] = v
-            sub[v] = run_trial(
+            sc, mem_lr = run_trial(
                 trial,
                 trial_context=f"resolve_tie_breaks {label}={v!r}",
             )
-        m = max(sub.values()) if sub else -1.0
-        at_max = [v for v in tied if _is_same_score(sub.get(v, -1.0), m)]
+            sub_sc[v] = sc
+            sub_lr[v] = mem_lr
+        m = max(sub_sc.values()) if sub_sc else -1.0
+        at_max = [v for v in tied if _is_same_score(sub_sc.get(v, -1.0), m)]
         best_v = at_max[0] if at_max else tied[0]
         if item[0] == "_shift_coupled":
             p["width_shift_range"] = best_v
             p["height_shift_range"] = best_v
         else:
             p[item[0]] = best_v
-        logger.info(f"Tie-break winner: {label} = {best_v!r} (Score: {sub[best_v]:.4f})")
+        if item[0] == "model_name":
+            wlr = sub_lr.get(best_v)
+            if wlr is not None:
+                p["learning_rate"] = clip_learning_rate_for_training(float(wlr))
+                logger.info(f"Tie-break: updated learning_rate to memorized {p['learning_rate']:.8g}")
+        logger.info(f"Tie-break winner: {label} = {best_v!r} (Score: {sub_sc[best_v]:.4f})")
     return p
 
 
@@ -485,18 +512,25 @@ def optimize_param(target_name, candidates, current_params, tie_log=None):
     """
     1 つのパラメータを候補の中から最適化。同最高スコアが複数なら仮に候補先頭を採用し、
     tie_log へ登録。Step 3 完了後の resolve_tie_breaks で全パラ確定後に再採点。
+
+    Returns:
+        tuple: (best_val, best_score, memorized_best_lr)
+            target_name=='model_name' のとき、採用候補の run_trial が覚えた最良 LR。
+            それ以外の軸では常に None。
     """
     logger.info(f"\n>>> Optimizing {target_name} (Candidates: {candidates}) <<<")
-    
+
     scores = {}
+    memorized_lr = {}
     for val in candidates:
         params = current_params.copy()
         params[target_name] = val
-        score = run_trial(
+        score, mem_lr = run_trial(
             params,
             trial_context=f"optimize_param axis={target_name!r} value={val!r}",
         )
         scores[val] = score
+        memorized_lr[val] = mem_lr
 
     m = max(scores.values()) if scores else -1.0
     tied = [c for c in candidates if _is_same_score(scores[c], m)]
@@ -504,11 +538,17 @@ def optimize_param(target_name, candidates, current_params, tie_log=None):
     if tie_log is not None and len(tied) > 1:
         tie_log.append((target_name, list(tied)))
 
+    chosen_mem_lr = memorized_lr.get(best_val) if target_name == "model_name" else None
+    if target_name == "model_name":
+        logger.info("Step 1.1 memorized best_trial_lr per model candidate:")
+        for val in candidates:
+            logger.info(f"  {val!r}: lr={memorized_lr.get(val)!r}, score={scores[val]:.4f}")
+
     msg = f"Finished optimizing {target_name}. Provisional best: {best_val} (Score: {m:.4f})"
     if len(tied) > 1:
         msg += f" [TIED: {tied} → re-eval in resolve_tie_breaks]"
     logger.info(msg)
-    return best_val, m
+    return best_val, m, chosen_mem_lr
 
 def train_and_save_best_head_weights(current_params, weights_path):
     """
@@ -845,7 +885,8 @@ def search_ft_lr_by_targets(current_params, initial_lr, targets=(12, 13, 14), ca
 
 def main():
     logger.info("Starting Sequential Training Optimization (Full Replacement for Bayesian)")
-    # Step 1.1 でバックボーン確定 → Step 1.2 で確定 model の head LR をキャリブ（旧 Step1 の B0 先行キャリブは廃止）。
+    # Step 1.1 でバックボーン確定し、各候補の run_trial が得た最良 LR を記憶。採用モデルではそれを head の base LR とし lr_calib_context に記録。
+    # 旧 Step 1.2（採択後の calibrate_base_lr）は廃止（1.1 と LR 探索が重複していたため）。
 
     persisted_calib_ctx = None
     if os.path.isfile(BEST_PARAMS_FILE):
@@ -905,34 +946,32 @@ def main():
     # head-only: optimize_param / shift で同点が出た (param, 同点候補) を蓄積（Step1.1・1.5・2/3 すべて渡す）→3.8
     head_only_tie_log: list = []
 
-    # --- Step 1.1: Model Architecture ---
-    # 各候補 model は run_trial 内で (model, data_count, head|ft) に応じた開始 LR を resolve（B0 の LR をそのまま流用しない）。
+    # --- Step 1.1: Model Architecture（各 model の LR sweep 最良値を記憶） ---
+    # 各候補 model は run_trial 内で (model, data_count, head_ft) に応じた開始 LR を resolve（B0 の LR をそのまま流用しない）。
     # 毎回 optimize_param（best_train_params の model_name ではスキップしない）
-    best_model, _ = optimize_param(
-        'model_name', MODEL_NAME_CANDIDATES, current_params, head_only_tie_log
+    best_model, _, head_lr_mem = optimize_param(
+        "model_name", MODEL_NAME_CANDIDATES, current_params, head_only_tie_log
     )
-    current_params['model_name'] = best_model
-
-    # --- Step 1.2: Head LR calibration（1.1 で確定したバックボーン向け・常に実行） ---
-    logger.info(
-        f"\n>>> Step 1.2: Head LR Calibration "
-        f"(model_name={best_model}, target_best_epoch=13) <<<"
-    )
-    _il12 = initial_lr_for_calibrate(current_params['model_name'], current_params['fine_tune'])
-    head_lr, _, _ = calibrate_base_lr(
-        current_params, initial_lr=_il12,
-        cal_epochs=20, target_best_epoch=13
-    )
-    record_calibrate_context(current_params['model_name'], current_params['fine_tune'], head_lr)
-    current_params['learning_rate'] = head_lr
-    logger.info(f"Calibrated head LR for {best_model}: {head_lr:.8f}")
+    current_params["model_name"] = best_model
+    if head_lr_mem is not None:
+        head_lr = clip_learning_rate_for_training(float(head_lr_mem))
+        logger.info(f"Step 1.1: adopt memorized best_trial_lr for {best_model}: {head_lr:.8f}")
+    else:
+        head_lr = clip_learning_rate_for_training(
+            initial_lr_for_calibrate(current_params["model_name"], current_params["fine_tune"])
+        )
+        logger.warning(
+            f"Step 1.1: memorized LR missing (old cache?); fallback initial_lr={head_lr:.8f}"
+        )
+    current_params["learning_rate"] = head_lr
+    record_calibrate_context(current_params["model_name"], current_params["fine_tune"], head_lr)
 
     # --- Step 1.25: Optimizer（モデル・head LR 確定後。weight_decay はまだ 0 のまま） ---
     logger.info(
         f"\n>>> Step 1.25: Optimizer Selection "
         f"(model={best_model}, head_lr fixed) <<<"
     )
-    best_opt, _ = optimize_param(
+    best_opt, _, _ = optimize_param(
         'optimizer',
         ['adam', 'adamw', 'sgd'],
         current_params,
@@ -942,34 +981,34 @@ def main():
 
     # --- Step 1.5: Weight Decay ---
     # weight_decay は AdamW ではオプティマイザ側、adam/sgd では Dense L2（trial 側で振り分け）
-    best_wd, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params, head_only_tie_log)
+    best_wd, _, _ = optimize_param('weight_decay', [0.0, 1e-4, 1e-5], current_params, head_only_tie_log)
     current_params['weight_decay'] = best_wd
     
     # --- Step 2: Model Structure ---
     # Layers
-    best_layers, _ = optimize_param('num_dense_layers', [1, 2], current_params, head_only_tie_log)
+    best_layers, _, _ = optimize_param('num_dense_layers', [1, 2], current_params, head_only_tie_log)
     current_params['num_dense_layers'] = best_layers
     
     # Units
-    best_units, _ = optimize_param('dense_units', [128, 256], current_params, head_only_tie_log)
+    best_units, _, _ = optimize_param('dense_units', [128, 256], current_params, head_only_tie_log)
     current_params['dense_units'] = best_units
     
     # Dropout
-    best_dropout, _ = optimize_param('dropout', [0.3, 0.5], current_params, head_only_tie_log)
+    best_dropout, _, _ = optimize_param('dropout', [0.3, 0.5], current_params, head_only_tie_log)
     current_params['dropout'] = best_dropout
 
     # --- Step 3: Data Augmentation & Regularization ---
     # Label Smoothing (0.0=Off, 0.1=On)
-    best_smoothing, _ = optimize_param('label_smoothing', [0.0, 0.1], current_params, head_only_tie_log)
+    best_smoothing, _, _ = optimize_param('label_smoothing', [0.0, 0.1], current_params, head_only_tie_log)
     current_params['label_smoothing'] = best_smoothing
 
     # Mixup (0.0=Off, 0.2=On)
     # Mixupは強力な正則化なので、最初に決めるのが良い場合もあるが、他のAugmentationとの兼ね合いもある
-    best_mixup, _ = optimize_param('mixup_alpha', [0.0, 0.2], current_params, head_only_tie_log)
+    best_mixup, _, _ = optimize_param('mixup_alpha', [0.0, 0.2], current_params, head_only_tie_log)
     current_params['mixup_alpha'] = best_mixup
 
     # Rotation (0.0 - 0.2)
-    best_rot, _ = optimize_param('rotation_range', [0.0, 0.1, 0.2], current_params, head_only_tie_log)
+    best_rot, _, _ = optimize_param('rotation_range', [0.0, 0.1, 0.2], current_params, head_only_tie_log)
     current_params['rotation_range'] = best_rot
     
     # Shift (Width/Height set together)
@@ -980,10 +1019,11 @@ def main():
         params = current_params.copy()
         params['width_shift_range'] = val
         params['height_shift_range'] = val
-        shift_scores[val] = run_trial(
+        sc_shift, _ = run_trial(
             params,
             trial_context=f"optimize_param axis=shift(w/h) value={val!r}",
         )
+        shift_scores[val] = sc_shift
     m_sh = max(shift_scores.values()) if shift_scores else -1.0
     shift_tied = [c for c in shift_candidates if _is_same_score(shift_scores[c], m_sh)]
     if len(shift_tied) > 1:
@@ -999,11 +1039,11 @@ def main():
     current_params['height_shift_range'] = best_shift
 
     # Zoom
-    best_zoom, _ = optimize_param('zoom_range', [0.0, 0.1], current_params, head_only_tie_log)
+    best_zoom, _, _ = optimize_param('zoom_range', [0.0, 0.1], current_params, head_only_tie_log)
     current_params['zoom_range'] = best_zoom
 
     # Flip
-    best_flip, final_score = optimize_param('horizontal_flip', ['True', 'False'], current_params, head_only_tie_log)
+    best_flip, final_score, _ = optimize_param('horizontal_flip', ['True', 'False'], current_params, head_only_tie_log)
     current_params['horizontal_flip'] = best_flip
 
     if head_only_tie_log:
@@ -1011,6 +1051,7 @@ def main():
             "\n>>> Step 3.8: Re-score tied candidates (all other head-only params fixed) <<<"
         )
         resolve_tie_breaks(current_params, head_only_tie_log)
+    head_lr = clip_learning_rate_for_training(float(current_params['learning_rate']))
 
     logger.info("\n" + "="*50)
     logger.info("OPTIMIZATION COMPLETE. STARTING FINE-TUNING...")
@@ -1028,7 +1069,7 @@ def main():
     head_save_params = current_params.copy()
     head_save_params['fine_tune'] = 'False'
     head_save_params['epochs'] = 20
-    # Step1/1.2 で確定した head LR を使う（current_params['learning_rate'] と同値）
+    # Step 1.1 で確定した head LR（3.8 の model 同点解消後も current_params と同期済み）
     head_save_params['learning_rate'] = head_lr
     score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
     _maybe_record_head_only_phase_best(head_save_params, score_3_9)
@@ -1150,7 +1191,7 @@ def main():
         )
     else:
         # --- Step 4: Unfreeze Layers Optimization ---
-        best_unfreeze, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
+        best_unfreeze, _, _ = optimize_param('unfreeze_layers', [20, 40, 60, 999], current_params)
         current_params['unfreeze_layers'] = best_unfreeze
 
         # --- Step 4.5: FT LR Re-calibration (unfreeze_layers確定後) ---
@@ -1195,7 +1236,7 @@ def main():
         if head_finish:
             os.makedirs(MODEL_DIR, exist_ok=True)
             bon_params['export_model_path'] = os.path.join(MODEL_DIR, f"model_seed{seed}.keras")
-        score = run_trial(
+        score, _ = run_trial(
             bon_params,
             trial_context=f"Best-of-N {run_idx + 1}/{N_FINAL_RUNS} seed={seed}",
         )
@@ -1212,7 +1253,7 @@ def main():
         logger.info(f"Best-of-N: seed={best_seed}, Score={best_bon_score:.4f} (LR=pre-4.7)")
 
     _bon_src = os.path.join(MODEL_DIR, f"model_seed{best_seed}.keras")
-    _bon_dst = os.path.join(MODEL_DIR, "best_sequential_model.keras")
+    _bon_dst = BEST_SEQUENTIAL_MODEL_PATH
     if os.path.exists(_bon_src):
         shutil.copy2(_bon_src, _bon_dst)
         copy_filter_manifest_beside_model(_bon_dst)
@@ -1254,13 +1295,13 @@ def main():
             export_params['seed'] = best_seed
             export_params['epochs'] = FINAL_EPOCHS
             export_params.pop('export_model_path', None)
-            export_score = run_trial(
+            export_score, _ = run_trial(
                 export_params,
                 trial_context="Step 4.7 full FT export (final_lr)",
             )
             logger.info(f"  Full FT at Step 4.7 LR: reported score={export_score:.4f}")
             _src47 = os.path.join(MODEL_DIR, f"model_seed{best_seed}.keras")
-            _dst47 = os.path.join(MODEL_DIR, "best_sequential_model.keras")
+            _dst47 = BEST_SEQUENTIAL_MODEL_PATH
             if os.path.exists(_src47):
                 shutil.copy2(_src47, _dst47)
                 copy_filter_manifest_beside_model(_dst47)
@@ -1299,6 +1340,12 @@ def main():
             f"Step4.7 calib (FT LR band [10,15]): Score={final_ft_score:.4f}, LR={final_lr:.8g} | "
             f"saved model score={final_report_score:.4f}"
         )
+    _pbs = _PIPELINE_BEST_SCORE
+    _pb_str = f"{_pbs:.4f}" if _pbs >= 0.0 else "n/a"
+    logger.info(
+        f"Model files: last-step (BoN / Step 4.7) -> {BEST_SEQUENTIAL_MODEL_PATH}; "
+        f"pipeline cross-trial Val max -> {BEST_SEQUENTIAL_PIPELINE_BEST_PATH} (tracked max={_pb_str})"
+    )
     logger.info(f"{'='*50}")
 
     # Save Best Params (ベストseedを含める)
