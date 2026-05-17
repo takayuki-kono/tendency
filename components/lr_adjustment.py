@@ -6,6 +6,8 @@ LR_TARGET_EPOCH = 13
 LR_ACCEPTABLE_MIN = 11
 LR_ACCEPTABLE_MAX = 15  # early-stop 帯の上限（lr_calibration_should_stop / should_exit）
 LR_MAX_ADJUSTMENTS = 6
+# run_trial 内 LR sweep: 直前 sub-run 比で best_epoch がターゲット方向に動かなかった回数がこの値に達したら打ち止め
+LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS = 2
 # calibrate_base_lr（optimize / train_sequential）の試行回数上限。run_trial の LR 再調整回数とは独立。
 LR_CALIBRATION_MAX_ITERATIONS = 10
 # calibrate_base_lr の「新規」探索開始 LR（モデル・データ数・head/FT のいずれかが前回と異なるとき）
@@ -40,6 +42,19 @@ LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ
 # 目安: Adam + 224 系 CNN の head/FT でよく使う 1e-4〜1e-2 の帯より広く、探索を殺さない範囲に上限。
 LR_TRAIN_ABSOLUTE_MIN = 1e-7
 LR_TRAIN_ABSOLUTE_MAX = 0.1
+
+
+def best_epoch_moved_toward_lr_target(old_e: int, new_e: int, target: float) -> bool:
+    """
+    run_trial の LR sweep が意図する方向: 前回 sub-run の best_epoch から、今回が LR_TARGET_EPOCH 側へ動いたか。
+    early peak (old < target) では new > old、late peak (old > target) では new < old を成功とする。
+    old == target のときは別ルート（満足条件）を期待するため True（この打ち止めで邪魔しない）。
+    """
+    if old_e < target:
+        return new_e > old_e
+    if old_e > target:
+        return new_e < old_e
+    return True
 
 
 def clip_learning_rate_for_training(lr):

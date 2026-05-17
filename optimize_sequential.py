@@ -71,11 +71,13 @@ logger = logging.getLogger(__name__)
 from components.lr_adjustment import (
     LR_TARGET_EPOCH,
     LR_MAX_ADJUSTMENTS, LR_CALIBRATION_MAX_ITERATIONS,
+    LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS,
     LR_CALIBRATION_INITIAL,
     LR_CALIB_MIN_RELATIVE_CHANGE,
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
+    best_epoch_moved_toward_lr_target,
     clip_learning_rate_for_training,
     lr_bisect_update_bounds_and_next_raw,
     lr_calibration_should_stop,
@@ -1003,6 +1005,8 @@ def run_trial(
         acceptable_band = None
         lr_low_rt = None
         lr_high_rt = None
+        prev_subrun_best_epoch = None
+        sweep_no_target_progress = 0
 
         for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
             logger.info(
@@ -1066,6 +1070,22 @@ def run_trial(
                 f"val={trial_score:.6f}, last_minclass≈{last_epoch_accu:.6f} "
                 f"(train_lr={current_training_lr:.8g})"
             )
+            if prev_subrun_best_epoch is not None:
+                if not best_epoch_moved_toward_lr_target(
+                    prev_subrun_best_epoch, best_epoch, float(LR_TARGET_EPOCH)
+                ):
+                    sweep_no_target_progress += 1
+                    if sweep_no_target_progress >= LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS:
+                        logger.info(
+                            "  [LR sweep] 終了理由: "
+                            f"{LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS}回連続で best_epoch が "
+                            f"ターゲット方向に動かず (target={LR_TARGET_EPOCH}, "
+                            f"直前 epoch={prev_subrun_best_epoch} → 今回={best_epoch})"
+                        )
+                        break
+                else:
+                    sweep_no_target_progress = 0
+            prev_subrun_best_epoch = best_epoch
             should_stop, stop_msg = lr_calibration_should_stop(
                 best_epoch, last_epoch_accu, trial_score, acceptable_band=acceptable_band
             )
@@ -1935,44 +1955,26 @@ def main():
     except Exception as e:
         logger.error(f"Failed to save analysis data: {e}")
 
-    # Generate and print the final preprocessing command
-    cmd_parts = [PYTHON_PREPROCESS, "preprocess_multitask.py"]
-    cmd_parts.extend(["--out_dir", "preprocessed_multitask"])
-    
-    # Add all params
-    fft_cmd = final_params.get("filter_fixed_thresholds") or {}
-    for k, v in final_params.items():
-        if k in ("grayscale", "filter_fixed_thresholds"):
-            continue
-        # percentile params
-        arg_map = {
-            'pitch': '--pitch_percentile',
-            'sym': '--symmetry_percentile',
-            'y_diff': '--y_diff_percentile',
-            'mouth_open': '--mouth_open_percentile',
-            'eb_eye_high': '--eyebrow_eye_percentile_high',
-            'eb_eye_low': '--eyebrow_eye_percentile_low',
-            'sharpness_low': '--sharpness_percentile_low',
-            'sharpness_high': '--sharpness_percentile_high',
-            'mean_brightness_low': '--mean_brightness_percentile_low',
-            'face_size_low': '--face_size_percentile_low',
-            'face_size_high': '--face_size_percentile_high',
-            'retouching': '--retouching_percentile',
-            'mask': '--mask_percentile',
-            'glasses': '--glasses_percentile',
-            'rotation': '--rotation_percentile',
-        }
-        if k not in arg_map:
-            continue
-        if k in fft_cmd and k in FILTER_AXIS_FIXED_SPEC:
-            tflag = FILTER_AXIS_FIXED_SPEC[k][0]
-            cmd_parts.extend([arg_map[k], "0", tflag, str(fft_cmd[k])])
-        else:
-            cmd_parts.extend([arg_map[k], str(v)])
-    
-    if final_params.get('grayscale', False):
-        cmd_parts.append("--grayscale")
-        
+    # Generate and print the final preprocessing command（run_trial と同一の argv 生成）
+    cmd_parts = [PYTHON_PREPROCESS, "preprocess_multitask.py"] + _preprocess_multitask_argv_tail(
+        final_params["pitch"],
+        final_params["sym"],
+        final_params["y_diff"],
+        final_params["mouth_open"],
+        final_params["eb_eye_high"],
+        final_params["eb_eye_low"],
+        final_params["sharpness_low"],
+        final_params["sharpness_high"],
+        final_params.get("mean_brightness_low", 0),
+        final_params["face_size_low"],
+        final_params["face_size_high"],
+        final_params.get("rotation", 0),
+        final_params["retouching"],
+        final_params["mask"],
+        final_params["glasses"],
+        bool(final_params.get("grayscale", False)),
+        final_params.get("filter_fixed_thresholds"),
+    )
     final_cmd = " ".join(cmd_parts)
     logger.info("\nRun this command to apply the best filters:")
     logger.info(final_cmd)

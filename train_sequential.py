@@ -51,11 +51,13 @@ logger = logging.getLogger(__name__)
 from components.lr_adjustment import (
     LR_TARGET_EPOCH,
     LR_MAX_ADJUSTMENTS,
+    LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS,
     LR_CALIBRATION_MAX_ITERATIONS,
     LR_CALIB_MIN_RELATIVE_CHANGE,
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
+    best_epoch_moved_toward_lr_target,
     clip_learning_rate_for_training,
     lr_bisect_update_bounds_and_next_raw,
     lr_calibration_should_stop,
@@ -268,6 +270,8 @@ def run_trial(params, *, trial_context=None):
         caller_export = str(params.get('export_model_path') or '').strip()
         seed_run = int(params.get('seed', 42))
         is_ft_run = str(params.get('fine_tune', 'False')).lower() == 'true'
+        prev_subrun_best_epoch = None
+        sweep_no_target_progress = 0
 
         for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
             trial_params = params.copy()
@@ -336,6 +340,22 @@ def run_trial(params, *, trial_context=None):
                 f"  [LR sweep] 上記 sub-run 結果: best_epoch={best_epoch}/{training_epochs}, "
                 f"val={trial_score:.6f}, last_minclass≈{last_epoch_accu:.6f} (train_lr={current_lr:.8g})"
             )
+            if prev_subrun_best_epoch is not None:
+                if not best_epoch_moved_toward_lr_target(
+                    prev_subrun_best_epoch, best_epoch, float(LR_TARGET_EPOCH)
+                ):
+                    sweep_no_target_progress += 1
+                    if sweep_no_target_progress >= LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS:
+                        logger.info(
+                            "  [LR sweep] 終了理由: "
+                            f"{LR_SWEEP_MAX_CONSECUTIVE_NO_TARGET_PROGRESS}回連続で best_epoch が "
+                            f"ターゲット方向に動かず (target={LR_TARGET_EPOCH}, "
+                            f"直前 epoch={prev_subrun_best_epoch} → 今回={best_epoch})"
+                        )
+                        break
+                else:
+                    sweep_no_target_progress = 0
+            prev_subrun_best_epoch = best_epoch
             should_stop, stop_msg = lr_calibration_should_stop(
                 best_epoch, last_epoch_accu, trial_score, acceptable_band=acceptable_band
             )
