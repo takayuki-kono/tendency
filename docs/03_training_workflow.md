@@ -45,6 +45,7 @@
     - **探索点**: `[0, 5, 25, 50]`（昇順の粗探索）。**`p>0` の試行で score が連続 2 回 `p=0` の score を下回ったら、それより大きいパーセンタイルは粗探索しない**（早期終了。1 回だけ下回った場合は次点まで試す）。粗探索後、ベースライン超の改善があり **評価済み点が2点以上** あれば、従来どおり Score/Efficiency 各 Top2 間の中間点を 1% 刻みで追う Refinement。
     - **眉-目パーセンタイル**（`--eyebrow_eye_percentile_*`）: **探索対象外**（試行では常に 0）。`preprocess_multitask.py` 単体実行時のみ手動で指定可能。
     - **平均明度**（`--mean_brightness_percentile_low`）: グローバル分布で **暗い順の下位 X%** を除外。Phase 1 で `mean_brightness_low` として他軸と同様に粗探索＋Refinement。
+- **Phase 2 greedy（固定閾値統合）**: Phase 1 の各試行後に書かれる `preprocessed_multitask/filter_threshold_manifest.json` の **train** スプリット `global_numeric_thresholds` から、当該軸の **実際に使った実数閾値**を読み取る。greedy では複数軸を足し込むとき、グローバル軸については **パーセンタイル同時指定ではなく** `preprocess_multitask.py` の `--*_threshold`（当該軸の `--*_percentile` は 0）で前処理する。マニフェスト欠損時は警告のうえ **パーセンタイルにフォールバック**。LR スケーリングの加重指数計算では、固定閾値で採用した軸に **名目 50%** 相当を載せる（実装定数 `_FIXED_AXIS_NOMINAL_PERCENTILE_FOR_LR`）。最終出力の `final_params` に `filter_fixed_thresholds` が付く場合は、`run_optimized_preprocess.bat` も `--*_threshold` を含む。
 - **Phase 1 結果サマリー**: 全パラメータの独立探索完了後に「精度上昇効率一覧」をログ出力。各パラメータの Best Score 候補と Best Efficiency 候補をテーブル形式で表示し、全体の Overall Best Score / Best Efficiency も出力する。
 - **出力アーティファクト**:
     - `outputs/logs/sequential_opt_log_YYYYMMDD_HHMMSS.txt`: 実行ログ（タイムスタンプ付きで履歴保持）。
@@ -81,7 +82,7 @@
 - **アンダーサンプリング**: JSON の閾値だけでは再現しない（枚数キャップ・シャッフルあり）。マニフェストの `notes` にも記載。
 - **`face_size`（`_sz<px>`）** と **`face_roll_deg_abs`（`_rz<ミリ度>`）**: `components/part1_setup.py` が保存時に **バウンディングボックス幅** を `_sz`、**回転補正に使った in-plane 角**（度×1000 の符号付き整数、例 `_rz-3250` = −3.25°）を `_rz` としてファイル名に埋め込む。`preprocess_multitask.py` は `_rz` から絶対度数へ復元する。**`_rz` が無いデータ**（正立化済み切り出しのみ等）は **元画像に対する補正角は復元不能**のため **`face_roll_deg_abs = 0`** とする。**`--rotation_percentile`**（既定0）が正のとき、当該メトリクスで pitch と同様に上位 X％を閾値で落とす。`filter_threshold_manifest.json` の `face_roll_abs_deg_upper_reject_if_strictly_greater` に実数閾値を記録。
 - **`components/train_multitask_trial.py`** が FT 済み `.keras` または `--export_model_path` を保存したとき、`preprocessed_multitask/filter_threshold_manifest.json` を **モデルと同じディレクトリ**へ `filter_threshold_manifest.json` としてコピーする（ファイルが無い場合は WARN のみ）。
-- **`train_sequential.py`** が `best_sequential_model.keras` を Best-of-N または Step 4.7 で更新したときも同様にコピーする。
+- **`train_sequential.py`** が **`best_sequential_model.keras`**（最終ステップの成果物）または **`best_sequential_pipeline_best.keras`**（試行横断の Val 最大が更新されたとき）をコピーしたときも同様にマニフェストを付ける。
 
 ### 学習率の動的スケーリング (Dynamic LR Scaling)
 前処理フィルタによりデータ量が減少した場合、学習率を以下の多項式曲線に基づいて自動調整します。
@@ -197,7 +198,10 @@
 
 前処理済みデータを用いて、最終的なマルチタスクモデルを学習します。
 
-- **パイプライン最高精度のモデルファイル**: `run_trial`（逐次最適化の各試行・Best-of-N・Step 4.7 含む）および Step 3.9 の head 保存で、**FINAL_VAL_ACCURACY がその時点までの最大を更新したとき**、対応する `.keras` を `outputs/models/best_sequential_model.keras` にコピーし、`filter_threshold_manifest.json` を同ディレクトリへ付与する。短い LR キャリブ用 `run_calibration_trial` は従来どおり本コピー対象外（モデル未エクスポート）。
+- **モデルファイル（2 系統）**:
+    - **`outputs/models/best_sequential_pipeline_best.keras`**: `run_trial`（逐次最適化の各試行・Best-of-N の各 seed・Step 4.7 のフル FT など **いずれかの試行**）および Step 3.9 の head 保存で、**FINAL_VAL_ACCURACY がそのラン内でこれまで観測した最大を更新したとき**に **`_promote_best_sequential_model`** によりコピーする。**試行ごとにハイパラが異なり得る**（探索中に出た「とにかく数字が良かった」重み）。
+    - **`outputs/models/best_sequential_model.keras`**: **`best_train_params.json` と整合する最終成果物**。Best-of-N の勝ち seed の `model_seed{best_seed}.keras` をコピーし、FT ルートでは Step 4.7 のフル FT が BoN を上回ったときのみ再更新。**推論・`analyze_errors.py` の既定パスはこちら**（最後に確定した設定に対応したモデル）。
+    - 短い LR キャリブ用 `run_calibration_trial` は従来どおり上記いずれの「本番コピー」対象外（モデル未エクスポート）。
 
 ### 学習フェーズ (`train_multitask_trial.py` 内部)
 0.  **Head Carryover (Phase 0 ベスト重みロード)**
@@ -264,9 +268,9 @@
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
 - **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。あわせて同一ベスト重みをロードした **完全モデル**を `outputs/best_head_weights/best_head_only.keras` に別保存する（推論・検証用。FT の head carryover は従来どおり `.weights.h5` のみ使用）。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
 - **Step 3.5: FT LR Calibration** — **常に 2 系統**で `calibrate_base_lr`（同一 `initial_lr`）を実行する: **(A)** Step 3.9 の `best_head.weights.h5` を `init_weights_path` に載せ `warmup_lr=0` / `warmup_epochs=0`（ファイルが無いときは (A) をスキップ）; **(B)** `init_weights_path` 空・`warmup_lr=head_lr`・`warmup_epochs=5`。**(A)(B) の採用 `FINAL_VAL_ACCURACY` が高い方**の calibrated LR と init/warmup 設定を以降の FT に採用（同点 `_is_same_score` は carryover 側を優先）。終了時の **勝者スコア**を **`score_step_3_5_ft_calib`** とし、head-only フェーズベストとの比較（`head_finish`）に使う。詳細スコア・LR は `best_train_params.json` の `score_step_3_5_ft_calib_carry` / `score_step_3_5_ft_calib_warmup`・`ft_calib_carryover_selected` 等を参照。
-- **分岐: FT キャリブが head-only フェーズベスト未満のとき** — **Step 4 / 4.5 / Step 4.7 をスキップ**。`fine_tune=False`・`learning_rate=head_lr`・`init_weights_path=best_head.weights.h5`（無ければ WARNING）で **Best-of-N のみ**（各 run に `--export_model_path=outputs/models/model_seed{seed}.keras`）。採用 seed のモデルを `best_sequential_model.keras` にコピー。`outputs/best_train_params.json` に `finish_mode=head_only`、`score_step_3_9_head` / **`score_step_3_5_ft_calib`**（Step 3.5 勝者） / `score_head_only_phase_best` / **`ft_calib_carryover_selected`** / `score_step_3_5_ft_calib_carry` / `score_step_3_5_ft_calib_warmup` 等を記録。
+- **分岐: FT キャリブが head-only フェーズベスト未満のとき** — **Step 4 / 4.5 / Step 4.7 をスキップ**。`fine_tune=False`・`learning_rate=head_lr`・`init_weights_path=best_head.weights.h5`（無ければ WARNING）で **Best-of-N のみ**（各 run に `--export_model_path=outputs/models/model_seed{seed}.keras`）。採用 seed のモデルを **`best_sequential_model.keras`**（最終成果物）にコピー。**パイプライン横断で高かった試行**は引き続き **`best_sequential_pipeline_best.keras`** に蓄積される。`outputs/best_train_params.json` に `finish_mode=head_only`、`score_step_3_9_head` / **`score_step_3_5_ft_calib`**（Step 3.5 勝者） / `score_head_only_phase_best` / **`ft_calib_carryover_selected`** / `score_step_3_5_ft_calib_carry` / `score_step_3_5_ft_calib_warmup` 等を記録。
 - **Step 4 / 4.5** — **上記分岐で head-only 仕上げの場合はスキップ。** それ以外（**FT キャリブが head-only フェーズベスト以上**、すなわち `score_3_5 >= score_head_only_phase_best`）では、従来どおり `unfreeze_layers` 最適化 → 暫定 `unfreeze≠60` のとき FT LR 再 Cal。（旧 **Step 4.6** 廃止: 凍結フェーズ＋3.8 に一本化。）
-- **Best-of-N（先）** — **head-only 仕上げ**のときは複数 seed で **head-only**（上記）。**FT 継続**のときは複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。その時点の `model_seed{best_seed}.keras` を **`best_sequential_model.keras` に仮コピー**（Step 4.7 より前）。
+- **Best-of-N（先）** — **head-only 仕上げ**のときは複数 seed で **head-only**（上記）。**FT 継続**のときは複数 **seed** で各 1 回フル FT（LR は Step 4.5 まで）し、**ベスト seed** を採択。その時点の `model_seed{best_seed}.keras` を **`best_sequential_model.keras`（最終成果物）に仮コピー**（Step 4.7 より前）。
 - **Step 4.7** — **head-only 仕上げのときはスキップ。** **FT 継続**のとき、`seed` 固定のまま `search_ft_lr_by_targets` が **ターゲット 12 / 13 / 14 の 3 回**だけ **`calibrate_base_lr(..., target_best_epoch=t)` を同一 Step 内で連続実行**。**一気通貫**: 最初だけ Step 4.7 用に解決した `initial_lr` から入り、**2 本目以降は直前ターゲットのキャリブ採用 LR を次の `initial_lr` に載せ替える**。この **3 本の検証スコア**を比べ **最高のものを採用**（`_is_same_score` 同点群内では、|`chosen_best_epoch`−t| が小さい方、さらに同率では **t が大きい方**）。**`final_ft_score` > Best-of-N** のときだけ `final_lr` でフル FT（`FINAL_EPOCHS`・同 seed）の `run_trial` を 1 本走らせ `best_sequential_model.keras` を更新。**`log_result` の終端スコアはそのフル run**（キャリブ値より僅かに異なり得る）。**それ以外**は Best-of-N のコピーを維持。**実行直前に `outputs/cache/train_opt_cache.json` を削除**。
 - **掃除** — `model_seed{42..44}.keras` を削除（4.7 export 実行後も含め、ループ末尾で削除）。
 

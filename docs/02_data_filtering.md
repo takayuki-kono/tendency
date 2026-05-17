@@ -64,6 +64,8 @@
 ### 主なフィルタ項目
 パラメータの一部は `optimize_sequential.py` / `optimize_svm_sequential.py` で強度が探索されます。**眉-目距離のパーセンタイル（`--eyebrow_eye_percentile_*`）は最適化スクリプトでは探索しない**（常に 0 で呼ぶ）。別途 `preprocess_multitask.py` を手動実行するときのみ指定してください。
 
+- **固定実数閾値**: 軸ごとに `--pitch_threshold`, `--symmetry_threshold`, … の `--*_threshold` を指定すると、**当該軸ではパーセンタイルより優先**してその値でフィルタする（両方指定時は固定閾値が有効）。`filter_threshold_manifest.json` の `global_numeric_thresholds` は、固定指定のみの場合も **実際に使った実数**を記録する。
+
 1.  **Sharpness (鮮明度)**
     -   手法: **Laplacian Variance** (エッジの鋭さ) を計算。
     -   動作: 値が低い（ボケている）画像を除外。

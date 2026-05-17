@@ -84,6 +84,173 @@ from components.lr_adjustment import (
     make_lr_calib_context,
 )
 
+# Phase1 はパーセンタイル探索、マニフェストに記録された train の実数閾値を Phase2 greedy で再利用する。
+FILTER_THRESHOLD_MANIFEST_PATH = os.path.join("preprocessed_multitask", "filter_threshold_manifest.json")
+# greedy / LR 重み付けで固定閾値軸に仮置きする「パーセンタイル相当」
+_FIXED_AXIS_NOMINAL_PERCENTILE_FOR_LR = 50.0
+
+# optimize 軸名 → preprocess の --*_threshold と train マニフェスト global_numeric_thresholds のキー
+FILTER_AXIS_FIXED_SPEC = {
+    "pitch": ("--pitch_threshold", "pitch_upper_reject_if_strictly_greater"),
+    "sym": ("--symmetry_threshold", "symmetry_upper_reject_if_strictly_greater"),
+    "y_diff": ("--y_diff_threshold", "y_diff_upper_reject_if_strictly_greater"),
+    "mouth_open": ("--mouth_open_threshold", "mouth_open_upper_reject_if_strictly_greater"),
+    "sharpness_low": ("--sharpness_low_threshold", "sharpness_lower_reject_if_strictly_less"),
+    "sharpness_high": ("--sharpness_high_threshold", "sharpness_upper_reject_if_strictly_greater"),
+    "mean_brightness_low": ("--mean_brightness_low_threshold", "mean_brightness_lower_reject_if_strictly_less"),
+    "face_size_low": ("--face_size_low_threshold", "face_size_lower_reject_if_strictly_less"),
+    "face_size_high": ("--face_size_high_threshold", "face_size_upper_reject_if_strictly_greater"),
+    "rotation": ("--rotation_threshold", "face_roll_abs_deg_upper_reject_if_strictly_greater"),
+    "retouching": ("--retouching_threshold", "skin_smoothness_lower_reject_if_strictly_less"),
+    "mask": ("--mask_threshold", "mask_score_upper_reject_if_strictly_greater"),
+    "glasses": ("--glasses_threshold", "glasses_score_upper_reject_if_strictly_greater"),
+}
+
+FILTER_LR_MAPPING = {
+    "y_diff": "y_diff_percentile",
+    "sym": "symmetry_percentile",
+    "pitch": "pitch_percentile",
+    "sharpness_low": "sharpness_percentile_low",
+    "sharpness_high": "sharpness_percentile_high",
+    "mean_brightness_low": "mean_brightness_percentile_low",
+    "eb_eye_high": "eyebrow_eye_percentile_high",
+    "eb_eye_low": "eyebrow_eye_percentile_low",
+    "face_size_low": "face_size_percentile_low",
+    "face_size_high": "face_size_percentile_high",
+    "mouth_open": "mouth_open_percentile",
+    "retouching": "retouching_percentile",
+    "mask": "mask_percentile",
+    "glasses": "glasses_percentile",
+    "rotation": "rotation_percentile",
+}
+
+PERCENTILE_CLI_BY_AXIS = {
+    "pitch": "--pitch_percentile",
+    "sym": "--symmetry_percentile",
+    "y_diff": "--y_diff_percentile",
+    "mouth_open": "--mouth_open_percentile",
+    "sharpness_low": "--sharpness_percentile_low",
+    "sharpness_high": "--sharpness_percentile_high",
+    "mean_brightness_low": "--mean_brightness_percentile_low",
+    "face_size_low": "--face_size_percentile_low",
+    "face_size_high": "--face_size_percentile_high",
+    "rotation": "--rotation_percentile",
+    "retouching": "--retouching_percentile",
+    "mask": "--mask_percentile",
+    "glasses": "--glasses_percentile",
+}
+
+
+def _load_train_split_from_filter_manifest(path: str = FILTER_THRESHOLD_MANIFEST_PATH) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        splits = data.get("splits") or {}
+        t = splits.get("train")
+        return t if isinstance(t, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _read_train_abs_threshold_for_axis(axis_name: str, path: str = FILTER_THRESHOLD_MANIFEST_PATH):
+    train = _load_train_split_from_filter_manifest(path)
+    g = train.get("global_numeric_thresholds")
+    if not isinstance(g, dict):
+        return None
+    spec = FILTER_AXIS_FIXED_SPEC.get(axis_name)
+    if not spec:
+        return None
+    gkey = spec[1]
+    raw = g.get(gkey)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _preprocess_multitask_argv_tail(
+    pitch,
+    sym,
+    y_diff,
+    mouth_open,
+    eb_eye_high,
+    eb_eye_low,
+    sharpness_low,
+    sharpness_high,
+    mean_brightness_low,
+    face_size_low,
+    face_size_high,
+    rotation,
+    retouching,
+    mask,
+    glasses,
+    grayscale: bool,
+    fixed_thresholds,
+):
+    """preprocess_multitask.py に渡す引数（--out_dir 以降、--grayscale まで）。"""
+    ft = {k: v for k, v in (fixed_thresholds or {}).items() if k in FILTER_AXIS_FIXED_SPEC}
+    tail = ["--out_dir", "preprocessed_multitask"]
+
+    def axis_pair(axis: str, pct_val: int):
+        pf = PERCENTILE_CLI_BY_AXIS[axis]
+        tf = FILTER_AXIS_FIXED_SPEC[axis][0]
+        if axis in ft:
+            tail.extend([pf, "0", tf, str(ft[axis])])
+        else:
+            tail.extend([pf, str(pct_val)])
+
+    axis_pair("pitch", pitch)
+    axis_pair("sym", sym)
+    axis_pair("y_diff", y_diff)
+    axis_pair("mouth_open", mouth_open)
+    tail.extend(["--eyebrow_eye_percentile_high", str(eb_eye_high), "--eyebrow_eye_percentile_low", str(eb_eye_low)])
+    axis_pair("sharpness_low", sharpness_low)
+    axis_pair("sharpness_high", sharpness_high)
+    axis_pair("mean_brightness_low", mean_brightness_low)
+    axis_pair("face_size_low", face_size_low)
+    axis_pair("face_size_high", face_size_high)
+    axis_pair("rotation", rotation)
+    axis_pair("retouching", retouching)
+    axis_pair("mask", mask)
+    axis_pair("glasses", glasses)
+    if grayscale:
+        tail.append("--grayscale")
+    return tail
+
+
+def _fixed_thresholds_digest(fixed_thresholds):
+    if not fixed_thresholds:
+        return ""
+    payload = json.dumps(sorted(fixed_thresholds.items()), separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_exp_tag_for_filter_params(current_vals: dict, fixed_thresholds):
+    fk = set(fixed_thresholds.keys()) if fixed_thresholds else set()
+    lr_inputs = {
+        k: (_FIXED_AXIS_NOMINAL_PERCENTILE_FOR_LR if k in fk else v) for k, v in current_vals.items()
+    }
+    total_weighted_exp = 0.0
+    total_power = 0.0
+    for param_key, power in lr_inputs.items():
+        try:
+            power_val = float(power)
+        except ValueError:
+            power_val = 0.0
+        if power_val > 0:
+            mapped_key = FILTER_LR_MAPPING.get(param_key) or param_key
+            if not mapped_key.endswith("_percentile") and not mapped_key.endswith("_low") and not mapped_key.endswith("_high"):
+                mapped_key += "_percentile"
+            if mapped_key in LR_INDIVIDUAL_EXPONENTS:
+                p_exp = float(LR_INDIVIDUAL_EXPONENTS[mapped_key])
+                total_weighted_exp += p_exp * power_val
+                total_power += power_val
+    if total_power > 0:
+        return f"_exp={total_weighted_exp / total_power:.4f}"
+    return "_exp_def"
+
 
 def _log_subprocess_line(line: str, tag: str = "[Train]") -> None:
     """子プロセスの 1 行を親ログへ。学習行に加え、重み取得の Downloading / 例外・エラー行も通す。"""
@@ -544,6 +711,7 @@ def run_trial(
     active_param_name=None,
     *,
     trial_context=None,
+    fixed_thresholds=None,
 ):
     """
     指定されたパラメータとモデルで前処理と学習を実行し、スコアを返す
@@ -554,58 +722,57 @@ def run_trial(
     Returns:
         tuple: (raw_score, total_images, filtered_count)
     """
+    ft_norm = None
+    if fixed_thresholds:
+        ft_norm = {k: float(v) for k, v in fixed_thresholds.items() if k in FILTER_AXIS_FIXED_SPEC}
+        if not ft_norm:
+            ft_norm = None
+    ft_tag = f"_ft={_fixed_thresholds_digest(ft_norm)}" if ft_norm else ""
+
     logger.info(f"\n{'='*50}")
     if trial_context:
         logger.info(f"run_trial 文脈: {trial_context}")
-    logger.info(f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, MeanBright-L={mean_brightness_low}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Rotation={rotation}%, Grayscale={grayscale}")
-    
+    if ft_norm:
+        logger.info(f"run_trial 固定閾値: {ft_norm}")
+    logger.info(
+        f"Evaluating: Model={model_name}, Pitch={pitch}%, Sym={sym}%, Y-Diff={y_diff}%, Mouth-Open={mouth_open}%, "
+        f"Eb-High={eb_eye_high}%, Eb-Low={eb_eye_low}%, Sharp-L={sharpness_low}%, Sharp-H={sharpness_high}%, "
+        f"MeanBright-L={mean_brightness_low}%, FaceSize-L={face_size_low}%, FaceSize-H={face_size_high}%, "
+        f"Retouch={retouching}%, Mask={mask}%, Glasses={glasses}%, Rotation={rotation}%, Grayscale={grayscale}"
+    )
+
     file_count = count_files("train") + count_files("validation")
     # キャッシュキーにLR情報を含める（キャリブレーション後はLRが変わるため）
     lr_tag = f"_clr={CALIBRATED_BASE_LR:.8f}" if CALIBRATED_BASE_LR else ""
-    
-    # 動的加重平均されたExponentを事前計算してキャッシュキーに含める
-    mapping = {
-        'y_diff': 'y_diff_percentile', 'sym': 'symmetry_percentile', 'pitch': 'pitch_percentile',
-        'sharpness_low': 'sharpness_percentile_low', 'sharpness_high': 'sharpness_percentile_high',
-        'mean_brightness_low': 'mean_brightness_percentile_low',
-        'eb_eye_high': 'eyebrow_eye_percentile_high', 'eb_eye_low': 'eyebrow_eye_percentile_low',
-        'face_size_low': 'face_size_percentile_low', 'face_size_high': 'face_size_percentile_high',
-        'mouth_open': 'mouth_open_percentile', 'retouching': 'retouching_percentile',
-        'mask': 'mask_percentile', 'glasses': 'glasses_percentile', 'rotation': 'rotation_percentile',
-    }
+
     current_vals = {
-        'pitch': pitch, 'sym': sym, 'y_diff': y_diff, 'mouth_open': mouth_open,
-        'eb_eye_high': eb_eye_high, 'eb_eye_low': eb_eye_low, 
-        'sharpness_low': sharpness_low, 'sharpness_high': sharpness_high,
-        'mean_brightness_low': mean_brightness_low,
-        'face_size_low': face_size_low, 'face_size_high': face_size_high,
-        'retouching': retouching, 'mask': mask, 'glasses': glasses, 'rotation': rotation,
+        "pitch": pitch,
+        "sym": sym,
+        "y_diff": y_diff,
+        "mouth_open": mouth_open,
+        "eb_eye_high": eb_eye_high,
+        "eb_eye_low": eb_eye_low,
+        "sharpness_low": sharpness_low,
+        "sharpness_high": sharpness_high,
+        "mean_brightness_low": mean_brightness_low,
+        "face_size_low": face_size_low,
+        "face_size_high": face_size_high,
+        "retouching": retouching,
+        "mask": mask,
+        "glasses": glasses,
+        "rotation": rotation,
     }
-    
-    total_weighted_exp = 0.0
-    total_power = 0.0
-    
-    for param_key, power in current_vals.items():
-        try:
-            power_val = float(power)
-        except ValueError:
-            power_val = 0.0
-        
-        if power_val > 0:
-            mapped_key = mapping.get(param_key) or param_key
-            if not mapped_key.endswith('_percentile') and not mapped_key.endswith('_low') and not mapped_key.endswith('_high'):
-                 mapped_key += '_percentile'
-                 
-            if mapped_key in LR_INDIVIDUAL_EXPONENTS:
-                p_exp = float(LR_INDIVIDUAL_EXPONENTS[mapped_key])
-                total_weighted_exp += p_exp * power_val
-                total_power += power_val
-                
-    cache_exp_tag = f"_exp={total_weighted_exp/total_power:.4f}" if total_power > 0 else f"_exp_def"
-    
+
+    cache_exp_tag = _cache_exp_tag_for_filter_params(current_vals, ft_norm)
+
     # 互換性のため、以前の形式のキャッシュキーも生成
-    cache_key_legacy = f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_sharplow={sharpness_low}_sharphigh={sharpness_high}_mbl={mean_brightness_low}_fsl={face_size_low}_fsh={face_size_high}_retouch={retouching}_mask={mask}_glasses={glasses}_rot={rotation}_gray={grayscale}{lr_tag}_cnt={file_count}"
-    
+    cache_key_legacy = (
+        f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_"
+        f"sharplow={sharpness_low}_sharphigh={sharpness_high}_mbl={mean_brightness_low}_fsl={face_size_low}_fsh={face_size_high}_"
+        f"retouch={retouching}_mask={mask}_glasses={glasses}_rot={rotation}_gray={grayscale}{lr_tag}_cnt={file_count}"
+        f"{ft_tag}"
+    )
+
     # 新しい形式のキャッシュキー (exp値加味)
     cache_key = cache_key_legacy + cache_exp_tag
     
@@ -666,28 +833,25 @@ def run_trial(
 
     try:
         # Preprocess
-        cmd_pre = [
-            PYTHON_PREPROCESS,
-            "preprocess_multitask.py",
-            "--out_dir", "preprocessed_multitask",
-            "--pitch_percentile", str(pitch),
-            "--symmetry_percentile", str(sym),
-            "--y_diff_percentile", str(y_diff),
-            "--mouth_open_percentile", str(mouth_open),
-            "--eyebrow_eye_percentile_high", str(eb_eye_high),
-            "--eyebrow_eye_percentile_low", str(eb_eye_low),
-            "--sharpness_percentile_low", str(sharpness_low),
-            "--sharpness_percentile_high", str(sharpness_high),
-            "--mean_brightness_percentile_low", str(mean_brightness_low),
-            "--face_size_percentile_low", str(face_size_low),
-            "--face_size_percentile_high", str(face_size_high),
-            "--rotation_percentile", str(rotation),
-            "--retouching_percentile", str(retouching),
-            "--mask_percentile", str(mask),
-            "--glasses_percentile", str(glasses)
-        ]
-        if grayscale:
-            cmd_pre.append("--grayscale")
+        cmd_pre = [PYTHON_PREPROCESS, "preprocess_multitask.py"] + _preprocess_multitask_argv_tail(
+            pitch,
+            sym,
+            y_diff,
+            mouth_open,
+            eb_eye_high,
+            eb_eye_low,
+            sharpness_low,
+            sharpness_high,
+            mean_brightness_low,
+            face_size_low,
+            face_size_high,
+            rotation,
+            retouching,
+            mask,
+            glasses,
+            grayscale,
+            ft_norm,
+        )
         logger.info("Running preprocessing...")
         ret_pre = subprocess.run(cmd_pre, capture_output=True, text=True, encoding='utf-8', errors='replace')
         
@@ -760,48 +924,26 @@ def run_trial(
             # Use relative ratio (ratio / BASE_RATIO)
             relative_ratio = safe_ratio / BASE_RATIO if BASE_RATIO > 0 else safe_ratio
 
+            fk = set(ft_norm.keys()) if ft_norm else set()
+            lr_inputs = {
+                k: (_FIXED_AXIS_NOMINAL_PERCENTILE_FOR_LR if k in fk else v) for k, v in current_vals.items()
+            }
+
             # 単一exponent: パラメータ別に設定されていれば重み付き平均、なければ LR_SCALING_EXP
-            mapping = {
-                'y_diff': 'y_diff_percentile',
-                'sym': 'symmetry_percentile',
-                'pitch': 'pitch_percentile',
-                'sharpness_low': 'sharpness_percentile_low',
-                'sharpness_high': 'sharpness_percentile_high',
-                'mean_brightness_low': 'mean_brightness_percentile_low',
-                'eb_eye_high': 'eyebrow_eye_percentile_high',
-                'eb_eye_low': 'eyebrow_eye_percentile_low',
-                'face_size_low': 'face_size_percentile_low',
-                'face_size_high': 'face_size_percentile_high',
-                'mouth_open': 'mouth_open_percentile',
-                'retouching': 'retouching_percentile',
-                'mask': 'mask_percentile',
-                'glasses': 'glasses_percentile',
-                'rotation': 'rotation_percentile',
-            }
-            
-            current_vals = {
-                'pitch': pitch, 'sym': sym, 'y_diff': y_diff, 'mouth_open': mouth_open,
-                'eb_eye_high': eb_eye_high, 'eb_eye_low': eb_eye_low, 
-                'sharpness_low': sharpness_low, 'sharpness_high': sharpness_high,
-                'mean_brightness_low': mean_brightness_low,
-                'face_size_low': face_size_low, 'face_size_high': face_size_high,
-                'retouching': retouching, 'mask': mask, 'glasses': glasses, 'rotation': rotation,
-            }
-            
             total_weighted_exp = 0.0
             total_power = 0.0
-            
-            for param_key, power in current_vals.items():
+
+            for param_key, power in lr_inputs.items():
                 try:
                     power_val = float(power)
                 except ValueError:
                     power_val = 0.0
-                
+
                 if power_val > 0:
-                    mapped_key = mapping.get(param_key) or param_key
-                    if not mapped_key.endswith('_percentile') and not mapped_key.endswith('_low') and not mapped_key.endswith('_high'):
-                         mapped_key += '_percentile'
-                         
+                    mapped_key = FILTER_LR_MAPPING.get(param_key) or param_key
+                    if not mapped_key.endswith("_percentile") and not mapped_key.endswith("_low") and not mapped_key.endswith("_high"):
+                        mapped_key += "_percentile"
+
                     if mapped_key in LR_INDIVIDUAL_EXPONENTS:
                         p_exp = float(LR_INDIVIDUAL_EXPONENTS[mapped_key])
                         total_weighted_exp += p_exp * power_val
@@ -1070,7 +1212,8 @@ def optimize_single_param(
             active_param_name=target_name,
             trial_context=f"filter_opt axis={target_name!r} value={val!r}",
         )
-        return result  # (raw_score, total_images, filtered_count)
+        abs_th = _read_train_abs_threshold_for_axis(target_name)
+        return (*result, abs_th)
 
     best_val = 0
     best_score = baseline_score
@@ -1083,9 +1226,13 @@ def optimize_single_param(
 
     for p in coarse_points:
         logger.info(f"Testing {target_name}={p}...")
-        raw_score, total_images, filtered_count = evaluate_wrapper(p)
-        logger.info(f"  {target_name}={p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
-        scores[p] = (raw_score, total_images, filtered_count)
+        tup = evaluate_wrapper(p)
+        raw_score, total_images, filtered_count = tup[0], tup[1], tup[2]
+        abs_note = ""
+        if len(tup) > 3 and tup[3] is not None:
+            abs_note = f", train_abs≈{tup[3]:.6g}"
+        logger.info(f"  {target_name}={p} -> Score: {raw_score:.4f}, Filtered: {filtered_count}{abs_note}")
+        scores[p] = tup
 
         if p == 0:
             score_at_p0 = raw_score
@@ -1118,7 +1265,7 @@ def optimize_single_param(
         # 上位2点間を埋めていく方針
         
         def calc_eff(score_info):
-            raw_s, _, f_count = score_info
+            raw_s, _, f_count = score_info[0], score_info[1], score_info[2]
             imp = raw_s - baseline_score
             f_diff = f_count - baseline_filtered
             return imp / (f_diff + 1) if f_diff >= 0 else imp
@@ -1158,9 +1305,10 @@ def optimize_single_param(
             improved_any = False
             for cand_type, mid_val in candidates:
                 logger.info(f"  [Refinement #{refinement_iter+1}] Testing mid={mid_val} (based on {cand_type} Top 2)...")
-                raw_score, total_images, filtered_count = evaluate_wrapper(mid_val)
+                tup = evaluate_wrapper(mid_val)
+                raw_score, total_images, filtered_count = tup[0], tup[1], tup[2]
                 logger.info(f"  {target_name}={mid_val} -> Score: {raw_score:.4f}, Filtered: {filtered_count}")
-                scores[mid_val] = (raw_score, total_images, filtered_count)
+                scores[mid_val] = tup
                 
                 if raw_score > best_score:
                     best_score = raw_score
@@ -1197,13 +1345,16 @@ def optimize_single_param(
     max_eff_val = -float('inf')
     
     for p, res in scores.items():
-        r_score, r_total, r_filtered = res
-        
+        r_score = res[0]
+        r_total = res[1]
+        r_filtered = res[2]
+        r_abs = res[3] if len(res) > 3 else None
+
         # Improvement / Efficiency vs Baseline
         imp = r_score - baseline_score
         f_diff = r_filtered - baseline_filtered
         eff = imp / (f_diff + 1) if f_diff >= 0 else imp # Safety
-        
+
         # Valid only if improvement is positive (or at least non-negative?)
         # User constraint: "score上昇" -> improvement > 0
         if imp > 0:
@@ -1211,16 +1362,16 @@ def optimize_single_param(
             if r_score > max_score_val:
                 max_score_val = r_score
                 best_score_candidate = {
-                    'val': p, 'score': r_score, 'improvement': imp, 
-                    'filtered': r_filtered, 'efficiency': eff
+                    'val': p, 'score': r_score, 'improvement': imp,
+                    'filtered': r_filtered, 'efficiency': eff, 'abs_threshold': r_abs,
                 }
-            
+
             # Update Best Efficiency Candidate
             if eff > max_eff_val:
                 max_eff_val = eff
                 best_eff_candidate = {
-                    'val': p, 'score': r_score, 'improvement': imp, 
-                    'filtered': r_filtered, 'efficiency': eff
+                    'val': p, 'score': r_score, 'improvement': imp,
+                    'filtered': r_filtered, 'efficiency': eff, 'abs_threshold': r_abs,
                 }
 
     logger.info(f"Finished optimizing {target_name}.")
@@ -1445,6 +1596,7 @@ def main():
         # 再評価
         best_retry_score = -1.0
         best_retry_val = tied_values[0]
+        tied_abs = {}
         for tv in tied_values:
             eval_params = {k: 0 for k in current_params}
             eval_params[param_name] = tv
@@ -1460,16 +1612,18 @@ def main():
                 trial_context=f"Phase1 tie_retry axis={param_name!r} value={tv!r}",
             )
             retry_score = res[0]
+            tied_abs[tv] = _read_train_abs_threshold_for_axis(param_name)
             logger.info(f"    {param_name}={tv} -> Score: {retry_score:.4f}")
             if retry_score > best_retry_score:
                 best_retry_score = retry_score
                 best_retry_val = tv
-        
+
         logger.info(f"  [Tie Resolved] {param_name}: winner={best_retry_val} (Score={best_retry_score:.4f})")
-        
+
         # all_candidates内の該当パラメータの候補を更新
         for cand in all_candidates:
             if cand['param_name'] == param_name and cand['val'] in tied_values:
+                cand['abs_threshold'] = tied_abs.get(cand['val'])
                 if cand['val'] == best_retry_val:
                     cand['score'] = best_retry_score
                     cand['improvement'] = best_retry_score - baseline_score
@@ -1544,37 +1698,56 @@ def main():
     sorted_candidates = sorted(all_candidates, key=lambda x: x['efficiency'], reverse=True)
     
     current_greedy_params = {k: 0 for k in current_params}
-    
+    current_greedy_fixed = {}
+
     # ベースライン（Grayscale=False）のスコア計測
     base_res = run_trial(
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, rotation=0,
         grayscale=False, model_name=best_model,
         trial_context="Phase2 greedy baseline (no filters)",
+        fixed_thresholds=None,
     )
     current_best_score = base_res[0]
     logger.info(f"Base Score (No filters): {current_best_score:.4f}")
-    
+
     greedy_history = []
-    
+
     for cand in sorted_candidates:
         p_name = cand['param_name']
         p_val = cand['val']
         p_eff = cand['efficiency']
         p_score_single = cand['score']
-        
-        logger.info(f"Trying candidate: {p_name}={p_val} (Eff: {p_eff:.6f}, SingleScore: {p_score_single:.4f})...")
-        
-        # 既にセットされている値がある場合、それと比較して更新するか判断
-        prev_val = current_greedy_params[p_name]
-        
-        if prev_val == p_val:
-            logger.info(f"  -> Already set to {p_val}. Skipping.")
-            continue
-            
-        # 一時的にパラメータ適用
+        abs_th = cand.get('abs_threshold')
+        use_fixed = p_name in FILTER_AXIS_FIXED_SPEC and abs_th is not None
+
+        logger.info(
+            f"Trying candidate: {p_name}={p_val} (Eff: {p_eff:.6f}, SingleScore: {p_score_single:.4f}"
+            f"{f', abs={abs_th:.6g}' if abs_th is not None else ''})..."
+        )
+
+        if use_fixed:
+            if p_name in current_greedy_fixed and current_greedy_fixed[p_name] == abs_th:
+                logger.info(f"  -> Already set (fixed threshold). Skipping.")
+                continue
+        else:
+            prev_val = current_greedy_params[p_name]
+            if prev_val == p_val:
+                logger.info(f"  -> Already set to {p_val}. Skipping.")
+                continue
+            if p_name in FILTER_AXIS_FIXED_SPEC and abs_th is None:
+                logger.warning(
+                    f"  -> Manifest に train 実数閾値なし (axis={p_name!r})。"
+                    f"パーセンタイル {p_val}% で試行します。"
+                )
+
         temp_params = current_greedy_params.copy()
-        temp_params[p_name] = p_val
-        
+        fixed_arg = dict(current_greedy_fixed)
+        if use_fixed:
+            fixed_arg[p_name] = float(abs_th)
+            temp_params[p_name] = 0
+        else:
+            temp_params[p_name] = p_val
+
         res = run_trial(
             temp_params['pitch'], temp_params['sym'], temp_params['y_diff'], temp_params['mouth_open'],
             temp_params['eb_eye_high'], temp_params['eb_eye_low'],
@@ -1584,22 +1757,32 @@ def main():
             temp_params['retouching'], temp_params['mask'], temp_params['glasses'],
             rotation=temp_params['rotation'],
             grayscale=False, model_name=best_model,
-            trial_context=f"Phase2 greedy integrate axis={p_name!r} value={p_val!r}",
+            trial_context=f"Phase2 greedy integrate axis={p_name!r} value={p_val!r} fixed={bool(use_fixed)}",
+            fixed_thresholds=fixed_arg if fixed_arg else None,
         )
-        score, total, filtered = res
-        
-        # 採用基準: スコアが現状以上 (>=) なら採用
-        # (効率が良い順に試しているので、同じスコアなら効率が良い方が先に採用されているはずだが、
-        #  後から来た「効率は低いがスコアが高い候補」がさらにスコアを上げるなら更新する)
+        score, total, filtered = res[0], res[1], res[2]
+
         if score >= current_best_score:
             diff = score - current_best_score
             logger.info(f"  -> Accepted (Score: {score:.4f} >= {current_best_score:.4f}, Diff: +{diff:.4f})")
             current_best_score = score
-            current_greedy_params[p_name] = p_val
-            greedy_history.append((p_name, p_val, score))
+            if use_fixed:
+                current_greedy_fixed[p_name] = float(abs_th)
+                current_greedy_params[p_name] = 0
+            else:
+                current_greedy_params[p_name] = p_val
+            greedy_history.append(
+                {
+                    'param': p_name,
+                    'val': p_val,
+                    'score_after': score,
+                    'used_fixed_threshold': use_fixed,
+                    'abs_threshold': float(abs_th) if use_fixed else None,
+                }
+            )
         else:
             logger.info(f"  -> Skipped (Score: {score:.4f} < {current_best_score:.4f})")
-            
+
     greedy_score = current_best_score
     greedy_params = current_greedy_params.copy()
 
@@ -1624,7 +1807,14 @@ def main():
     candidates = []
     
     # Greedy Integration
-    candidates.append({'name': "Greedy Integration", 'params': greedy_params, 'score': greedy_score})
+    candidates.append(
+        {
+            'name': "Greedy Integration",
+            'params': greedy_params,
+            'score': greedy_score,
+            'filter_fixed_thresholds': dict(current_greedy_fixed),
+        }
+    )
     logger.info(f"Strategy: {'Greedy':<15} Score={greedy_score:.4f}")
     
     # Original (all Phase 1 params applied)
@@ -1659,10 +1849,15 @@ def main():
     # ベストを選択 (Score最大)
     best_candidate = max(candidates, key=lambda x: x['score'])
     logger.info(f"-> Selected: {best_candidate['name']} (Score: {best_candidate['score']:.4f})")
-    
+
     final_params = best_candidate['params'].copy()
+    _fft = best_candidate.get('filter_fixed_thresholds') or {}
+    if _fft:
+        final_params['filter_fixed_thresholds'] = dict(_fft)
     final_score = best_candidate['score']
     final_desc = best_candidate['name']
+
+    fft_run = final_params.get('filter_fixed_thresholds') or None
     
     # --- Grayscale Test (最終ベストに対してのみ) ---
     logger.info("\n>>> Grayscale Test (on final best) <<<")
@@ -1677,6 +1872,7 @@ def main():
         rotation=final_params.get('rotation', 0),
         grayscale=False, model_name=best_model,
         trial_context="Grayscale A/B: color",
+        fixed_thresholds=fft_run,
     )
     res_gray = run_trial(
         final_params['pitch'], final_params['sym'], final_params['y_diff'], final_params['mouth_open'],
@@ -1688,6 +1884,7 @@ def main():
         rotation=final_params.get('rotation', 0),
         grayscale=True, model_name=best_model,
         trial_context="Grayscale A/B: grayscale",
+        fixed_thresholds=fft_run,
     )
     
     score_color, score_gray = res_color[0], res_gray[0]
@@ -1721,9 +1918,7 @@ def main():
             {'param': c['param_name'], 'val': c['val'], 'efficiency': c['efficiency'], 'single_score': c['score']} 
             for c in sorted_candidates
         ],
-        'greedy_process': [
-            {'param': p, 'val': v, 'score_after': s} for p, v, s in greedy_history
-        ],
+        'greedy_process': greedy_history,
         'final_selection': {
             'strategy': final_desc,
             'score': final_score,
@@ -1745,30 +1940,35 @@ def main():
     cmd_parts.extend(["--out_dir", "preprocessed_multitask"])
     
     # Add all params
+    fft_cmd = final_params.get("filter_fixed_thresholds") or {}
     for k, v in final_params.items():
-        if k == 'grayscale':
-            pass # handled separately
+        if k in ("grayscale", "filter_fixed_thresholds"):
+            continue
+        # percentile params
+        arg_map = {
+            'pitch': '--pitch_percentile',
+            'sym': '--symmetry_percentile',
+            'y_diff': '--y_diff_percentile',
+            'mouth_open': '--mouth_open_percentile',
+            'eb_eye_high': '--eyebrow_eye_percentile_high',
+            'eb_eye_low': '--eyebrow_eye_percentile_low',
+            'sharpness_low': '--sharpness_percentile_low',
+            'sharpness_high': '--sharpness_percentile_high',
+            'mean_brightness_low': '--mean_brightness_percentile_low',
+            'face_size_low': '--face_size_percentile_low',
+            'face_size_high': '--face_size_percentile_high',
+            'retouching': '--retouching_percentile',
+            'mask': '--mask_percentile',
+            'glasses': '--glasses_percentile',
+            'rotation': '--rotation_percentile',
+        }
+        if k not in arg_map:
+            continue
+        if k in fft_cmd and k in FILTER_AXIS_FIXED_SPEC:
+            tflag = FILTER_AXIS_FIXED_SPEC[k][0]
+            cmd_parts.extend([arg_map[k], "0", tflag, str(fft_cmd[k])])
         else:
-            # percentile params
-            arg_map = {
-                'pitch': '--pitch_percentile',
-                'sym': '--symmetry_percentile',
-                'y_diff': '--y_diff_percentile',
-                'mouth_open': '--mouth_open_percentile',
-                'eb_eye_high': '--eyebrow_eye_percentile_high',
-                'eb_eye_low': '--eyebrow_eye_percentile_low',
-                'sharpness_low': '--sharpness_percentile_low',
-                'sharpness_high': '--sharpness_percentile_high',
-                'mean_brightness_low': '--mean_brightness_percentile_low',
-                'face_size_low': '--face_size_percentile_low',
-                'face_size_high': '--face_size_percentile_high',
-                'retouching': '--retouching_percentile',
-                'mask': '--mask_percentile',
-                'glasses': '--glasses_percentile',
-                'rotation': '--rotation_percentile',
-            }
-            if k in arg_map:
-                cmd_parts.extend([arg_map[k], str(v)])
+            cmd_parts.extend([arg_map[k], str(v)])
     
     if final_params.get('grayscale', False):
         cmd_parts.append("--grayscale")

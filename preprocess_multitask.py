@@ -143,26 +143,41 @@ def _build_split_filter_manifest(
     当該スプリットで実際にフィルタ判定に使った実数閾値を記録する。
     キーは preprocess_multitask.process_dataset 内の elif チェーンと対応。
     """
+    def _rec(th, use):
+        return float(th) if use else None
+
+    use_pitch = getattr(args, "pitch_threshold", None) is not None or args.pitch_percentile > 0
+    use_sym = getattr(args, "symmetry_threshold", None) is not None or args.symmetry_percentile > 0
+    use_y = getattr(args, "y_diff_threshold", None) is not None or args.y_diff_percentile > 0
+    use_mouth = getattr(args, "mouth_open_threshold", None) is not None or args.mouth_open_percentile > 0
+    use_sharp_low = getattr(args, "sharpness_low_threshold", None) is not None or args.sharpness_percentile_low > 0
+    use_sharp_high = getattr(args, "sharpness_high_threshold", None) is not None or args.sharpness_percentile_high > 0
+    use_mb = getattr(args, "mean_brightness_low_threshold", None) is not None or int(
+        getattr(args, "mean_brightness_percentile_low", 0) or 0
+    ) > 0
+    use_fs_low = getattr(args, "face_size_low_threshold", None) is not None or args.face_size_percentile_low > 0
+    use_fs_high = getattr(args, "face_size_high_threshold", None) is not None or args.face_size_percentile_high > 0
+    use_rot = getattr(args, "rotation_threshold", None) is not None or int(getattr(args, "rotation_percentile", 0) or 0) > 0
+    use_retouch = getattr(args, "retouching_threshold", None) is not None or args.retouching_percentile > 0
+    use_mask = getattr(args, "mask_threshold", None) is not None or args.mask_percentile > 0
+    use_glasses = getattr(args, "glasses_threshold", None) is not None or args.glasses_percentile > 0
+
     g = {
-        "pitch_upper_reject_if_strictly_greater": float(th_pitch) if args.pitch_percentile > 0 else None,
-        "symmetry_upper_reject_if_strictly_greater": float(th_sym) if args.symmetry_percentile > 0 else None,
-        "y_diff_upper_reject_if_strictly_greater": float(th_y) if args.y_diff_percentile > 0 else None,
-        "mouth_open_upper_reject_if_strictly_greater": float(th_mouth) if args.mouth_open_percentile > 0 else None,
-        "sharpness_lower_reject_if_strictly_less": float(th_sharpness_low) if args.sharpness_percentile_low > 0 else None,
-        "sharpness_upper_reject_if_strictly_greater": float(th_sharpness_high) if args.sharpness_percentile_high > 0 else None,
-        "mean_brightness_lower_reject_if_strictly_less": float(th_mean_brightness_low)
-        if getattr(args, "mean_brightness_percentile_low", 0) > 0
-        else None,
-        "face_size_lower_reject_if_strictly_less": float(th_face_size_low) if args.face_size_percentile_low > 0 else None,
-        "face_size_upper_reject_if_strictly_greater": float(th_face_size_high) if args.face_size_percentile_high > 0 else None,
-        "face_roll_abs_deg_upper_reject_if_strictly_greater": float(th_rotation)
-        if getattr(args, "rotation_percentile", 0) > 0
-        else None,
+        "pitch_upper_reject_if_strictly_greater": _rec(th_pitch, use_pitch),
+        "symmetry_upper_reject_if_strictly_greater": _rec(th_sym, use_sym),
+        "y_diff_upper_reject_if_strictly_greater": _rec(th_y, use_y),
+        "mouth_open_upper_reject_if_strictly_greater": _rec(th_mouth, use_mouth),
+        "sharpness_lower_reject_if_strictly_less": _rec(th_sharpness_low, use_sharp_low),
+        "sharpness_upper_reject_if_strictly_greater": _rec(th_sharpness_high, use_sharp_high),
+        "mean_brightness_lower_reject_if_strictly_less": _rec(th_mean_brightness_low, use_mb),
+        "face_size_lower_reject_if_strictly_less": _rec(th_face_size_low, use_fs_low),
+        "face_size_upper_reject_if_strictly_greater": _rec(th_face_size_high, use_fs_high),
+        "face_roll_abs_deg_upper_reject_if_strictly_greater": _rec(th_rotation, use_rot),
         "aspect_ratio_lower_reject_if_strictly_less": float(th_ar_low) if args.aspect_ratio_cutoff > 0 else None,
         "aspect_ratio_upper_reject_if_strictly_greater": float(th_ar_high) if args.aspect_ratio_cutoff > 0 else None,
-        "skin_smoothness_lower_reject_if_strictly_less": float(th_retouching) if args.retouching_percentile > 0 else None,
-        "mask_score_upper_reject_if_strictly_greater": float(th_mask) if args.mask_percentile > 0 else None,
-        "glasses_score_upper_reject_if_strictly_greater": float(th_glasses) if args.glasses_percentile > 0 else None,
+        "skin_smoothness_lower_reject_if_strictly_less": _rec(th_retouching, use_retouch),
+        "mask_score_upper_reject_if_strictly_greater": _rec(th_mask, use_mask),
+        "glasses_score_upper_reject_if_strictly_greater": _rec(th_glasses, use_glasses),
     }
     return {
         "split_output_subdir": split_output_subdir,
@@ -615,46 +630,111 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
     # --- Global Threshold Calculation ---
     def get_th(key, pct):
         vals = [r['metrics'][key] for r in valid_items]
-        if not vals: return 0
+        if not vals:
+            return 0
         return np.percentile(vals, 100 - pct)
-    
-    th_pitch = get_th('pitch', args.pitch_percentile)
-    th_sym = get_th('symmetry', args.symmetry_percentile)
-    th_y = get_th('y_diff', args.y_diff_percentile)
-    th_mouth = get_th('mouth_open', args.mouth_open_percentile)
 
-    th_rotation = 0.0
-    if getattr(args, "rotation_percentile", 0) > 0:
+    fix_pitch = getattr(args, "pitch_threshold", None)
+    if fix_pitch is not None:
+        th_pitch = float(fix_pitch)
+    elif args.pitch_percentile > 0:
+        th_pitch = get_th("pitch", args.pitch_percentile)
+    else:
+        th_pitch = 0.0
+    use_pitch = fix_pitch is not None or args.pitch_percentile > 0
+
+    fix_sym = getattr(args, "symmetry_threshold", None)
+    if fix_sym is not None:
+        th_sym = float(fix_sym)
+    elif args.symmetry_percentile > 0:
+        th_sym = get_th("symmetry", args.symmetry_percentile)
+    else:
+        th_sym = 0.0
+    use_sym = fix_sym is not None or args.symmetry_percentile > 0
+
+    fix_y = getattr(args, "y_diff_threshold", None)
+    if fix_y is not None:
+        th_y = float(fix_y)
+    elif args.y_diff_percentile > 0:
+        th_y = get_th("y_diff", args.y_diff_percentile)
+    else:
+        th_y = 0.0
+    use_y = fix_y is not None or args.y_diff_percentile > 0
+
+    fix_mouth = getattr(args, "mouth_open_threshold", None)
+    if fix_mouth is not None:
+        th_mouth = float(fix_mouth)
+    elif args.mouth_open_percentile > 0:
+        th_mouth = get_th("mouth_open", args.mouth_open_percentile)
+    else:
+        th_mouth = 0.0
+    use_mouth = fix_mouth is not None or args.mouth_open_percentile > 0
+
+    fix_rotation = getattr(args, "rotation_threshold", None)
+    if fix_rotation is not None:
+        th_rotation = float(fix_rotation)
+    elif getattr(args, "rotation_percentile", 0) > 0:
         th_rotation = get_th("face_roll_deg_abs", args.rotation_percentile)
-    
-    # Sharpness threshold (lower bound - filter blurry images)
-    th_sharpness_low = 0
-    if args.sharpness_percentile_low > 0:
-        sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
+    else:
+        th_rotation = 0.0
+    use_rotation = fix_rotation is not None or getattr(args, "rotation_percentile", 0) > 0
+
+    fix_sharp_low = getattr(args, "sharpness_low_threshold", None)
+    if fix_sharp_low is not None:
+        th_sharpness_low = float(fix_sharp_low)
+    elif args.sharpness_percentile_low > 0:
+        sharp_vals = [r["metrics"]["sharpness"] for r in valid_items]
         th_sharpness_low = np.percentile(sharp_vals, args.sharpness_percentile_low)
+    else:
+        th_sharpness_low = 0
+    use_sharp_low = fix_sharp_low is not None or args.sharpness_percentile_low > 0
 
-    # Sharpness threshold (upper bound - filter noisy/too sharp images)
-    th_sharpness_high = 999999
-    if args.sharpness_percentile_high > 0:
-        if 'sharp_vals' not in locals():
-            sharp_vals = [r['metrics']['sharpness'] for r in valid_items]
+    fix_sharp_high = getattr(args, "sharpness_high_threshold", None)
+    if fix_sharp_high is not None:
+        th_sharpness_high = float(fix_sharp_high)
+    elif args.sharpness_percentile_high > 0:
+        if "sharp_vals" not in locals():
+            sharp_vals = [r["metrics"]["sharpness"] for r in valid_items]
         th_sharpness_high = np.percentile(sharp_vals, 100 - args.sharpness_percentile_high)
+    else:
+        th_sharpness_high = 999999
+    use_sharp_high = fix_sharp_high is not None or args.sharpness_percentile_high > 0
 
-    th_mean_brightness_low = 0.0
     mb_pct = int(getattr(args, "mean_brightness_percentile_low", 0) or 0)
-    if mb_pct > 0:
+    fix_mb_low = getattr(args, "mean_brightness_low_threshold", None)
+    if fix_mb_low is not None:
+        th_mean_brightness_low = float(fix_mb_low)
+    elif mb_pct > 0:
         mb_vals = [r["metrics"]["mean_brightness"] for r in valid_items]
         th_mean_brightness_low = float(np.percentile(mb_vals, mb_pct))
-    
+    else:
+        th_mean_brightness_low = 0.0
+    use_mb_low = fix_mb_low is not None or mb_pct > 0
+
     # Face Size threshold (from filename sz)
     th_face_size_low = 0
     th_face_size_high = 999999
-    face_size_vals = [r['metrics'].get('face_size', 0) for r in valid_items if r['metrics'].get('face_size', 0) > 0]
+    face_size_vals = [
+        r["metrics"].get("face_size", 0) for r in valid_items if r["metrics"].get("face_size", 0) > 0
+    ]
+    fix_fs_low = getattr(args, "face_size_low_threshold", None)
+    fix_fs_high = getattr(args, "face_size_high_threshold", None)
     if face_size_vals:
-        if args.face_size_percentile_low > 0:
+        if fix_fs_low is not None:
+            th_face_size_low = float(fix_fs_low)
+        elif args.face_size_percentile_low > 0:
             th_face_size_low = np.percentile(face_size_vals, args.face_size_percentile_low)
-        if args.face_size_percentile_high > 0:
+        if fix_fs_high is not None:
+            th_face_size_high = float(fix_fs_high)
+        elif args.face_size_percentile_high > 0:
             th_face_size_high = np.percentile(face_size_vals, 100 - args.face_size_percentile_high)
+    else:
+        if fix_fs_low is not None:
+            th_face_size_low = float(fix_fs_low)
+        if fix_fs_high is not None:
+            th_face_size_high = float(fix_fs_high)
+    use_face_low = fix_fs_low is not None or (bool(face_size_vals) and args.face_size_percentile_low > 0)
+    use_face_high = fix_fs_high is not None or (bool(face_size_vals) and args.face_size_percentile_high > 0)
         
     # Aspect Ratio threshold (Two-sided)
     th_ar_low = 0
@@ -666,20 +746,23 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             th_ar_high = np.percentile(ar_vals, 100 - args.aspect_ratio_cutoff)
     
     # Retouching threshold (lower bound - filter retouched/smoothed images)
-    th_retouching = 0
-    if args.retouching_percentile > 0:
-        # skin_smoothnessがinfでないものだけ使う
-        retouch_vals = [r['metrics'].get('skin_smoothness', float('inf')) for r in valid_items]
-        retouch_vals = [v for v in retouch_vals if v != float('inf')]
-        if retouch_vals:
-            th_retouching = np.percentile(retouch_vals, args.retouching_percentile)
-    
-    roll_log = f", RollAbsDeg>{th_rotation:.4f}" if getattr(args, "rotation_percentile", 0) > 0 else ""
-    mb_log = (
-        f", MeanBright>={th_mean_brightness_low:.1f}"
-        if mb_pct > 0
-        else ""
-    )
+    fix_retouch = getattr(args, "retouching_threshold", None)
+    if fix_retouch is not None:
+        th_retouching = float(fix_retouch)
+        use_retouching = True
+    elif args.retouching_percentile > 0:
+        retouch_vals = [r["metrics"].get("skin_smoothness", float("inf")) for r in valid_items]
+        retouch_vals = [v for v in retouch_vals if v != float("inf")]
+        th_retouching = (
+            np.percentile(retouch_vals, args.retouching_percentile) if retouch_vals else 0
+        )
+        use_retouching = bool(retouch_vals)
+    else:
+        th_retouching = 0
+        use_retouching = False
+
+    roll_log = f", RollAbsDeg>{th_rotation:.4f}" if use_rotation else ""
+    mb_log = f", MeanBright>={th_mean_brightness_low:.1f}" if use_mb_low else ""
     logger.info(
         f"Global Thresh: Pitch>={th_pitch:.2f}, Sym>={th_sym:.3f}, YDiff>={th_y:.4f}, Mouth>={th_mouth:.4f}, "
         f"Sharpness {th_sharpness_low:.1f}~{th_sharpness_high:.1f}{mb_log}, "
@@ -687,21 +770,29 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
         f"{roll_log}"
     )
     
-    # Mask thresholds (filter top X% - likely mask)
-    th_mask = 999.0
-    if args.mask_percentile > 0:
-        mask_vals = [r['metrics'].get('mask_score', 0) for r in valid_items]
-        if mask_vals:
-            # 高いスコア(マスク疑惑)をカットするので、Top X% を閾値とする
-            # つまり、閾値より低いものを残す
-            th_mask = np.percentile(mask_vals, 100 - args.mask_percentile)
+    fix_mask = getattr(args, "mask_threshold", None)
+    if fix_mask is not None:
+        th_mask = float(fix_mask)
+        use_mask = True
+    elif args.mask_percentile > 0:
+        mask_vals = [r["metrics"].get("mask_score", 0) for r in valid_items]
+        th_mask = np.percentile(mask_vals, 100 - args.mask_percentile) if mask_vals else 999.0
+        use_mask = bool(mask_vals)
+    else:
+        th_mask = 999.0
+        use_mask = False
 
-    # Glasses thresholds (filter top X% - likely glasses)
-    th_glasses = 999.0
-    if args.glasses_percentile > 0:
-        gl_vals = [r['metrics'].get('glasses_score', 0) for r in valid_items]
-        if gl_vals:
-             th_glasses = np.percentile(gl_vals, 100 - args.glasses_percentile)
+    fix_glasses = getattr(args, "glasses_threshold", None)
+    if fix_glasses is not None:
+        th_glasses = float(fix_glasses)
+        use_glasses = True
+    elif args.glasses_percentile > 0:
+        gl_vals = [r["metrics"].get("glasses_score", 0) for r in valid_items]
+        th_glasses = np.percentile(gl_vals, 100 - args.glasses_percentile) if gl_vals else 999.0
+        use_glasses = bool(gl_vals)
+    else:
+        th_glasses = 999.0
+        use_glasses = False
              
     logger.info(f"Mask/Glasses Thresh: Mask<={th_mask:.3f}, Glasses<={th_glasses:.3f}")
     
@@ -742,34 +833,38 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
             m = item['metrics']
             reason = None
 
-            if args.pitch_percentile > 0 and m['pitch'] > th_pitch:
-                reason = 'pitch_global'
-            elif args.symmetry_percentile > 0 and m['symmetry'] > th_sym:
-                reason = 'symmetry_global'
-            elif args.y_diff_percentile > 0 and m['y_diff'] > th_y:
-                reason = 'y_diff_global'
-            elif args.mouth_open_percentile > 0 and m['mouth_open'] > th_mouth:
-                reason = 'mouth_open_global'
-            elif args.sharpness_percentile_low > 0 and m['sharpness'] < th_sharpness_low:
-                reason = 'sharpness_low_global'
-            elif args.sharpness_percentile_high > 0 and m['sharpness'] > th_sharpness_high:
-                reason = 'sharpness_high_global'
-            elif mb_pct > 0 and m["mean_brightness"] < th_mean_brightness_low:
+            if use_pitch and m["pitch"] > th_pitch:
+                reason = "pitch_global"
+            elif use_sym and m["symmetry"] > th_sym:
+                reason = "symmetry_global"
+            elif use_y and m["y_diff"] > th_y:
+                reason = "y_diff_global"
+            elif use_mouth and m["mouth_open"] > th_mouth:
+                reason = "mouth_open_global"
+            elif use_sharp_low and m["sharpness"] < th_sharpness_low:
+                reason = "sharpness_low_global"
+            elif use_sharp_high and m["sharpness"] > th_sharpness_high:
+                reason = "sharpness_high_global"
+            elif use_mb_low and m["mean_brightness"] < th_mean_brightness_low:
                 reason = "mean_brightness_low_global"
-            elif args.face_size_percentile_low > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) < th_face_size_low:
-                reason = 'face_size_low_global'
-            elif args.face_size_percentile_high > 0 and m.get('face_size', 0) > 0 and m.get('face_size', 0) > th_face_size_high:
-                reason = 'face_size_high_global'
-            elif getattr(args, "rotation_percentile", 0) > 0 and m.get("face_roll_deg_abs", 0) > th_rotation:
-                reason = 'rotation_global'
-            elif args.aspect_ratio_cutoff > 0 and (m.get('aspect_ratio', 1.0) < th_ar_low or m.get('aspect_ratio', 1.0) > th_ar_high):
-                reason = 'aspect_ratio_global'
-            elif args.retouching_percentile > 0 and m.get('skin_smoothness', float('inf')) != float('inf') and m.get('skin_smoothness', float('inf')) < th_retouching:
-                reason = 'retouching_global'
-            elif args.mask_percentile > 0 and m.get('mask_score', 0) > th_mask:
-                reason = 'mask_global'
-            elif args.glasses_percentile > 0 and m.get('glasses_score', 0) > th_glasses:
-                reason = 'glasses_global'
+            elif use_face_low and m.get("face_size", 0) > 0 and m.get("face_size", 0) < th_face_size_low:
+                reason = "face_size_low_global"
+            elif use_face_high and m.get("face_size", 0) > 0 and m.get("face_size", 0) > th_face_size_high:
+                reason = "face_size_high_global"
+            elif use_rotation and m.get("face_roll_deg_abs", 0) > th_rotation:
+                reason = "rotation_global"
+            elif args.aspect_ratio_cutoff > 0 and (
+                m.get("aspect_ratio", 1.0) < th_ar_low or m.get("aspect_ratio", 1.0) > th_ar_high
+            ):
+                reason = "aspect_ratio_global"
+            elif use_retouching and m.get("skin_smoothness", float("inf")) != float("inf") and m.get(
+                "skin_smoothness", float("inf")
+            ) < th_retouching:
+                reason = "retouching_global"
+            elif use_mask and m.get("mask_score", 0) > th_mask:
+                reason = "mask_global"
+            elif use_glasses and m.get("glasses_score", 0) > th_glasses:
+                reason = "glasses_global"
             elif (args.eyebrow_eye_percentile_high > 0 and m['eb_eye_dist'] > th_eb_high):
                 reason = 'eb_eye_high_personal'
             elif (args.eyebrow_eye_percentile_low > 0 and m['eb_eye_dist'] < th_eb_low):
@@ -930,7 +1025,87 @@ def main():
     # Mask & Glasses
     parser.add_argument("--mask_percentile", type=int, default=MASK_PERCENTILE, help="Filter top X% by mask likelihood")
     parser.add_argument("--glasses_percentile", type=int, default=GLASSES_PERCENTILE, help="Filter top X% by glasses likelihood")
-    
+
+    # 固定実数閾値（指定時は当該軸でパーセンタイルより優先。optimize Phase2 greedy 用）
+    parser.add_argument(
+        "--pitch_threshold",
+        type=float,
+        default=None,
+        help="固定: pitch 上限（これを超えると除外）。指定時 --pitch_percentile は無視",
+    )
+    parser.add_argument(
+        "--symmetry_threshold",
+        type=float,
+        default=None,
+        help="固定: symmetry 上限。指定時 --symmetry_percentile は無視",
+    )
+    parser.add_argument(
+        "--y_diff_threshold",
+        type=float,
+        default=None,
+        help="固定: y_diff 上限。指定時 --y_diff_percentile は無視",
+    )
+    parser.add_argument(
+        "--mouth_open_threshold",
+        type=float,
+        default=None,
+        help="固定: mouth_open 上限。指定時 --mouth_open_percentile は無視",
+    )
+    parser.add_argument(
+        "--sharpness_low_threshold",
+        type=float,
+        default=None,
+        help="固定: sharpness 下限（未満除外）。指定時 --sharpness_percentile_low は無視",
+    )
+    parser.add_argument(
+        "--sharpness_high_threshold",
+        type=float,
+        default=None,
+        help="固定: sharpness 上限。指定時 --sharpness_percentile_high は無視",
+    )
+    parser.add_argument(
+        "--mean_brightness_low_threshold",
+        type=float,
+        default=None,
+        help="固定: mean_brightness 下限。指定時 --mean_brightness_percentile_low は無視",
+    )
+    parser.add_argument(
+        "--face_size_low_threshold",
+        type=float,
+        default=None,
+        help="固定: face_size 下限。指定時 --face_size_percentile_low は無視",
+    )
+    parser.add_argument(
+        "--face_size_high_threshold",
+        type=float,
+        default=None,
+        help="固定: face_size 上限。指定時 --face_size_percentile_high は無視",
+    )
+    parser.add_argument(
+        "--rotation_threshold",
+        type=float,
+        default=None,
+        help="固定: face_roll_abs_deg 上限。指定時 --rotation_percentile は無視",
+    )
+    parser.add_argument(
+        "--retouching_threshold",
+        type=float,
+        default=None,
+        help="固定: skin_smoothness 下限。指定時 --retouching_percentile は無視",
+    )
+    parser.add_argument(
+        "--mask_threshold",
+        type=float,
+        default=None,
+        help="固定: mask_score 上限。指定時 --mask_percentile は無視",
+    )
+    parser.add_argument(
+        "--glasses_threshold",
+        type=float,
+        default=None,
+        help="固定: glasses_score 上限。指定時 --glasses_percentile は無視",
+    )
+
     # Grayscale
     parser.add_argument("--grayscale", action="store_true", help="Convert images to grayscale")
 
