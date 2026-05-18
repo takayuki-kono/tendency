@@ -109,6 +109,7 @@ def _manifest_filter_percentile_args(args):
         "glasses_percentile": int(args.glasses_percentile),
         "grayscale": bool(getattr(args, "grayscale", False)),
         "skip_class_balance": bool(getattr(args, "skip_class_balance", False)),
+        "class_internal_cap_rank": int(getattr(args, "class_internal_cap_rank", 3)),
     }
 
 
@@ -488,13 +489,16 @@ def _class_key_from_rel_label(label):
     return label
 
 
-def _apply_class_internal_second_place_cap(filtered_by_label, skip_reasons, *, round_name):
+def _apply_class_internal_rank_cap(filtered_by_label, skip_reasons, *, round_name, cap_rank):
     """
-    クラス内で各人物（フルラベル＝フォルダ）バケツの枚数を、そのクラス内の 2 番目に多い枚数まで切り詰める。
+    クラス内で各人物（フルラベル＝フォルダ）バケツの枚数を、そのクラス内で cap_rank 番目に多い枚数まで切り詰める。
+    （cap_rank=2 が従来の「2位上限」。cap_rank=3 なら 3番目に多いバケツの枚数が上限でより緩い。）
+    バケツ数が cap_rank 未満のときは、実質そのクラスで最も少ない段（降順リストの末尾）を上限とする。
     filtered_by_label を in-place 更新し、skip_reasons['undersampling_post_filter'] に落とした枚数を加算する。
     戻り値: 落とした枚数の合計（skipped_count 用）。
     """
     dropped_total = 0
+    cr = max(1, int(cap_rank))
     class_to_person_labels = defaultdict(list)
     for lb in filtered_by_label:
         class_key = _class_key_from_rel_label(lb)
@@ -505,15 +509,14 @@ def _apply_class_internal_second_place_cap(filtered_by_label, skip_reasons, *, r
             (len(filtered_by_label[pl]) for pl in person_labels),
             reverse=True,
         )
-        if len(post_counts) >= 2:
-            target_post = post_counts[1]
-        elif len(post_counts) == 1:
-            target_post = post_counts[0]
-        else:
+        if not post_counts:
             target_post = 0
+        else:
+            idx = min(cr - 1, len(post_counts) - 1)
+            target_post = post_counts[idx]
         logger.info(
             f"Undersampling (post-filter round {round_name}, per-class) class={class_key!r}: "
-            f"2nd-largest person count={target_post}, persons={len(person_labels)}"
+            f"class_internal_cap_rank={cr} -> bucket_count_ceiling={target_post}, persons={len(person_labels)}"
         )
         for pl in person_labels:
             tasks = filtered_by_label[pl]
@@ -878,10 +881,11 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
 
         filtered_by_label[label] = label_valid_tasks
 
-    # --- Undersampling: (1) クラス内2位上限 → (2) クラス間均衡 → (3) 再度クラス内2位上限 ---
+    cap_rank = max(1, int(getattr(args, "class_internal_cap_rank", 3)))
+    # --- Undersampling: (1) クラス内 N 位上限 → (2) クラス間均衡 → (3) 再度クラス内 N 位上限 ---
     if not skip_undersampling:
-        skipped_count += _apply_class_internal_second_place_cap(
-            filtered_by_label, skip_reasons, round_name="1"
+        skipped_count += _apply_class_internal_rank_cap(
+            filtered_by_label, skip_reasons, round_name="1", cap_rank=cap_rank
         )
 
     if not skip_undersampling and not getattr(args, "skip_class_balance", False):
@@ -919,8 +923,8 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
                     filtered_by_label[lb] = new_tasks
 
     if not skip_undersampling:
-        skipped_count += _apply_class_internal_second_place_cap(
-            filtered_by_label, skip_reasons, round_name="2"
+        skipped_count += _apply_class_internal_rank_cap(
+            filtered_by_label, skip_reasons, round_name="2", cap_rank=cap_rank
         )
 
     for label, label_valid_tasks in filtered_by_label.items():
@@ -1129,11 +1133,24 @@ def main():
         action="store_true",
         help=(
             "中段アンダーサンプリング（クラス間・各クラス合計を最少クラスに揃える）をスキップ。"
-            "前後のクラス内2位上限（第1・第3段）は従来どおり実行"
+            "前後のクラス内 N 位上限（第1・第3段、--class_internal_cap_rank）は従来どおり実行"
+        ),
+    )
+    parser.add_argument(
+        "--class_internal_cap_rank",
+        type=int,
+        default=3,
+        help=(
+            "クラス内アンダーサンプル（第1・第3段）で、各人物バケツの枚数上限を "
+            "「そのクラス内で N 番目に多いバケツの枚数」に揃える。N=2 が旧既定相当（厳しめ）、"
+            "N=3 でより緩い（既定）。N>=1。"
         ),
     )
 
     args = parser.parse_args()
+
+    if int(getattr(args, "class_internal_cap_rank", 3)) < 1:
+        parser.error("--class_internal_cap_rank は 1 以上を指定してください")
     
     prepro_dir = args.out_dir
     prepro_train = os.path.join(prepro_dir, "train")
@@ -1162,6 +1179,7 @@ def main():
         logger.info(f"  Mask Pct: {args.mask_percentile}")
         logger.info(f"  Glasses Pct: {args.glasses_percentile}")
         logger.info(f"  Grayscale: {args.grayscale}")
+        logger.info(f"  Class-internal undersample cap rank (N-th largest bucket): {args.class_internal_cap_rank}")
         fmp_raw = (getattr(args, "filter_manifest_path", "") or "").strip()
         write_manifest = not getattr(args, "no_filter_manifest", False)
         manifest_out = ""
@@ -1196,7 +1214,7 @@ def main():
                     "推論で学習データと同じ基準に揃える場合は通常 train の global / per_label を参照する。",
                     "眉-目距離はラベル（人物フォルダ等）単位。同一キーで per_label_eyebrow_thresholds を参照すること。",
                     "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。"
-                    "第1段＝クラス内バケツの2位上限、第2段＝クラス間均衡、第3段＝再度クラス内2位上限（--skip_class_balance で第2段のみ無効化）。",
+                    "第1段＝クラス内バケツの N 位上限（--class_internal_cap_rank、既定 N=3）、第2段＝クラス間均衡、第3段＝再度クラス内 N 位上限（--skip_class_balance で第2段のみ無効化）。",
                 ],
                 "splits": split_manifests,
             }
