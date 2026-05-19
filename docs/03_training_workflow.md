@@ -69,6 +69,7 @@
     - 該当キャッシュを削除して再評価し、勝者を決定。
 - **Validation クラス最小サンプル数ガード**:
     - `run_trial` は preprocess 直後に `preprocessed_multitask/validation/` を走査し、各タスク×各クラスの画像枚数の最小値を取得する（実装: `_min_val_class_count`）。
+    - **退化ガード（2026-05-19）**: 前処理後に **最下位人物0枚**などで train/val のいずれかのタスクが **有効クラス1つ以下**、または **0枚クラス**があるフィルタ試行は **学習せず score=0**（min val が常に 1.0 になる採点を防ぐ）。`cap_mode=min` ではクラス内に0枚人物がいるとき前処理側で **正の最小枚数**にキャップ（全バケツを0にしない）。
     - 最小値が `MIN_VAL_PER_CLASS`（既定 20）未満の候補は、学習せず `(0.0, total_images, filtered_count, val_min_cnt)` の 4-tuple をキャッシュに保存して即リターン（採点失敗扱い）。
     - キャッシュ値の互換仕様: 4-tuple（新形式: `val_min_cnt` 記録あり）と 3-tuple（旧形式: `val_min_cnt` 未記録）を両対応。
     - **キャッシュヒット経路のガード**:

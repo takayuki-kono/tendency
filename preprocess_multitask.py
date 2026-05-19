@@ -516,7 +516,19 @@ def _apply_class_internal_person_cap(
         if not post_counts:
             target_post = 0
         elif mode == "min":
-            target_post = min(post_counts)
+            positive_counts = [c for c in post_counts if c > 0]
+            if not positive_counts:
+                target_post = 0
+            elif min(post_counts) == 0:
+                # 最下位人物が0枚のとき min=0 だと全バケツを0に落とす。正の最小に揃える。
+                target_post = min(positive_counts)
+                logger.warning(
+                    f"Undersampling class={class_key!r} round {round_name}: "
+                    f"min person has 0 images; cap uses min(positive)={target_post} "
+                    f"(counts={post_counts})"
+                )
+            else:
+                target_post = min(post_counts)
         elif mode == "rank":
             sorted_desc = sorted(post_counts, reverse=True)
             idx = min(cr - 1, len(sorted_desc) - 1)

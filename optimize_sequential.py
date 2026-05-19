@@ -360,6 +360,29 @@ def _min_val_class_count(val_dir):
                 min_desc = f"task{i}={c} ({cnt})"
     return min_cnt, min_desc, per_task_counts
 
+
+def _preprocessed_filter_degenerate(train_dir, val_dir):
+    """
+    前処理後データが学習指標として無意味なとき True。
+    - いずれかの task×class が 0 枚（最下位人物が0枚で全滅した後など）
+    - いずれかのタスクで有効クラスが 1 つだけ（min val が常に 1.0 になりやすい）
+    """
+    for split_name, split_dir in (("train", train_dir), ("validation", val_dir)):
+        min_cnt, min_desc, per_task = _min_val_class_count(split_dir)
+        if min_cnt is None:
+            continue
+        if min_cnt == 0:
+            return True, f"{split_name}: min bucket/class has 0 images [{min_desc}]"
+        for i, cls_cnts in enumerate(per_task or []):
+            n_active = sum(1 for cnt in cls_cnts.values() if cnt > 0)
+            if n_active < 2:
+                return True, (
+                    f"{split_name}: task{i} has only {n_active} active class(es) "
+                    f"(counts={cls_cnts}); min-val metric is trivial"
+                )
+    return False, None
+
+
 def _reset_cache_file(current_file_count: int) -> dict:
     """キャッシュJSONを初期化してディスクへ即時書き込む。"""
     fresh = {'__file_count__': current_file_count}
@@ -969,6 +992,19 @@ def run_trial(
             logger.info(
                 f"Val class size OK: min={val_min_cnt} [{val_min_desc}] (threshold={MIN_VAL_PER_CLASS})"
             )
+
+        train_dir = os.path.join("preprocessed_multitask", "train")
+        is_degenerate, deg_reason = _preprocessed_filter_degenerate(train_dir, val_dir)
+        if is_degenerate:
+            logger.warning(
+                f"SKIP (degenerate preprocessed data): {deg_reason}. "
+                f"Filter trial score=0.0 (e.g. min person 0 images after cap)."
+            )
+            result = (0.0, total_images, filtered_count)
+            cache = load_cache()
+            cache[cache_key] = (0.0, total_images, filtered_count, 0)
+            save_cache(cache)
+            return result
 
         # Train with specific Model and Optimized Params
         train_script = "components/train_multitask_trial.py"
