@@ -474,7 +474,29 @@ def _optimize_fine_tune_cli_args():
             "--warmup_epochs", "0",
             "--init_weights_path", "",
         ]
-    return ["--fine_tune", "False"]
+    # head-only: JSON に残った train 側の warmup / init / unfreeze を上書きしないよう明示
+    return [
+        "--fine_tune", "False",
+        "--warmup_lr", "0",
+        "--warmup_epochs", "0",
+        "--init_weights_path", "",
+    ]
+
+
+# best_train_params から載せない（評価モードは _optimize_fine_tune_cli_args で固定）
+_OPTIMIZE_TRAIN_CLI_SKIP_FROM_JSON = frozenset(
+    {
+        "model_name",
+        "fine_tune",
+        "epochs",
+        "learning_rate",
+        "auto_lr_target_epoch",
+        "unfreeze_layers",
+        "warmup_lr",
+        "warmup_epochs",
+        "init_weights_path",
+    }
+) | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
 
 
 def _extract_best_epoch_from_train_output(full_output: str, default_epoch: int) -> int:
@@ -531,11 +553,8 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
         return int(be), float(sc), float(lac)
 
     cmd_train = [PYTHON_TRAIN, "components/train_multitask_trial.py", "--model_name", model_name]
-    _skip_keys = {
-        'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
-    } | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
     for k, v in best_params.items():
-        if k not in _skip_keys:
+        if k not in _OPTIMIZE_TRAIN_CLI_SKIP_FROM_JSON:
             cmd_train.extend([f"--{k}", str(v)])
     cmd_train.extend(["--learning_rate", str(lr)])
     cmd_train.extend(["--epochs", str(cal_epochs)])
@@ -959,11 +978,8 @@ def run_trial(
         # epochs, fine_tune, model_name, learning_rate は明示的に設定するので除外
         # learning_rate_nohead/head/ft は optimize 側のメタ情報で train_multitask_trial には存在しない引数
         best_params = load_best_train_params()
-        _skip_keys = {
-            'model_name', 'fine_tune', 'epochs', 'learning_rate', 'auto_lr_target_epoch',
-        } | TRAIN_MULTITASK_CLI_EXCLUDE_KEYS
         for k, v in best_params.items():
-            if k not in _skip_keys:
+            if k not in _OPTIMIZE_TRAIN_CLI_SKIP_FROM_JSON:
                 cmd_train.extend([f"--{k}", str(v)])
         
         # 学習率の設定 (2026-02-14 改良):
@@ -1472,6 +1488,14 @@ def optimize_single_param(
 def main():
     global CALIBRATED_BASE_LR, LR_SCALING_EXP, BASE_RATIO, LR_INDIVIDUAL_EXPONENTS
     logger.info("Starting Sequential Optimization (Efficiency-Based)")
+    if OPTIMIZE_EVAL_USE_FINE_TUNE:
+        logger.info(
+            f">>> Filter trial eval: FT (unfreeze_layers={OPTIMIZE_FT_UNFREEZE_LAYERS}) <<<"
+        )
+    else:
+        logger.info(
+            ">>> Filter trial eval: head-only (fine_tune=False; warmup/init from JSON ignored) <<<"
+        )
 
     # LRスケーリング設定を読み込む（exponent は単一値）
     LR_SCALING_CONFIG_FILE = "outputs/lr_scaling_config.json"
