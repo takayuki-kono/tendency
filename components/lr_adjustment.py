@@ -53,6 +53,10 @@ OPTIMIZE_EVAL_USE_FINE_TUNE = True
 OPTIMIZE_FT_UNFREEZE_LAYERS = 60
 OPTIMIZE_EVAL_EPOCHS = 20
 
+# train_sequential Steps 1.1–3.8: 軸探索の run_trial を FT にする（False で従来 head-only）
+TRAIN_OPT_EVAL_USE_FINE_TUNE = True
+TRAIN_OPT_FT_UNFREEZE_LAYERS = 60
+
 
 def best_epoch_moved_toward_lr_target(old_e: int, new_e: int, target: float) -> bool:
     """

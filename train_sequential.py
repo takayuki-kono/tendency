@@ -68,6 +68,8 @@ from components.lr_adjustment import (
     HEAD_CARRYOVER_VAL_FLOOR,
     HEAD_CARRYOVER_LR_FRACTIONS,
     HEAD_CARRYOVER_CALIB_EPOCHS,
+    TRAIN_OPT_EVAL_USE_FINE_TUNE,
+    TRAIN_OPT_FT_UNFREEZE_LAYERS,
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
 from components.filter_threshold_manifest import copy_filter_manifest_beside_model
@@ -79,6 +81,23 @@ _LR_CALIB_STATE: dict = {'persisted_ctx': None, 'last_ctx': None}
 _HEAD_ONLY_PHASE_BEST: dict = {'score': -1.0}
 # 同一 train_sequential main() 内で観測した FINAL_VAL の最大（best_sequential_pipeline_best.keras に反映）
 _PIPELINE_BEST_SCORE: float = -1.0
+
+
+def _train_opt_eval_mode_tag() -> str:
+    if TRAIN_OPT_EVAL_USE_FINE_TUNE:
+        return f"_evalft={int(TRAIN_OPT_FT_UNFREEZE_LAYERS)}"
+    return "_evalhead"
+
+
+def _apply_train_opt_eval_mode(params: dict) -> None:
+    """Steps 1.1–3.8 の run_trial: optimize と同様 FT 評価に揃える（3.9 以降は呼ばない）。"""
+    if not TRAIN_OPT_EVAL_USE_FINE_TUNE:
+        return
+    params["fine_tune"] = "True"
+    params["unfreeze_layers"] = int(TRAIN_OPT_FT_UNFREEZE_LAYERS)
+    params["warmup_lr"] = 0.0
+    params["warmup_epochs"] = 0
+    params["init_weights_path"] = ""
 
 
 def _reset_pipeline_best_model_tracking() -> None:
@@ -214,14 +233,17 @@ def run_trial(params, *, trial_context=None):
     if trial_context:
         logger.info(f"run_trial 文脈: {trial_context}")
     logger.info(f"Evaluating Params: {params}")
+
+    trial_params_base = params.copy()
+    _apply_train_opt_eval_mode(trial_params_base)
     
     # キャッシュ確認
     # params辞書をソートして文字列化（キー順依存防止）
-    params_str = json.dumps(params, sort_keys=True)
+    params_str = json.dumps(trial_params_base, sort_keys=True)
     file_count = count_files(DATA_SOURCE_DIR)
     
     # ハッシュ化してキーにする（長いので）
-    key_src = f"{params_str}_count={file_count}"
+    key_src = f"{params_str}_count={file_count}{_train_opt_eval_mode_tag()}"
     cache_key = hashlib.md5(key_src.encode('utf-8')).hexdigest()
     
     cache = load_cache()
@@ -234,7 +256,7 @@ def run_trial(params, *, trial_context=None):
                 lr_hit = float(ent[1])
         else:
             sc = float(ent)
-        _maybe_record_head_only_phase_best(params, sc)
+        _maybe_record_head_only_phase_best(trial_params_base, sc)
         logger.info(f"Cache Hit! Skipping execution (LR sweep なし). Val Accuracy: {sc}")
         if lr_hit is not None:
             logger.info(f"  (cache includes memorized_best_lr={lr_hit:.8g})")
@@ -247,8 +269,8 @@ def run_trial(params, *, trial_context=None):
     try:
         # 開始 LR: params['learning_rate'] は「直前に確定したモデル用」が残りやすい（例: Step1.1 で model だけ差し替え）。
         # model / データ枚数 / head|ft が last または persisted と一致するときだけ base_lr を引き継ぎ、異なれば resolve が 0.01 側へ寄せる。
-        mn = params.get('model_name')
-        mode = lr_calib_mode_from_fine_tune(params.get('fine_tune', 'False'))
+        mn = trial_params_base.get('model_name')
+        mode = lr_calib_mode_from_fine_tune(trial_params_base.get('fine_tune', 'False'))
         n_fc = train_sequential_data_file_count()
         start_lr, lr_resolve_note = resolve_calib_initial_lr(
             mn, n_fc, mode,
@@ -265,19 +287,19 @@ def run_trial(params, *, trial_context=None):
         best_trial_output = None
         best_trial_lr = None
         best_keras_staging = None
-        training_epochs = int(params.get('epochs', 20))
+        training_epochs = int(trial_params_base.get('epochs', 20))
         target_min = target_max = float(LR_TARGET_EPOCH)
         acceptable_band = None
         lr_low_rt = None
         lr_high_rt = None
-        caller_export = str(params.get('export_model_path') or '').strip()
-        seed_run = int(params.get('seed', 42))
-        is_ft_run = str(params.get('fine_tune', 'False')).lower() == 'true'
+        caller_export = str(trial_params_base.get('export_model_path') or '').strip()
+        seed_run = int(trial_params_base.get('seed', 42))
+        is_ft_run = str(trial_params_base.get('fine_tune', 'False')).lower() == 'true'
         prev_subrun_best_epoch = None
         sweep_no_target_progress = 0
 
         for adj_iter in range(LR_MAX_ADJUSTMENTS + 1):
-            trial_params = params.copy()
+            trial_params = trial_params_base.copy()
             trial_params['learning_rate'] = current_lr
             staging_path = os.path.join(MODEL_DIR, f"_run_trial_adj{adj_iter}.keras")
             trial_params['export_model_path'] = staging_path
@@ -457,7 +479,7 @@ def run_trial(params, *, trial_context=None):
             cache[cache_key] = [float(score), mem_lr]
             save_cache(cache)
 
-            _maybe_record_head_only_phase_best(params, score)
+            _maybe_record_head_only_phase_best(trial_params_base, score)
             if best_keras_staging and os.path.isfile(best_keras_staging):
                 _promote_best_sequential_model(score, best_keras_staging, reason="run_trial")
             return float(score), mem_lr
@@ -1011,11 +1033,22 @@ def main():
         'label_smoothing': 0.0,
         'weight_decay': 0.0,
         'optimizer': 'adam',
-        'fine_tune': 'False'
+        'fine_tune': 'False',
+        'unfreeze_layers': 60,
+        'warmup_lr': 0.0,
+        'warmup_epochs': 0,
+        'init_weights_path': '',
     }
+    _apply_train_opt_eval_mode(current_params)
 
-    # head-only: optimize_param / shift で同点が出た (param, 同点候補) を蓄積（Step1.1・1.5・2/3 すべて渡す）→3.8
+    # 軸探索（Step1.1–3.8）の同点候補を蓄積 → 3.8 で再採点
     head_only_tie_log: list = []
+
+    logger.info(
+        f"\n>>> Axis search eval mode: "
+        f"{'FT (unfreeze_layers=%d)' % TRAIN_OPT_FT_UNFREEZE_LAYERS if TRAIN_OPT_EVAL_USE_FINE_TUNE else 'head-only'} "
+        f"(Step 3.9+ remains head-only where required) <<<"
+    )
 
     # --- Step 1.1: Model Architecture（各 model の LR sweep 最良値を記憶） ---
     # 各候補 model は run_trial 内で (model, data_count, head_ft) に応じた開始 LR を resolve（B0 の LR をそのまま流用しない）。
@@ -1037,10 +1070,10 @@ def main():
     current_params["learning_rate"] = head_lr
     record_calibrate_context(current_params["model_name"], current_params["fine_tune"], head_lr)
 
-    # --- Step 1.25: Optimizer（モデル・head LR 確定後。weight_decay はまだ 0 のまま） ---
+    # --- Step 1.25: Optimizer（モデル・探索 LR 確定後。weight_decay はまだ 0 のまま） ---
     logger.info(
         f"\n>>> Step 1.25: Optimizer Selection "
-        f"(model={best_model}, head_lr fixed) <<<"
+        f"(model={best_model}, axis_search_lr fixed) <<<"
     )
     best_opt, _, _ = optimize_param(
         'optimizer',
