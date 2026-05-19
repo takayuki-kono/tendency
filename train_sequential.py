@@ -1197,10 +1197,36 @@ def main():
     score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
     _maybe_record_head_only_phase_best(head_save_params, score_3_9)
 
-    # --- Step 3.5: Fine-Tuning LR Calibration（2 系統 → 高精度側を採用） ---
-    # A: Step 3.9 の best_head をロード（warmup スキップ）
-    # B: init なし・head_lr で warmup（従来どおり）
-    # 同一 initial_lr で両方キャリブし、FINAL_VAL が高い方の LR・init/warmup を以降に引き継ぐ。
+    # --- Step 3.5: FT vs head-only LR Calibration ---
+    # (C) head-only（3.9 重み） vs (A)(B) FT 2 系統。FT 側の勝者と (C) を比較して head_finish を決める。
+    p_head35 = current_params.copy()
+    p_head35['fine_tune'] = 'False'
+    p_head35['epochs'] = 20
+    p_head35['warmup_lr'] = 0.0
+    p_head35['warmup_epochs'] = 0
+    if os.path.exists(BEST_HEAD_WEIGHTS_PATH):
+        p_head35['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
+    else:
+        p_head35['init_weights_path'] = ''
+        logger.warning(
+            "Step 3.5 (C head-only): best_head.weights.h5 missing — calib without carryover"
+        )
+    _il35_head = initial_lr_for_calibrate(p_head35['model_name'], p_head35['fine_tune'])
+    logger.info(
+        "\n>>> Step 3.5 (C head-only): LR Calibration "
+        f"(init_weights_path={p_head35.get('init_weights_path') or '(none)'}) <<<"
+    )
+    head_lr_35, score_3_5_head, _ = calibrate_base_lr(
+        p_head35, initial_lr=_il35_head,
+        cal_epochs=20, target_best_epoch=13
+    )
+    record_calibrate_context(p_head35['model_name'], p_head35['fine_tune'], head_lr_35)
+    _maybe_record_head_only_phase_best(p_head35, score_3_5_head)
+    logger.info(
+        f"Step 3.5 (C): calibrated_lr={head_lr_35:.8g}, score={score_3_5_head:.4f}"
+    )
+
+    # (A)(B) FT: Step 3.9 の best_head carryover vs warmup。同一 initial_lr でキャリブし高い方を FT 代表とする。
     current_params['fine_tune'] = 'True'
     current_params['epochs'] = 20
     current_params['unfreeze_layers'] = 60  # キャリブレーション用の暫定値
@@ -1282,21 +1308,21 @@ def main():
     current_params['learning_rate'] = ft_lr
 
     head_only_best = float(_HEAD_ONLY_PHASE_BEST['score'])
-    # FT キャリブが、FT 以前の head-only フェーズで観測したベスト検証より良くないとき head-only 仕上げ。
-    head_finish = score_3_5 < head_only_best
+    # Step 3.5: FT 代表スコアが head-only キャリブ (C) 未満なら head-only 仕上げ。
+    head_finish = score_3_5 < score_3_5_head
     logger.info(
         f"\n{'='*50}\n"
-        f"Head-only phase best (pre-FT) FINAL_VAL={head_only_best:.4f} "
-        f"[includes Step3.9={score_3_9:.4f} and prior head trials/calib]\n"
-        f"Step 3.5 (FT LR calib, selected={'carryover' if ft_calib_carryover_selected else 'warmup'}) "
-        f"FINAL_VAL={score_3_5:.4f}\n"
+        f"Head-only phase best (tracked) FINAL_VAL={head_only_best:.4f} "
+        f"[Step3.9={score_3_9:.4f}, Step1–3 trials, Step3.5(C)={score_3_5_head:.4f}]\n"
+        f"Step 3.5 FT (selected={'carryover' if ft_calib_carryover_selected else 'warmup'}) "
+        f"FINAL_VAL={score_3_5:.4f} vs head-only (C) {score_3_5_head:.4f}\n"
         f"-> {'HEAD-ONLY finish: skip FT Steps 4–4.7, brush-up with head Best-of-N' if head_finish else 'FT pipeline: Steps 4–4.7 as usual'}\n"
         f"{'='*50}"
     )
 
     if head_finish:
         current_params['fine_tune'] = 'False'
-        current_params['learning_rate'] = head_lr
+        current_params['learning_rate'] = head_lr_35
         current_params['epochs'] = FINAL_EPOCHS
         if os.path.exists(BEST_HEAD_WEIGHTS_PATH):
             current_params['init_weights_path'] = BEST_HEAD_WEIGHTS_PATH
@@ -1340,7 +1366,7 @@ def main():
     if head_finish:
         logger.info(
             f"Final: Best-of-{N_FINAL_RUNS} head-only brush-up "
-            f"(epochs={FINAL_EPOCHS}, LR=head_lr, init=Step3.9 weights)"
+            f"(epochs={FINAL_EPOCHS}, LR=Step3.5 head calib, init=Step3.9 weights)"
         )
     else:
         logger.info(
@@ -1370,7 +1396,8 @@ def main():
 
     if head_finish:
         logger.info(
-            f"Best-of-N (head-only): seed={best_seed}, Score={best_bon_score:.4f} (LR=head_lr)"
+            f"Best-of-N (head-only): seed={best_seed}, Score={best_bon_score:.4f} "
+            f"(LR=Step3.5 head calib {head_lr_35:.8g})"
         )
     else:
         logger.info(f"Best-of-N: seed={best_seed}, Score={best_bon_score:.4f} (LR=pre-4.7)")
@@ -1389,7 +1416,7 @@ def main():
 
     if head_finish:
         logger.info("\n>>> Step 4.7: skipped (head-only finish — multi-target FT LR search 不要) <<<")
-        final_lr = float(head_lr)
+        final_lr = float(head_lr_35)
         final_report_score = best_bon_score
     else:
         if os.path.exists(CACHE_FILE):
@@ -1453,8 +1480,8 @@ def main():
     logger.info("ALL PROCESSES COMPLETE")
     if head_finish:
         logger.info(
-            f"finish=head_only | head-only phase best={head_only_best:.4f} vs Step3.5(FT cal)={score_3_5:.4f} "
-            f"(Step3.9={score_3_9:.4f}) | "
+            f"finish=head_only | Step3.5 FT={score_3_5:.4f} vs head-only(C)={score_3_5_head:.4f} "
+            f"(Step3.9={score_3_9:.4f}, phase_best={head_only_best:.4f}) | "
             f"best-of-N: seed={best_seed}, Score={best_bon_score:.4f}, LR={final_lr:.8g}"
         )
     else:
@@ -1488,6 +1515,8 @@ def main():
     )
     best_params['score_step_3_5_ft_calib_warmup'] = float(score_3_5_scratch)
     best_params['lr_step_3_5_ft_calib_warmup'] = float(lr_scratch)
+    best_params['score_step_3_5_head_calib'] = float(score_3_5_head)
+    best_params['lr_step_3_5_head_calib'] = float(head_lr_35)
     # 保存する LR は learning_rate のみ（キャリブ結果・終端フェーズの採用値）。旧キーは削除。
     for _k in ('learning_rate_head', 'learning_rate_ft', 'learning_rate_nohead'):
         best_params.pop(_k, None)

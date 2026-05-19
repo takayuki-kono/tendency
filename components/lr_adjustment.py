@@ -29,6 +29,8 @@ TRAIN_MULTITASK_META_JSON_KEYS_ONLY = frozenset(
         "lr_step_3_5_ft_calib_carry",
         "score_step_3_5_ft_calib_warmup",
         "lr_step_3_5_ft_calib_warmup",
+        "score_step_3_5_head_calib",
+        "lr_step_3_5_head_calib",
     )
 )
 # train_sequential 互換で JSON に残り得る旧 LR フィールドも CLI に載せない
@@ -48,13 +50,13 @@ HEAD_CARRYOVER_VAL_FLOOR = 0.5
 HEAD_CARRYOVER_LR_FRACTIONS = (1.0, 0.5, 0.25, 0.1, 0.05, 0.025)
 HEAD_CARRYOVER_CALIB_EPOCHS = 8
 
-# optimize_sequential: フィルタ探索の学習評価を FT にする（False で従来 head-only）
-OPTIMIZE_EVAL_USE_FINE_TUNE = True
+# optimize_sequential: フィルタ探索の学習評価を FT にする（False = 既定 head-only）
+OPTIMIZE_EVAL_USE_FINE_TUNE = False
 OPTIMIZE_FT_UNFREEZE_LAYERS = 60
 OPTIMIZE_EVAL_EPOCHS = 20
 
-# train_sequential Steps 1.1–3.8: 軸探索の run_trial を FT にする（False で従来 head-only）
-TRAIN_OPT_EVAL_USE_FINE_TUNE = True
+# train_sequential Steps 1.1–3.8: 軸探索の run_trial を FT にする（False = 既定 head-only）
+TRAIN_OPT_EVAL_USE_FINE_TUNE = False
 TRAIN_OPT_FT_UNFREEZE_LAYERS = 60
 
 
