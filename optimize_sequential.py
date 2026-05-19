@@ -84,6 +84,7 @@ from components.lr_adjustment import (
     clip_learning_rate_for_training,
     lr_bisect_update_bounds_and_next_raw,
     lr_calibration_should_stop,
+    effective_best_epoch_for_lr_adjustment,
     parse_lr_calib_context,
     resolve_calib_initial_lr,
     make_lr_calib_context,
@@ -685,8 +686,16 @@ def calibrate_base_lr(model_name, initial_lr, cal_epochs=10, target_best_epoch=N
             logger.info(f"Reached max calibration iterations ({LR_CALIBRATION_MAX_ITERATIONS}). Stopping calibration.")
             break
 
+        adj_epoch = effective_best_epoch_for_lr_adjustment(
+            best_epoch, last_epoch_accu, score, cal_epochs
+        )
+        if adj_epoch != best_epoch:
+            logger.info(
+                f"  [Calibration] last≈best → LR調整は best_epoch={best_epoch} ではなく "
+                f"{adj_epoch} として扱う"
+            )
         lr_low, lr_high, new_lr_raw, used_geom, scale = lr_bisect_update_bounds_and_next_raw(
-            best_epoch,
+            adj_epoch,
             current_lr,
             cal_epochs,
             target_min,
@@ -1139,8 +1148,16 @@ def run_trial(
                 logger.info(f"Reached max LR adjustments ({LR_MAX_ADJUSTMENTS}). Stopping.")
                 break
 
+            adj_epoch = effective_best_epoch_for_lr_adjustment(
+                best_epoch, last_epoch_accu, trial_score, training_epochs
+            )
+            if adj_epoch != best_epoch:
+                logger.info(
+                    f"  [LR sweep] last≈best → LR調整は best_epoch={best_epoch} ではなく "
+                    f"{adj_epoch} として扱う"
+                )
             lr_low_rt, lr_high_rt, new_lr_raw, used_geom, scale = lr_bisect_update_bounds_and_next_raw(
-                best_epoch,
+                adj_epoch,
                 current_training_lr,
                 training_epochs,
                 target_min,
@@ -1156,7 +1173,7 @@ def run_trial(
             else:
                 logger.info(
                     f"  [LR sweep] 次 lr 案: ratio={scale:.6f} → raw={new_lr_raw:.8g} "
-                    f"(best_epoch={best_epoch} vs target={int(target_min)})"
+                    f"(effective_epoch={adj_epoch} vs target={int(target_min)})"
                 )
             logger.info(f"  LR: {current_training_lr:.8f} -> {new_lr_raw:.8f}")
             if (

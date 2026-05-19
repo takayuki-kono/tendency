@@ -113,6 +113,7 @@
      - **`target_min ≤ best_epoch ≤ target_max`（帯内含む単一点 target では best_epoch がターゲットと一致する場合）では境界を更新しない**（旧実装では帯内含む試行まで `lr_low` に入り二分が歪む問題があった）。
      - 両境界が揃ったら次 LR = `sqrt(lr_low * lr_high)`（幾何平均 = log 空間の中点）。LR は乗算スケールで効くため算術平均より幾何平均の方が対称で収束が速い。
      - 片側のみのとき: `scale = compute_lr_adjustment_ratio(...)`（`best_epoch/target_mid`）で `new_lr = current_lr * scale`（比のクランプなし）。実装は **`lr_bisect_update_bounds_and_next_raw`** に集約。
+     - **last≈best（2026-05-19）**: 終端 `MinClassAcc` とベスト Val の差が **`LR_LAST_ACCU_EPS`（0.01）未満**のとき、ratio／二分境界は観測 `best_epoch` ではなく **`training_epochs`（例: 20）** を **`effective_best_epoch_for_lr_adjustment`** で使う（例: best=12・last≈best では 12/13≈0.92 倍ではなく 20/13 で LR を上げ方向に寄せる）。満足打ち切りは従来どおり **帯内かつ last≠best** のみ。
      - `LR_CALIBRATION_MAX_ITERATIONS=10`（`lr_adjustment.py`）→ `calibrate_base_lr` は最大 10 trial。`run_trial` 側の LR 再調整は **同じ境界・幾何／ratio ロジック**だが試行上限のみ `LR_MAX_ADJUSTMENTS=6`（最大 7 trial）。
      - 収束判定: `|new_lr - current_lr| / current_lr < LR_CALIB_MIN_RELATIVE_CHANGE`（`lr_adjustment.py`、既定 **0.05**＝5% 未満）なら以降の trial を打ち切り、最良候補を採用。
   - **LR の一本化（2026-04-25）**: `best_train_params.json` に記録する教師あり LR は **`learning_rate` のみ**（終端フェーズで実際に使う値）。旧キー `learning_rate_head` / `learning_rate_ft` / `learning_rate_nohead` は保存時に削除され、読み込み互換のため `_skip_keys` でサブプロセスに転送しないだけ残す。

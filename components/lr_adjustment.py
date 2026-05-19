@@ -93,6 +93,27 @@ def clip_learning_rate_for_training(lr):
     return x
 
 
+def last_epoch_accu_matches_best(last_epoch_accu: float, trial_score: float) -> bool:
+    """終端 MinClassAcc がベスト Val と実質同値（last≈best）か。"""
+    return abs(float(last_epoch_accu) - float(trial_score)) < LR_LAST_ACCU_EPS
+
+
+def effective_best_epoch_for_lr_adjustment(
+    best_epoch: int,
+    last_epoch_accu: float,
+    trial_score: float,
+    training_epochs: int,
+) -> int:
+    """
+    LR 再調整（ratio / 二分境界）に使う effective best epoch。
+    last≈best のときは終端まで伸び続けたとみなし training_epochs（例: 20）で調整する。
+    従来は観測 best_epoch のまま（例: 12 → 12/13≈0.92 倍で LR を下げがち）だった。
+    """
+    if last_epoch_accu_matches_best(last_epoch_accu, trial_score):
+        return int(training_epochs)
+    return int(best_epoch)
+
+
 def compute_lr_adjustment_ratio(best_epoch, target_epoch=10, total_epochs=20):
     """`best_epoch / target_epoch` を返す。比の乗算クランプは行わない。`total_epochs` は互換用。実 LR は `clip_learning_rate_for_training` 適用。"""
     if target_epoch <= 0:
@@ -142,7 +163,10 @@ def lr_adjustment_decision(best_epoch, last_epoch_accu, trial_score, training_ep
     戻り値: (should_exit: bool, log_message: str|None, need_adjust: bool, effective_epoch: int|None)
     """
     # 許容帯内かつ last≠best なら再調整ループ終了（lr_calibration_should_stop と同一）
-    if LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX and abs(last_epoch_accu - trial_score) >= LR_LAST_ACCU_EPS:
+    if (
+        LR_ACCEPTABLE_MIN <= best_epoch <= LR_ACCEPTABLE_MAX
+        and not last_epoch_accu_matches_best(last_epoch_accu, trial_score)
+    ):
         return (True, f"  BestEpoch {best_epoch} in [{LR_ACCEPTABLE_MIN}-{LR_ACCEPTABLE_MAX}] and last_accu≠best. Done.", False, None)
 
     need_adjust = False
@@ -152,8 +176,9 @@ def lr_adjustment_decision(best_epoch, last_epoch_accu, trial_score, training_ep
     elif best_epoch == training_epochs:
         need_adjust = True
         effective_epoch = training_epochs
-    elif abs(last_epoch_accu - trial_score) < LR_LAST_ACCU_EPS:
+    elif last_epoch_accu_matches_best(last_epoch_accu, trial_score):
         need_adjust = True
+        effective_epoch = int(training_epochs)
     return (False, None, need_adjust, effective_epoch if need_adjust else None)
 
 
@@ -170,7 +195,7 @@ def lr_calibration_should_stop(best_epoch, last_epoch_accu, score, *, acceptable
         lo, hi = LR_ACCEPTABLE_MIN, LR_ACCEPTABLE_MAX
     else:
         lo, hi = acceptable_band
-    if lo <= best_epoch <= hi and abs(last_epoch_accu - score) >= LR_LAST_ACCU_EPS:
+    if lo <= best_epoch <= hi and not last_epoch_accu_matches_best(last_epoch_accu, score):
         return (True, f"BestEpoch {best_epoch} in [{lo}-{hi}] and last_accu≠best. Stopping calibration.")
     return (False, None)
 
