@@ -109,7 +109,7 @@ def _manifest_filter_percentile_args(args):
         "glasses_percentile": int(args.glasses_percentile),
         "grayscale": bool(getattr(args, "grayscale", False)),
         "skip_class_balance": bool(getattr(args, "skip_class_balance", False)),
-        "class_internal_cap_rank": int(getattr(args, "class_internal_cap_rank", 3)),
+        "class_internal_cap_rank": int(getattr(args, "class_internal_cap_rank", 2)),
     }
 
 
@@ -881,7 +881,7 @@ def process_dataset(src_root, dst_root, args, skip_undersampling=False):
 
         filtered_by_label[label] = label_valid_tasks
 
-    cap_rank = max(1, int(getattr(args, "class_internal_cap_rank", 3)))
+    cap_rank = max(1, int(getattr(args, "class_internal_cap_rank", 2)))
     # --- Undersampling: (1) クラス内 N 位上限 → (2) クラス間均衡 → (3) 再度クラス内 N 位上限 ---
     if not skip_undersampling:
         skipped_count += _apply_class_internal_rank_cap(
@@ -1139,17 +1139,17 @@ def main():
     parser.add_argument(
         "--class_internal_cap_rank",
         type=int,
-        default=3,
+        default=2,
         help=(
             "クラス内アンダーサンプル（第1・第3段）で、各人物バケツの枚数上限を "
-            "「そのクラス内で N 番目に多いバケツの枚数」に揃える。N=2 が旧既定相当（厳しめ）、"
-            "N=3 でより緩い（既定）。N>=1。"
+            "「そのクラス内で N 番目に多いバケツの枚数」に揃える。既定 N=2（validation 各クラス約2人想定）。"
+            "N=3 でより緩い。N>=1。"
         ),
     )
 
     args = parser.parse_args()
 
-    if int(getattr(args, "class_internal_cap_rank", 3)) < 1:
+    if int(getattr(args, "class_internal_cap_rank", 2)) < 1:
         parser.error("--class_internal_cap_rank は 1 以上を指定してください")
     
     prepro_dir = args.out_dir
@@ -1214,7 +1214,7 @@ def main():
                     "推論で学習データと同じ基準に揃える場合は通常 train の global / per_label を参照する。",
                     "眉-目距離はラベル（人物フォルダ等）単位。同一キーで per_label_eyebrow_thresholds を参照すること。",
                     "アンダーサンプリングは閾値だけでは再現できない（枚数上限・ランダムシャッフルあり）。"
-                    "第1段＝クラス内バケツの N 位上限（--class_internal_cap_rank、既定 N=3）、第2段＝クラス間均衡、第3段＝再度クラス内 N 位上限（--skip_class_balance で第2段のみ無効化）。",
+                    "第1段＝クラス内バケツの N 位上限（--class_internal_cap_rank、既定 N=2）、第2段＝クラス間均衡、第3段＝再度クラス内 N 位上限（--skip_class_balance で第2段のみ無効化）。",
                 ],
                 "splits": split_manifests,
             }

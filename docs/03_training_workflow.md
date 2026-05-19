@@ -153,7 +153,7 @@
 2.  **判定**:
     - 各画像について、全指標が閾値内であれば「採用」。一つでも超えれば「不採用（スキップ）」。
 3.  **アンダーサンプリング**（`preprocess_multitask.py` の詳細は下記）:
-    - **第 1 段**: フィルタ直後の残件で **クラス内**（同一クラスに属する全フルラベル＝人物フォルダ）について、各バケツを **そのクラス内で N 番目に多い枚数**（既定 **N=3**。従来相当は **N=2**、`--class_internal_cap_rank`）まで間引く（`undersampling_post_filter`）。train/validation/test は各スプリットで同じロジック。
+    - **第 1 段**: フィルタ直後の残件で **クラス内**（同一クラスに属する全フルラベル＝人物フォルダ）について、各バケツを **そのクラス内で N 番目に多い枚数**（既定 **N=2**＝2番目に多い人物まで、`--class_internal_cap_rank`）まで間引く（`undersampling_post_filter`）。train/validation/test は各スプリットで同じロジック（validation 各クラス約2人想定に揃える）。
     - **第 2 段**: 第 1 段のあと、**クラス間**で各クラスの合計枚数を **最少クラスに揃える**（`undersampling_class_balance`）。`--skip_class_balance` で無効化。
     - **第 3 段**: 第 2 段のあと（`--skip_class_balance` 時は第 1 段直後）、**再びクラス内 N 位上限**を適用（落とし枚数も `undersampling_post_filter` に加算）。
 
@@ -169,7 +169,7 @@
    - **個人閾値**: グループ（ディレクトリパス）ごとに **眉-目距離 (eb_eye_dist)** だけ、そのグループ内の分布で `eyebrow_eye_percentile_low` / `eyebrow_eye_percentile_high` の閾値を計算。
 4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `mean_brightness_low_global`, `eb_eye_low_personal`, `undersampling_post_filter`, `undersampling_class_balance` などでログに集計される。
 5. **アンダーサンプリング（三段）**:
-    - **第 1 段（クラス内・フォルダバケツ）**: フィルタ直後の残件で、クラスキー（相対パス先頭セグメント）ごとにフルラベル（フォルダ単位）別の枚数を集め、**そのクラス内で N 番目に多いバケツの枚数**を上限として各バケツを切り詰める（`--class_internal_cap_rank`、既定 **N=3**、従来相当は **N=2**。記録は `skip_reasons['undersampling_post_filter']`）。
+    - **第 1 段（クラス内・フォルダバケツ）**: フィルタ直後の残件で、クラスキー（相対パス先頭セグメント）ごとにフルラベル（フォルダ単位）別の枚数を集め、**そのクラス内で N 番目に多いバケツの枚数**を上限として各バケツを切り詰める（`--class_internal_cap_rank`、既定 **N=2**。記録は `skip_reasons['undersampling_post_filter']`）。
     - **第 2 段（クラス間）**: 第 1 段の**あと**、クラスキーごとの**合計枚数**を出し、**最少クラスと同じ合計**になるよう多いクラスからランダムに削る（`skip_reasons['undersampling_class_balance']`）。正の枚数のクラスが2つ以上のときのみ。`--skip_class_balance` で無効化。
     - **第 3 段（クラス内・再適用）**: 第 2 段の**あと**に第 1 段と同型のクラス内 N 位上限を再度適用（`undersampling_post_filter` に加算）。`skip_class_balance` のときは第 1 段直後に実行（第 2 段を挟まないため多くの場合ほぼ無変化）。
     - **`skip_undersampling`**: True のとき第 1〜第 3 段とも行わない。train/validation/test は同じ実装（通常 False）。
@@ -192,7 +192,7 @@
 | Mask | 上顔/下顔の肌色比率から算出（高いほどマスク疑い） | 値 **>** 閾値 → 除外 |
 | Glasses | 目周辺エッジと額エッジの比（高いほど眼鏡疑い） | 値 **>** 閾値 → 除外 |
 
-**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--mean_brightness_percentile_low`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--class_internal_cap_rank`（**第1・第3段**のクラス内バケツ上限＝「N 番目に多い枚数」。既定 **3**、従来相当は **2**）, `--skip_class_balance`（**中段**のクラス間均衡のみスキップ。第1・第3段のクラス内 N 位は実行）。  
+**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--mean_brightness_percentile_low`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--class_internal_cap_rank`（**第1・第3段**のクラス内バケツ上限＝「N 番目に多い枚数」。既定 **2**）, `--skip_class_balance`（**中段**のクラス間均衡のみスキップ。第1・第3段のクラス内 N 位は実行）。  
 **出力**: `preprocessed_multitask/train/`, `preprocessed_multitask/validation/`, `preprocessed_multitask/test/`。これが `train_sequential.py` の直接の入力。
 
 ---
@@ -266,7 +266,7 @@
 - **`weight_decay` と正則化の役割分担**（`components/train_multitask_trial.py`）:
   - **`adamw`かつ環境が AdamW に対応**し **`weight_decay > 0`**: アダプティブ用の **`AdamW(weight_decay=...)`** のみ。**Dense の kernel L2 は付けず**ダブりを避ける。
   - **`adam` / `sgd`、または前述 AdamW 未対応のフォールバック**: **`weight_decay > 0` は Dense 層の `kernel_regularizer=l2(weight_decay)`**（従来と同様）。AdamW フォールバック時も同様に L2 で近似。
-- **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（**軸探索は FT 評価が既定**）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。
+- **Step 1.5 / 2 / 3** — `weight_decay` / 構造（layers/units/dropout）/ データ拡張・正則化（shift 含む）を順次最適化（**軸探索は head-only 既定**）。**`optimize_param` にはすべて `head_only_tie_log` を渡す**（同点は 3.8）。候補ごとに最高スコアを比較し、**同点が複数**なら候補先頭を仮採用して次軸へ。
 - **Step 3.8: 同点解消** — 上記で記録した「同最高スコアの候補群」が存在する各パラメータについて、**以降の軸を確定した `current_params` を引き継ぎ、同点候補同士だけ `run_trial` し直し**採択（`resolve_tie_breaks`）。`width_shift_range` / `height_shift_range` 連動分は特殊キー `_shift_coupled` として扱う。再採点は**記録順**（先に出た同点軸から解消し、`current_params` を更新しながら次へ）。**`model_name` 同点**の解消後は、勝者候補の **`run_trial` 記憶 LR** で `learning_rate` を更新する。**同点の定義**は `train_sequential._is_same_score` で、**検証スコア差が 0.01 未満**なら同一扱い。
 - **Step 3.8 を 3.9 前に置く理由 / unfreeze 後について** — Step 3.9 は「同点解消**後**の hparams」で `best_head.weights.h5` を再学習する。同点解消を unfreeze 確定**後**（FT 条件）だけに回すと、3.9 は仮採択のまま保存し、**後段で hparam（例: dropout）が差し替わる**と head 重みと不整合になる（その場合は **3.9 を掛け直す** or **旧 4.6 相当**を FT 下に別枠で置く、が要る）。現状は **hparam 確定 → 3.9 で head 1 本**の順序を保つ。FT 中の最適点が凍結時の同点と違う可能性はあるが、それを **unfreeze 後だけ**で扱うのは 4.6/追加試行系の責務と分ける。
 - **Step 3.9: Best Head Weights 再学習＆保存** — Step 3 / 3.8 で確定した best params 構成で head-only を再学習し、ベスト epoch の重みを `outputs/best_head_weights/best_head.weights.h5` に保存する。**Step 3.9 直前**に `head_lr` から `HEAD_CARRYOVER_LR_FRACTIONS`（1.0→0.025）を降順に短いキャリブで試し、**`HEAD_CARRYOVER_VAL_FLOOR`（既定 0.5）以上の Val が出る最初の LR** を carryover 用に採用（どれも未満なら最高 Val の LR）。あわせて同一ベスト重みをロードした **完全モデル**を `outputs/best_head_weights/best_head_only.keras` に別保存する（推論・検証用。FT の head carryover は従来どおり `.weights.h5` のみ使用）。FT フェーズで `--init_weights_path` 経由で初期値として読み込む（head carryover）。
