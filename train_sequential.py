@@ -65,6 +65,9 @@ from components.lr_adjustment import (
     parse_lr_calib_context,
     resolve_calib_initial_lr,
     make_lr_calib_context,
+    HEAD_CARRYOVER_VAL_FLOOR,
+    HEAD_CARRYOVER_LR_FRACTIONS,
+    HEAD_CARRYOVER_CALIB_EPOCHS,
 )
 from components.model_architecture import LRCALIB_BASE_BACKBONE, MODEL_NAME_CANDIDATES
 from components.filter_threshold_manifest import copy_filter_manifest_beside_model
@@ -634,6 +637,49 @@ def train_and_save_best_head_weights(current_params, weights_path):
     return score
 
 
+def resolve_head_carryover_learning_rate(head_lr, head_save_params, val_floor=None, cal_epochs=None):
+    """
+    Step 3.9 用: head_lr の分数を大きい順に短いキャリブで試し、
+    val >= val_floor を満たす最初の LR を採用（どれも未満なら最高 val の LR）。
+    """
+    floor = float(HEAD_CARRYOVER_VAL_FLOOR if val_floor is None else val_floor)
+    probe_epochs = int(HEAD_CARRYOVER_CALIB_EPOCHS if cal_epochs is None else cal_epochs)
+    base_lr = clip_learning_rate_for_training(float(head_lr))
+    probe_params = head_save_params.copy()
+    probe_params["fine_tune"] = "False"
+    probe_params["init_weights_path"] = ""
+
+    logger.info(
+        f"\n>>> Step 3.9: resolve head carryover LR "
+        f"(head_lr={base_lr:.8g}, val_floor={floor}, probe_epochs={probe_epochs}) <<<"
+    )
+
+    best_lr = clip_learning_rate_for_training(
+        base_lr * float(HEAD_CARRYOVER_LR_FRACTIONS[-1])
+    )
+    best_score = -1.0
+    for frac in HEAD_CARRYOVER_LR_FRACTIONS:
+        lr = clip_learning_rate_for_training(base_lr * float(frac))
+        _, sc, _ = run_calibration_trial(probe_params, lr, cal_epochs=probe_epochs)
+        logger.info(
+            f"  Step 3.9 carryover probe: frac={frac} lr={lr:.8g} val={sc:.4f}"
+        )
+        if sc > best_score:
+            best_score, best_lr = sc, lr
+        if sc >= floor:
+            logger.info(
+                f"  Step 3.9 carryover LR selected: {lr:.8g} "
+                f"(val={sc:.4f} >= floor {floor})"
+            )
+            return lr, sc
+
+    logger.warning(
+        f"Step 3.9: no probe reached val_floor={floor}; "
+        f"using best probe lr={best_lr:.8g} (val={best_score:.4f})"
+    )
+    return best_lr, best_score
+
+
 def run_calibration_trial(current_params, lr, cal_epochs=5):
     """
     LRキャリブレーション用: 指定パラメータで学習を実行し、BEST_EPOCHを返す。
@@ -1094,8 +1140,10 @@ def main():
     head_save_params = current_params.copy()
     head_save_params['fine_tune'] = 'False'
     head_save_params['epochs'] = 20
-    # Step 1.1 で確定した head LR（3.8 の model 同点解消後も current_params と同期済み）
-    head_save_params['learning_rate'] = head_lr
+    carry_lr, _carry_probe_sc = resolve_head_carryover_learning_rate(
+        head_lr, head_save_params
+    )
+    head_save_params['learning_rate'] = carry_lr
     score_3_9 = train_and_save_best_head_weights(head_save_params, BEST_HEAD_WEIGHTS_PATH)
     _maybe_record_head_only_phase_best(head_save_params, score_3_9)
 

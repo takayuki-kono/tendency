@@ -77,6 +77,9 @@ from components.lr_adjustment import (
     LR_CALIB_CONTEXT_JSON_KEY,
     LR_LAST_ACCU_EPS,
     TRAIN_MULTITASK_CLI_EXCLUDE_KEYS,
+    OPTIMIZE_EVAL_USE_FINE_TUNE,
+    OPTIMIZE_FT_UNFREEZE_LAYERS,
+    OPTIMIZE_EVAL_EPOCHS,
     best_epoch_moved_toward_lr_target,
     clip_learning_rate_for_training,
     lr_bisect_update_bounds_and_next_raw,
@@ -415,7 +418,7 @@ def save_cache(cache):
 
 
 # Step 0 / calibrate_base_lr 用キャッシュ（filter trial と同一 JSON。キーは @ 接頭で衝突回避）
-_CALIB_CACHE_VERSION = 1
+_CALIB_CACHE_VERSION = 2  # 2: optimize 評価を FT に変更（head-only キャッシュと分離）
 
 _CALIB_SKIP_KEYS = frozenset(
     {
@@ -450,8 +453,40 @@ def _calib_trial_cache_key(model_name, lr, cal_epochs, data_fc, digest_extra: st
     lr_s = f"{float(lr):.12g}"
     return (
         f"@calib{_CALIB_CACHE_VERSION}:{model_name}:ep{int(cal_epochs)}:"
-        f"lr{lr_s}:cnt{int(data_fc)}:x{digest_extra}"
+        f"lr{lr_s}:cnt{int(data_fc)}:x{digest_extra}{_optimize_eval_mode_tag()}"
     )
+
+
+def _optimize_eval_mode_tag() -> str:
+    if OPTIMIZE_EVAL_USE_FINE_TUNE:
+        return f"_evalft={int(OPTIMIZE_FT_UNFREEZE_LAYERS)}"
+    return "_evalhead"
+
+
+def _optimize_fine_tune_cli_args():
+    """filter_opt の run_trial / run_calibration_trial 用 train_multitask 引数。"""
+    if OPTIMIZE_EVAL_USE_FINE_TUNE:
+        return [
+            "--fine_tune", "True",
+            "--unfreeze_layers", str(int(OPTIMIZE_FT_UNFREEZE_LAYERS)),
+            "--warmup_lr", "0",
+            "--warmup_epochs", "0",
+            "--init_weights_path", "",
+        ]
+    return ["--fine_tune", "False"]
+
+
+def _extract_best_epoch_from_train_output(full_output: str, default_epoch: int) -> int:
+    if OPTIMIZE_EVAL_USE_FINE_TUNE:
+        m = re.search(r"FT_BEST_EPOCH:\s*(\d+)", full_output)
+        if m:
+            return int(m.group(1))
+    m = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
+    return int(m.group(1)) if m else default_epoch
+
+
+def _optimize_calib_lr_mode() -> str:
+    return "ft" if OPTIMIZE_EVAL_USE_FINE_TUNE else "head"
 
 
 def _calib_full_cache_key(
@@ -468,6 +503,7 @@ def _calib_full_cache_key(
         f"@calfull{_CALIB_CACHE_VERSION}:{model_name}:ep{int(cal_epochs)}:"
         f"t{float(target_min):g}-{float(target_max):g}:"
         f"mx{int(LR_CALIBRATION_MAX_ITERATIONS)}:il{il}:cnt{int(data_fc)}:x{digest_extra}"
+        f"{_optimize_eval_mode_tag()}"
     )
 
 
@@ -502,9 +538,13 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
             cmd_train.extend([f"--{k}", str(v)])
     cmd_train.extend(["--learning_rate", str(lr)])
     cmd_train.extend(["--epochs", str(cal_epochs)])
-    cmd_train.extend(["--fine_tune", "False"])
+    cmd_train.extend(_optimize_fine_tune_cli_args())
     cmd_train.extend(["--enable_early_stopping", "False"])
-    logger.info(f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f}...")
+    mode = _optimize_calib_lr_mode()
+    logger.info(
+        f"[Calibration] Running {cal_epochs} epochs with LR={lr:.8f} "
+        f"(fine_tune={OPTIMIZE_EVAL_USE_FINE_TUNE}, mode={mode})..."
+    )
     
     process = subprocess.Popen(
         cmd_train, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -523,9 +563,7 @@ def run_calibration_trial(model_name, lr, cal_epochs=5):
         _log_subprocess_fail("[Calibration] train_multitask_trial", rc, output_lines)
         # 失敗時はキャッシュしない（再試行できるように）
 
-    # BEST_EPOCH抽出
-    match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
-    best_epoch = int(match_epoch.group(1)) if match_epoch else cal_epochs
+    best_epoch = _extract_best_epoch_from_train_output(full_output, cal_epochs)
 
     # スコア抽出
     match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
@@ -766,13 +804,14 @@ def run_trial(
     }
 
     cache_exp_tag = _cache_exp_tag_for_filter_params(current_vals, ft_norm)
+    eval_tag = _optimize_eval_mode_tag()
 
-    # 互換性のため、以前の形式のキャッシュキーも生成
+    # 互換性のため、以前の形式のキャッシュキーも生成（評価モード tag を含め head/ft を混同しない）
     cache_key_legacy = (
         f"model={model_name}_pitch={pitch}_sym={sym}_ydiff={y_diff}_mouth={mouth_open}_ebh={eb_eye_high}_ebl={eb_eye_low}_"
         f"sharplow={sharpness_low}_sharphigh={sharpness_high}_mbl={mean_brightness_low}_fsl={face_size_low}_fsh={face_size_high}_"
         f"retouch={retouching}_mask={mask}_glasses={glasses}_rot={rotation}_gray={grayscale}{lr_tag}_cnt={file_count}"
-        f"{ft_tag}"
+        f"{ft_tag}{eval_tag}"
     )
 
     # 新しい形式のキャッシュキー (exp値加味)
@@ -978,7 +1017,7 @@ def run_trial(
             adjusted_lr, fb_msg = resolve_calib_initial_lr(
                 model_name,
                 data_ct_fb,
-                "head",
+                _optimize_calib_lr_mode(),
                 last_ctx=None,
                 persisted_ctx=persisted_fb,
             )
@@ -987,15 +1026,18 @@ def run_trial(
             )
         
         cmd_train.extend(["--learning_rate", str(adjusted_lr)])
-        
-        # 評価用なのでFine-tuningはOff、Epochs=20
-        cmd_train.extend(["--epochs", "20"])
-        cmd_train.extend(["--fine_tune", "False"])
+
+        training_epochs = int(OPTIMIZE_EVAL_EPOCHS)
+        cmd_train.extend(["--epochs", str(training_epochs)])
+        cmd_train.extend(_optimize_fine_tune_cli_args())
         cmd_train.extend(["--auto_lr_target_epoch", "0"])  # 内部自動スケーリングを無効化
 
         # train_sequential.py と同じ LR 再調整条件（モジュール定数で共用）
-        training_epochs = 20
-        logger.info(f"Running training with {model_name} (epochs={training_epochs}, fine_tune=False)...")
+        logger.info(
+            f"Running training with {model_name} "
+            f"(epochs={training_epochs}, fine_tune={OPTIMIZE_EVAL_USE_FINE_TUNE}, "
+            f"unfreeze_layers={OPTIMIZE_FT_UNFREEZE_LAYERS if OPTIMIZE_EVAL_USE_FINE_TUNE else 'n/a'})..."
+        )
 
         current_training_lr = adjusted_lr
         best_trial_score = 0.0
@@ -1047,9 +1089,7 @@ def run_trial(
 
             full_output = "\n".join(train_output)
 
-            # BEST_EPOCH抽出
-            match_epoch = re.search(r"BEST_EPOCH:\s*(\d+)", full_output)
-            best_epoch = int(match_epoch.group(1)) if match_epoch else training_epochs
+            best_epoch = _extract_best_epoch_from_train_output(full_output, training_epochs)
 
             # スコア抽出
             match_score = re.search(r"FINAL_VAL_ACCURACY:\s*([\d.]+)", full_output)
@@ -1472,7 +1512,7 @@ def main():
 
     logger.info(
         f"\n>>> Step 0: Per-model LR calibration ({len(MODEL_NAME_CANDIDATES)} candidates, "
-        f"target_best_epoch=13) <<<"
+        f"target_best_epoch=13, eval_mode={_optimize_calib_lr_mode()}) <<<"
     )
     logger.info(
         f"  data_file_count(train+val)={opt_data_file_count} — "
@@ -1484,7 +1524,7 @@ def main():
         il0, why0 = resolve_calib_initial_lr(
             m,
             opt_data_file_count,
-            "head",
+            _optimize_calib_lr_mode(),
             last_ctx=None,
             persisted_ctx=persisted_calib,
         )
@@ -1511,7 +1551,7 @@ def main():
         best_params[LR_CALIB_CONTEXT_JSON_KEY] = make_lr_calib_context(
             best_model,
             opt_data_file_count,
-            "head",
+            _optimize_calib_lr_mode(),
             CALIBRATED_BASE_LR,
         )
         for _k in ("learning_rate_head", "learning_rate_ft", "learning_rate_nohead"):

@@ -43,6 +43,16 @@ LR_LAST_ACCU_EPS = 0.01  # 最終epoch精度とベストスコアの差がこれ
 LR_TRAIN_ABSOLUTE_MIN = 1e-7
 LR_TRAIN_ABSOLUTE_MAX = 0.1
 
+# Step 3.9: FT carryover 用 head 再学習の LR（head_lr から降順プローブし val >= floor を満たす最大 LR を採用）
+HEAD_CARRYOVER_VAL_FLOOR = 0.5
+HEAD_CARRYOVER_LR_FRACTIONS = (1.0, 0.5, 0.25, 0.1, 0.05, 0.025)
+HEAD_CARRYOVER_CALIB_EPOCHS = 8
+
+# optimize_sequential: フィルタ探索の学習評価を FT にする（False で従来 head-only）
+OPTIMIZE_EVAL_USE_FINE_TUNE = True
+OPTIMIZE_FT_UNFREEZE_LAYERS = 60
+OPTIMIZE_EVAL_EPOCHS = 20
+
 
 def best_epoch_moved_toward_lr_target(old_e: int, new_e: int, target: float) -> bool:
     """
