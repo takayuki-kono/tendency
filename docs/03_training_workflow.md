@@ -153,7 +153,7 @@
 2.  **判定**:
     - 各画像について、全指標が閾値内であれば「採用」。一つでも超えれば「不採用（スキップ）」。
 3.  **アンダーサンプリング**（`preprocess_multitask.py` の詳細は下記）:
-    - **第 1 段**: フィルタ直後の残件で **クラス内**（同一クラスに属する全フルラベル＝人物フォルダ）について、各バケツを **そのクラス内で N 番目に多い枚数**（既定 **N=2**＝2番目に多い人物まで、`--class_internal_cap_rank`）まで間引く（`undersampling_post_filter`）。train/validation/test は各スプリットで同じロジック（validation 各クラス約2人想定に揃える）。
+    - **第 1 段**: フィルタ直後の残件で **クラス内**（同一クラスに属する全フルラベル＝人物フォルダ）について、各バケツを **そのクラス内の最少人物枚数**（`--class_internal_cap_mode=min`、**既定**）まで間引く。`rank` のときは **N 番目に多い枚数**（`--class_internal_cap_rank`、例 N=2）が上限（`undersampling_post_filter`）。train/validation/test は各スプリットで同じロジック。
     - **第 2 段**: 第 1 段のあと、**クラス間**で各クラスの合計枚数を **最少クラスに揃える**（`undersampling_class_balance`）。`--skip_class_balance` で無効化。
     - **第 3 段**: 第 2 段のあと（`--skip_class_balance` 時は第 1 段直後）、**再びクラス内 N 位上限**を適用（落とし枚数も `undersampling_post_filter` に加算）。
 
@@ -169,7 +169,7 @@
    - **個人閾値**: グループ（ディレクトリパス）ごとに **眉-目距離 (eb_eye_dist)** だけ、そのグループ内の分布で `eyebrow_eye_percentile_low` / `eyebrow_eye_percentile_high` の閾値を計算。
 4. **判定**: 各画像について、上記の全閾値と比較。**一つでも閾値を超えたらスキップ**（採用されない）。スキップ理由は `pitch_global`, `symmetry_global`, `mean_brightness_low_global`, `eb_eye_low_personal`, `undersampling_post_filter`, `undersampling_class_balance` などでログに集計される。
 5. **アンダーサンプリング（三段）**:
-    - **第 1 段（クラス内・フォルダバケツ）**: フィルタ直後の残件で、クラスキー（相対パス先頭セグメント）ごとにフルラベル（フォルダ単位）別の枚数を集め、**そのクラス内で N 番目に多いバケツの枚数**を上限として各バケツを切り詰める（`--class_internal_cap_rank`、既定 **N=2**。記録は `skip_reasons['undersampling_post_filter']`）。
+    - **第 1 段（クラス内・フォルダバケツ）**: フィルタ直後の残件で、クラスキーごとにフルラベル（人物フォルダ）別の枚数を集め、**既定 `cap_mode=min`** では **クラス内最少枚数**を上限として各バケツを切り詰める。`cap_mode=rank` では **N 番目に多いバケツ枚数**が上限（`--class_internal_cap_rank`）。第 3 段も同ロジック。記録は `skip_reasons['undersampling_post_filter']`。
     - **第 2 段（クラス間）**: 第 1 段の**あと**、クラスキーごとの**合計枚数**を出し、**最少クラスと同じ合計**になるよう多いクラスからランダムに削る（`skip_reasons['undersampling_class_balance']`）。正の枚数のクラスが2つ以上のときのみ。`--skip_class_balance` で無効化。
     - **第 3 段（クラス内・再適用）**: 第 2 段の**あと**に第 1 段と同型のクラス内 N 位上限を再度適用（`undersampling_post_filter` に加算）。`skip_class_balance` のときは第 1 段直後に実行（第 2 段を挟まないため多くの場合ほぼ無変化）。
     - **`skip_undersampling`**: True のとき第 1〜第 3 段とも行わない。train/validation/test は同じ実装（通常 False）。
@@ -192,7 +192,7 @@
 | Mask | 上顔/下顔の肌色比率から算出（高いほどマスク疑い） | 値 **>** 閾値 → 除外 |
 | Glasses | 目周辺エッジと額エッジの比（高いほど眼鏡疑い） | 値 **>** 閾値 → 除外 |
 
-**引数（0＝フィルタ無効）**: `--pitch_percentile`, `--symmetry_percentile`, `--y_diff_percentile`, `--mouth_open_percentile`, `--eyebrow_eye_percentile_low` / `--eyebrow_eye_percentile_high`, `--sharpness_percentile_low` / `--sharpness_percentile_high`, `--mean_brightness_percentile_low`, `--face_size_percentile_low` / `--face_size_percentile_high`, `--aspect_ratio_cutoff`, `--retouching_percentile`, `--mask_percentile`, `--glasses_percentile`, `--grayscale`, `--class_internal_cap_rank`（**第1・第3段**のクラス内バケツ上限＝「N 番目に多い枚数」。既定 **2**）, `--skip_class_balance`（**中段**のクラス間均衡のみスキップ。第1・第3段のクラス内 N 位は実行）。  
+**引数（0＝フィルタ無効）**: `--pitch_percentile`, …, `--class_internal_cap_mode`（**第1・第3段**。既定 **`min`**＝クラス内最少人物枚数に揃える。`rank` で N 位上限）, `--class_internal_cap_rank`（`mode=rank` 時のみ。例 **2**＝2位上限）, `--skip_class_balance`（**中段**のクラス間均衡のみスキップ）。  
 **出力**: `preprocessed_multitask/train/`, `preprocessed_multitask/validation/`, `preprocessed_multitask/test/`。これが `train_sequential.py` の直接の入力。
 
 ---
